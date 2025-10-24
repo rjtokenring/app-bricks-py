@@ -1,0 +1,15 @@
+# EI_KEYWORD_SPOTTING_MODEL = path to the model file
+# CUSTOM_MODEL_PATH = path to the custom model directory
+services:
+  vosk-model-runner:
+    image: ${DOCKER_REGISTRY_BASE:-ghcr.io/arduino/}app-bricks/vosk-model-runner:0.4.5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:7777:7777
+    volumes:
+      - "${CUSTOM_MODEL_PATH:-/home/arduino/.arduino-bricks/vosk-models}:${CUSTOM_MODEL_PATH:-/home/arduino/.arduino-bricks/vosk-models}"
+

@@ -1,0 +1,11 @@
+id: arduino:lightweight_speech_to_text
+name: Lightweight Speech-to-Text
+description: |
+  Brick for Lightweight Speech-to-Text using VOSK model.
+  It comes with pre-loaded en-US voice recognition model.
+  You can also upload/configure other voice language.
+category: audio
+required_devices:
+  - microphone
+requires_container: true
+requires_model: false
