@@ -80,6 +80,15 @@ class ABCNotationLoader:
                     metadata["composer"] = line[2:].strip()
                 elif line.startswith("R:"):
                     metadata["rhythm"] = line[2:].strip()
+            elif line.startswith("%%transpose"):
+                # Handle transpose directive if needed
+                matched = re.match(r"%%transpose\s+(-?\d+)", line)
+                if matched:
+                    # only octave transposition is supported
+                    octaves = int(matched.group(1)) / 12
+                    if octaves + default_octave < 0:
+                        octaves = 0
+                    metadata["transpose"] = int(octaves)
             elif not line.startswith("%") and line:
                 music_lines.append(line)
 
@@ -126,6 +135,8 @@ class ABCNotationLoader:
             logger.info(f"Playing: {metadata['title']}")
         logger.info(f"BPM: {bpm}, Beat Unit Fraction: {beat_unit_fraction:.3f}, Default L: {default_unit_fraction:.3f}")
         logger.info(f"Duration of 1 beat: {duration_of_beat_unit:.3f}s. Default L: Duration: {default_duration_in_seconds:.3f}s")
+        if "transpose" in metadata:
+            logger.info(f"Transposing by {metadata['transpose']} octaves. Target default octave: {default_octave + metadata['transpose']}")
 
         # --- 5. Parse Music Lines ---
         music_string = " ".join(music_lines)
@@ -151,6 +162,8 @@ class ABCNotationLoader:
             rest = token[1:]
 
             octave = default_octave
+            if "transpose" in metadata:
+                octave += metadata["transpose"]
             if note_char.islower():
                 octave = octave + 1
                 note_char = note_char.upper()
