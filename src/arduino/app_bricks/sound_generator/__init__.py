@@ -245,6 +245,62 @@ class SoundGenerator:
             return None
         return self._notes.get(note.strip().upper())
 
+    def play_polyphonic(self, notes: list[list[tuple[str, float]]], as_tone: bool = False, volume: float = None):
+        """
+        Play multiple sequences of musical notes simultaneously (poliphony).
+        It is possible to play multi track music by providing a list of sequences,
+        where each sequence is a list of tuples (note, duration).
+        Duration is in notes fractions (e.g., 1/4 for quarter note).
+        Args:
+            notes (list[list[tuple[str, float]]]): List of sequences, each sequence is a list of tuples (note, duration).
+            as_tone (bool): If True, play as tones, considering duration in seconds
+            volume (float, optional): Volume level (0.0 to 1.0). If None, uses master volume.
+        """
+        if volume is None:
+            volume = self._master_volume
+
+        # Multi track mixing
+        sequences_data = []
+        base_frequency = None
+        for sequence in notes:
+            sequence_waves = []
+            for note, duration in sequence:
+                frequency = self._get_note(note)
+                if frequency >= 0.0:
+                    if base_frequency is None:
+                        base_frequency = frequency
+                    if as_tone == False:
+                        duration = self._note_duration(duration)
+                    data = self._wave_gen.generate_block(float(frequency), duration, volume)
+                    sequence_waves.append(data)
+                else:
+                    continue
+            if len(sequence_waves) > 0:
+                single_track_data = np.concatenate(sequence_waves)
+                sequences_data.append(single_track_data)
+
+        if len(sequences_data) == 0:
+            return
+
+        # Mix sequences - align lengths
+        max_length = max(len(seq) for seq in sequences_data)
+        # Pad shorter sequences with zeros
+        for i in range(len(sequences_data)):
+            seq = sequences_data[i]
+            if len(seq) < max_length:
+                padding = np.zeros(max_length - len(seq), dtype=np.float32)
+                sequences_data[i] = np.concatenate((seq, padding))
+
+        # Sum all sequences
+        mixed = np.sum(sequences_data, axis=0, dtype=np.float32)
+        mixed /= np.max(np.abs(mixed))  # Normalize to prevent clipping
+        blk = mixed.astype(np.float32)
+        blk = self._apply_sound_effects(blk, base_frequency)
+        try:
+            self._output_device.play(blk, block_on_queue=False)
+        except Exception as e:
+            print(f"Error playing multiple sequences: {e}")
+
     def play_chord(self, notes: list[str], note_duration: float | str = 1 / 4, volume: float = None):
         """
         Play a chord consisting of multiple musical notes simultaneously for a specified duration and volume.
