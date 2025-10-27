@@ -44,6 +44,11 @@ async def websocket_endpoint(websocket: WebSocket):
             # Wait for a message from the client
             data = await websocket.receive()
 
+            if "type" in data and data["type"] == "websocket.disconnect":
+                logger.info("Client disconnected")
+                await websocket.close()
+                return
+
             # Handle text messages (e.g., config)
             if "text" in data:
                 try:
@@ -74,7 +79,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
             # Handle binary audio frames
-            if "bytes" in data:
+            elif "bytes" in data:
                 audio_bytes = data["bytes"]
                 if not audio_bytes:
                     continue
@@ -98,7 +103,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 logger.warning("Unknown message type from client.")
 
     except (WebSocketDisconnect, KeyboardInterrupt):
-        print("Client disconnected")
         await websocket.close()
         logger.info(f"Client cleanup complete.")
     except Exception as e:
