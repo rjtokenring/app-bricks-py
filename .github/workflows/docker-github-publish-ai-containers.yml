@@ -26,7 +26,10 @@ jobs:
           - dockerfile: ./containers/ei-models-runner/Dockerfile
             context: ./containers/ei-models-runner
             image: /app-bricks/ei-models-runner
-      max-parallel: 1
+          - dockerfile: ./containers/lightweight-asr-runner/Dockerfile
+            context: ./containers/lightweight-asr-runner
+            image: /app-bricks/lightweight-asr-runner
+      max-parallel: 2
 
     steps:
       - name: Log into destination image registry ${{ env.GHCR_REGISTRY }}

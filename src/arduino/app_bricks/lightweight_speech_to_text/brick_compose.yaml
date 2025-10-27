@@ -1,8 +1,6 @@
-# EI_KEYWORD_SPOTTING_MODEL = path to the model file
-# CUSTOM_MODEL_PATH = path to the custom model directory
 services:
   vosk-model-runner:
-    image: ${DOCKER_REGISTRY_BASE:-ghcr.io/arduino/}app-bricks/vosk-model-runner:0.4.5
+    image: ${DOCKER_REGISTRY_BASE:-ghcr.io/arduino/}app-bricks/lightweight-asr-runner:dev-latest
     logging:
       driver: "json-file"
       options:
@@ -11,5 +9,5 @@ services:
     ports:
       - ${BIND_ADDRESS:-127.0.0.1}:7777:7777
     volumes:
-      - "${CUSTOM_MODEL_PATH:-/home/arduino/.arduino-bricks/vosk-models}:${CUSTOM_MODEL_PATH:-/home/arduino/.arduino-bricks/vosk-models}"
+      - /home/arduino/.arduino-bricks/lightweight-speech-to-text-models:/home/arduino/.arduino-bricks/lightweight-speech-to-text-models}"
 

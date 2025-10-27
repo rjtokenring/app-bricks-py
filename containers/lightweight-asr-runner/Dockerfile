@@ -13,15 +13,18 @@ RUN pip install --no-cache-dir -r /app/requirements.txt; \
     pip cache purge; \
     apt-get update -y; \
     apt-get install --no-install-recommends -y unzip; \
-    apt-get autoclean -y; \
-    apt-get autoremove -y; \
-    apt-get dist-clean; \
     mkdirs /home/app/models; \
+    # download Vosk small English US model as default STT model
     wget -O /home/app/models/vosk-model-small-en-us-0.15.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip; \
     cd /home/app/models && unzip vosk-model-small-en-us-0.15.zip && rm vosk-model-small-en-us-0.15.zip; \
     # precompile python files to .pyc to speed up startup time
     python -m compileall /usr/local/bin; \
-    python -m compileall /usr/local/lib
+    python -m compileall /usr/local/lib; \
+    # clean up apt cache and unnecessary files/packages
+    apt-get purge unzip -y; \
+    apt-get autoclean -y; \
+    apt-get autoremove -y; \
+    apt-get dist-clean
 
 USER arduino
 
