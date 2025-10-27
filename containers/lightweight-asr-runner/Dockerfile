@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
+# Manual build args: docker buildx build --build-arg REGISTRY=ghcr.io/arduino/ --platform linux/arm64 -t lightweight-asr-runner:latest .
+
 ARG REGISTRY
 ARG BASE_IMAGE_VERSION=latest
 FROM ${REGISTRY}app-bricks/python-base:${BASE_IMAGE_VERSION}
