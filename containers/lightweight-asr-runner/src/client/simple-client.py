@@ -5,7 +5,7 @@ from arduino.app_peripherals.microphone import Microphone
 ws = websocket.WebSocket()
 ws.connect("ws://localhost:7777/ws", ping_interval=10, ping_timeout=10)
 
-#websocket.enableTrace(True)
+# websocket.enableTrace(True)
 
 # Send config first
 ws.send(json.dumps({"config": {"stream_partial": True}}))
@@ -20,10 +20,10 @@ try:
             continue
 
         ws.send_binary(chunk.tobytes())
-        rec=ws.recv()
+        rec = ws.recv()
         if "noop" in rec:
             continue
-        print(rec)        
+        print(rec)
 
 except KeyboardInterrupt:
     print("\nStopping loop...")
@@ -31,4 +31,3 @@ except KeyboardInterrupt:
 
 mic.stop()
 ws.close()
-

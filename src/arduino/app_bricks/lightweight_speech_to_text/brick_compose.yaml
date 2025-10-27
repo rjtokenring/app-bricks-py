@@ -9,5 +9,5 @@ services:
     ports:
       - ${BIND_ADDRESS:-127.0.0.1}:7777:7777
     volumes:
-      - /home/arduino/.arduino-bricks/lightweight-speech-to-text-models:/home/arduino/.arduino-bricks/lightweight-speech-to-text-models}"
+      - /home/arduino/.arduino-bricks/lightweight-speech-to-text-models:/home/app/custom-models}"
 

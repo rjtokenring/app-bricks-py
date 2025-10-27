@@ -2,35 +2,42 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
 from vosk import Model, KaldiRecognizer
-import sys
-import logging
+import threading
+from log import load_logger
 import json
 
 # ---------------- Logging ----------------
-logger = logging.getLogger("vosk-runner")
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler(sys.stdout)
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
+logger = load_logger()
 
 # ---------------- Configuration ----------------
+DEFAULT_BITRATE = 16000
 SERVER_BIND_ADDRESS = "0.0.0.0"
 SERVER_BIND_PORT = 7777
-MODEL_PATH = "models/vosk-model-small-en-us-0.15"
+MODEL_PATH = "/home/app/models/vosk-model-small-en-us-0.15"
+CUSTOM_MODEL_PATH = "/home/app/custom-models"
 
 # ---------------- Load Model ----------------
-logger.info("Loading Vosk model...")
+logger.info("Loading default Vosk model...")
 model = Model(MODEL_PATH)
 logger.info("Model loaded.")
 
 app = FastAPI()
 
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    print("Client connected")
-    rec = KaldiRecognizer(model, 16000)
+
+    logger.info(f"Client connected: {websocket.client}")
+    rec_lock = threading.Lock()
+    with rec_lock:
+        # Load default model
+        try:
+            rec = KaldiRecognizer(model, DEFAULT_BITRATE)
+        except Exception as e:
+            logger.error(f"Failed to load custom model from {CUSTOM_MODEL_PATH}: {e}")
+            return
+
     try:
         last_partial = ""
         while True:
@@ -42,10 +49,26 @@ async def websocket_endpoint(websocket: WebSocket):
                 try:
                     msg = json.loads(data["text"])
                     if "config" in msg:
+                        custom_model = msg["config"].get("custom_model", None)
+                        if custom_model is not None and custom_model != "":
+                            try:
+                                logger.info(f"Loading custom model from: {CUSTOM_MODEL_PATH}/{custom_model}")
+                                custom_model_path = f"{CUSTOM_MODEL_PATH}/{custom_model}"
+                                custom_vosk_model = Model(custom_model_path)
+                                with rec_lock:
+                                    rec = KaldiRecognizer(custom_vosk_model, DEFAULT_BITRATE)
+                                    logger.info(f"Custom model {custom_model} loaded successfully.")
+                            except Exception as e:
+                                logger.error(f"Failed to load custom model: {e}")
+                                await websocket.send_text(json.dumps({"event": "error", "message": f"Failed to load custom model: {e}"}))
+                                continue
+                        else:
+                            # Revert to default model
+                            logger.info("Reverting to default model.")
+                            rec = KaldiRecognizer(model, DEFAULT_BITRATE)
+
                         stream_partial = bool(msg["config"].get("stream_partial", True))
-                        await websocket.send_text(json.dumps({"event":  "info", "message": "config_updated"}))
-                    else:
-                        await websocket.send_text(json.dumps({"event": "echo", "message": f"{data}"}))
+                        await websocket.send_text(json.dumps({"event": "info", "message": "configuration updated successfully"}))
                 except Exception as e:
                     logger.warning(f"Invalid text frame: {e}")
                 continue
@@ -74,13 +97,13 @@ async def websocket_endpoint(websocket: WebSocket):
             else:
                 logger.warning("Unknown message type from client.")
 
-
     except (WebSocketDisconnect, KeyboardInterrupt):
         print("Client disconnected")
         await websocket.close()
         logger.info(f"Client cleanup complete.")
     except Exception as e:
         logger.exception(f"Error in processing loop: {e}")
-        
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host=SERVER_BIND_ADDRESS, port=SERVER_BIND_PORT)
