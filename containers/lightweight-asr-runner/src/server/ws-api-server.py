@@ -13,8 +13,8 @@ logger = load_logger()
 DEFAULT_BITRATE = 16000
 SERVER_BIND_ADDRESS = "0.0.0.0"
 SERVER_BIND_PORT = 7777
-MODEL_PATH = "/home/app/models/vosk-model-small-en-us-0.15"
-CUSTOM_MODEL_PATH = "/home/app/custom-models"
+MODEL_PATH = "/home/arduino/models/vosk-model-small-en-us-0.15"
+CUSTOM_MODEL_PATH = "/home/arduino/custom-models"
 
 # ---------------- Load Model ----------------
 logger.info("Loading default Vosk model...")
