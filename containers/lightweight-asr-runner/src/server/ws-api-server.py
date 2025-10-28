@@ -46,7 +46,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
             if "type" in data and data["type"] == "websocket.disconnect":
                 logger.info("Client disconnected")
-                await websocket.close()
                 return
 
             # Handle text messages (e.g., config)
@@ -107,6 +106,7 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.info(f"Client cleanup complete.")
     except Exception as e:
         logger.exception(f"Error in processing loop: {e}")
+        await websocket.close()
 
 
 if __name__ == "__main__":
