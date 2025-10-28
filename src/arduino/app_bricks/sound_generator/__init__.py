@@ -5,6 +5,7 @@
 from arduino.app_utils import WaveGenerator, brick
 from arduino.app_peripherals.speaker import Speaker
 import threading
+from typing import Iterable
 import numpy as np
 
 from .effects import *
@@ -12,7 +13,7 @@ from .loaders import ABCNotationLoader
 
 
 @brick
-class SoundGenerator:
+class SoundGeneratorStreamer:
     SAMPLE_RATE = 16000
     A4_FREQUENCY = 440.0
 
@@ -53,7 +54,6 @@ class SoundGenerator:
 
     def __init__(
         self,
-        output_device: Speaker = None,
         bpm: int = 120,
         time_signature: tuple = (4, 4),
         octaves: int = 8,
@@ -61,9 +61,8 @@ class SoundGenerator:
         master_volume: float = 1.0,
         sound_effects: list = None,
     ):
-        """Initialize the SoundGenerator.
+        """Initialize the SoundGeneratorStreamer. Generates sound blocks for streaming, without internal playback.
         Args:
-            output_device (Speaker, optional): The output device to play sound through.
             wave_form (str): The type of wave form to generate. Supported values
                 are "sine" (default), "square", "triangle" and "sawtooth".
             bpm (int): The tempo in beats per minute for note duration calculations.
@@ -79,12 +78,6 @@ class SoundGenerator:
         self.time_signature = time_signature
         self._master_volume = master_volume
         self._sound_effects = sound_effects
-        if output_device is None:
-            self._self_created_device = True
-            self._output_device = Speaker(sample_rate=self.SAMPLE_RATE, format="FLOAT_LE")
-        else:
-            self._self_created_device = False
-            self._output_device = output_device
 
         self._cfg_lock = threading.Lock()
         self._notes = {}
@@ -93,12 +86,10 @@ class SoundGenerator:
             self._notes.update(notes)
 
     def start(self):
-        if self._self_created_device:
-            self._output_device.start(notify_if_started=False)
+        pass
 
     def stop(self):
-        if self._self_created_device:
-            self._output_device.stop()
+        pass
 
     def set_master_volume(self, volume: float):
         """
@@ -245,7 +236,11 @@ class SoundGenerator:
             return None
         return self._notes.get(note.strip().upper())
 
-    def play_polyphonic(self, notes: list[list[tuple[str, float]]], as_tone: bool = False, volume: float = None):
+    def _to_bytes(self, signal: np.ndarray) -> bytes:
+        # Format: "FLOAT_LE" -> (ALSA: "PCM_FORMAT_FLOAT_LE", np.float32),
+        return signal.astype(np.float32).tobytes()
+
+    def play_polyphonic(self, notes: list[list[tuple[str, float]]], as_tone: bool = False, volume: float = None) -> bytes:
         """
         Play multiple sequences of musical notes simultaneously (poliphony).
         It is possible to play multi track music by providing a list of sequences,
@@ -255,6 +250,8 @@ class SoundGenerator:
             notes (list[list[tuple[str, float]]]): List of sequences, each sequence is a list of tuples (note, duration).
             as_tone (bool): If True, play as tones, considering duration in seconds
             volume (float, optional): Volume level (0.0 to 1.0). If None, uses master volume.
+        Returns:
+            bytes: The audio block of the mixed sequences (float32).
         """
         if volume is None:
             volume = self._master_volume
@@ -296,18 +293,17 @@ class SoundGenerator:
         mixed /= np.max(np.abs(mixed))  # Normalize to prevent clipping
         blk = mixed.astype(np.float32)
         blk = self._apply_sound_effects(blk, base_frequency)
-        try:
-            self._output_device.play(blk, block_on_queue=False)
-        except Exception as e:
-            print(f"Error playing multiple sequences: {e}")
+        return self._to_bytes(blk)
 
-    def play_chord(self, notes: list[str], note_duration: float | str = 1 / 4, volume: float = None):
+    def play_chord(self, notes: list[str], note_duration: float | str = 1 / 4, volume: float = None) -> bytes:
         """
         Play a chord consisting of multiple musical notes simultaneously for a specified duration and volume.
         Args:
             notes (list[str]): List of musical notes to play (e.g., ['A4', 'C#5', 'E5']).
             note_duration (float | str): Duration of the chord as a float (like 1/4, 1/8) or a symbol ('W', 'H', 'Q', etc.).
             volume (float, optional): Volume level (0.0 to 1.0). If None, uses master volume.
+        Returns:
+            bytes: The audio block of the mixed sequences (float32).
         """
         duration = self._note_duration(note_duration)
         if len(notes) == 1:
@@ -333,6 +329,158 @@ class SoundGenerator:
         chord /= np.max(np.abs(chord))  # Normalize to prevent clipping
         blk = chord.astype(np.float32)
         blk = self._apply_sound_effects(blk, base_frequency)
+        return self._to_bytes(blk)
+
+    def play(self, note: str, note_duration: float | str = 1 / 4, volume: float = None) -> bytes:
+        """
+        Play a musical note for a specified duration and volume.
+        Args:
+            note (str): The musical note to play (e.g., 'A4', 'C#5', 'REST').
+            note_duration (float | str): Duration of the note as a float (like 1/4, 1/8) or a symbol ('W', 'H', 'Q', etc.).
+            volume (float, optional): Volume level (0.0 to 1.0). If None, uses master volume.
+        Returns:
+            bytes: The audio block of the played note (float32).
+        """
+        duration = self._note_duration(note_duration)
+        frequency = self._get_note(note)
+        if frequency is not None and frequency >= 0.0:
+            if volume is None:
+                volume = self._master_volume
+            data = self._wave_gen.generate_block(float(frequency), duration, volume)
+            data = self._apply_sound_effects(data, frequency)
+            return self._to_bytes(data)
+
+    def play_tone(self, note: str, duration: float = 0.25, volume: float = None) -> bytes:
+        """
+        Play a musical note for a specified duration and volume.
+        Args:
+            note (str): The musical note to play (e.g., 'A4', 'C#5', 'REST').
+            duration (float): Duration of the note as a float in seconds.
+            volume (float, optional): Volume level (0.0 to 1.0). If None, uses master volume.
+        Returns:
+            bytes: The audio block of the played note (float32).
+        """
+        frequency = self._get_note(note)
+        if frequency is not None and frequency >= 0.0 and duration > 0.0:
+            if volume is None:
+                volume = self._master_volume
+            data = self._wave_gen.generate_block(float(frequency), duration, volume)
+            data = self._apply_sound_effects(data, frequency)
+            return self._to_bytes(data)
+
+    def play_abc(self, abc_string: str, volume: float = None) -> Iterable[bytes]:
+        """
+        Play a sequence of musical notes defined in ABC notation.
+        Args:
+            abc_string (str): ABC notation string defining the sequence of notes.
+            volume (float, optional): Volume level (0.0 to 1.0). If None, uses master volume.
+        Returns:
+            Iterable[bytes]: An iterable yielding the audio blocks of the played notes (float32).
+        """
+        if not abc_string or abc_string.strip() == "":
+            return
+        if volume is None:
+            volume = self._master_volume
+        metadata, notes = ABCNotationLoader.parse_abc_notation(abc_string)
+        for note, duration in notes:
+            frequency = self._get_note(note)
+            if frequency is not None and frequency >= 0.0:
+                data = self._wave_gen.generate_block(float(frequency), duration, volume)
+                data = self._apply_sound_effects(data, frequency)
+                yield self._to_bytes(data)
+
+
+@brick
+class SoundGenerator(SoundGeneratorStreamer):
+    def __init__(
+        self,
+        output_device: Speaker = None,
+        bpm: int = 120,
+        time_signature: tuple = (4, 4),
+        octaves: int = 8,
+        wave_form: str = "sine",
+        master_volume: float = 1.0,
+        sound_effects: list = None,
+    ):
+        """Initialize the SoundGenerator.
+        Args:
+            output_device (Speaker, optional): The output device to play sound through.
+            wave_form (str): The type of wave form to generate. Supported values
+                are "sine" (default), "square", "triangle" and "sawtooth".
+            bpm (int): The tempo in beats per minute for note duration calculations.
+            master_volume (float): The master volume level (0.0 to 1.0).
+            octaves (int): Number of octaves to generate notes for (starting from octave
+                0 up to octaves-1).
+            sound_effects (list, optional): List of sound effect instances to apply to the audio
+                signal (e.g., [SoundEffect.adsr()]). See SoundEffect class for available effects.
+        """
+
+        super().__init__(
+            bpm=bpm,
+            time_signature=time_signature,
+            octaves=octaves,
+            wave_form=wave_form,
+            master_volume=master_volume,
+            sound_effects=sound_effects,
+        )
+
+        if output_device is None:
+            self._self_created_device = True
+            self._output_device = Speaker(sample_rate=self.SAMPLE_RATE, format="FLOAT_LE")
+        else:
+            self._self_created_device = False
+            self._output_device = output_device
+
+    def start(self):
+        if self._self_created_device:
+            self._output_device.start(notify_if_started=False)
+
+    def stop(self):
+        if self._self_created_device:
+            self._output_device.stop()
+
+    def set_master_volume(self, volume: float):
+        """
+        Set the master volume level.
+        Args:
+            volume (float): Volume level (0.0 to 1.0).
+        """
+        super().set_master_volume(volume)
+
+    def set_effects(self, effects: list):
+        """
+        Set the list of sound effects to apply to the audio signal.
+        Args:
+            effects (list): List of sound effect instances (e.g., [SoundEffect.adsr()]).
+        """
+        super().set_effects(effects)
+
+    def play_polyphonic(self, notes: list[list[tuple[str, float]]], as_tone: bool = False, volume: float = None):
+        """
+        Play multiple sequences of musical notes simultaneously (poliphony).
+        It is possible to play multi track music by providing a list of sequences,
+        where each sequence is a list of tuples (note, duration).
+        Duration is in notes fractions (e.g., 1/4 for quarter note).
+        Args:
+            notes (list[list[tuple[str, float]]]): List of sequences, each sequence is a list of tuples (note, duration).
+            as_tone (bool): If True, play as tones, considering duration in seconds
+            volume (float, optional): Volume level (0.0 to 1.0). If None, uses master volume.
+        """
+        blk = super().play_polyphonic(notes, as_tone, volume)
+        try:
+            self._output_device.play(blk, block_on_queue=False)
+        except Exception as e:
+            print(f"Error playing multiple sequences: {e}")
+
+    def play_chord(self, notes: list[str], note_duration: float | str = 1 / 4, volume: float = None):
+        """
+        Play a chord consisting of multiple musical notes simultaneously for a specified duration and volume.
+        Args:
+            notes (list[str]): List of musical notes to play (e.g., ['A4', 'C#5', 'E5']).
+            note_duration (float | str): Duration of the chord as a float (like 1/4, 1/8) or a symbol ('W', 'H', 'Q', etc.).
+            volume (float, optional): Volume level (0.0 to 1.0). If None, uses master volume.
+        """
+        blk = super().play_chord(notes, note_duration, volume)
         try:
             self._output_device.play(blk, block_on_queue=False)
         except Exception as e:
@@ -346,14 +494,8 @@ class SoundGenerator:
             note_duration (float | str): Duration of the note as a float (like 1/4, 1/8) or a symbol ('W', 'H', 'Q', etc.).
             volume (float, optional): Volume level (0.0 to 1.0). If None, uses master volume.
         """
-        duration = self._note_duration(note_duration)
-        frequency = self._get_note(note)
-        if frequency is not None and frequency >= 0.0:
-            if volume is None:
-                volume = self._master_volume
-            data = self._wave_gen.generate_block(float(frequency), duration, volume)
-            data = self._apply_sound_effects(data, frequency)
-            self._output_device.play(data, block_on_queue=False)
+        data = super().play(note, note_duration, volume)
+        self._output_device.play(data, block_on_queue=False)
 
     def play_tone(self, note: str, duration: float = 0.25, volume: float = None):
         """
@@ -363,13 +505,8 @@ class SoundGenerator:
             duration (float): Duration of the note as a float in seconds.
             volume (float, optional): Volume level (0.0 to 1.0). If None, uses master volume.
         """
-        frequency = self._get_note(note)
-        if frequency is not None and frequency >= 0.0 and duration > 0.0:
-            if volume is None:
-                volume = self._master_volume
-            data = self._wave_gen.generate_block(float(frequency), duration, volume)
-            data = self._apply_sound_effects(data, frequency)
-            self._output_device.play(data, block_on_queue=False)
+        data = super().play_tone(note, duration, volume)
+        self._output_device.play(data, block_on_queue=False)
 
     def play_abc(self, abc_string: str, volume: float = None):
         """
@@ -380,12 +517,6 @@ class SoundGenerator:
         """
         if not abc_string or abc_string.strip() == "":
             return
-        if volume is None:
-            volume = self._master_volume
-        metadata, notes = ABCNotationLoader.parse_abc_notation(abc_string)
-        for note, duration in notes:
-            frequency = self._get_note(note)
-            if frequency is not None and frequency >= 0.0:
-                data = self._wave_gen.generate_block(float(frequency), duration, volume)
-                data = self._apply_sound_effects(data, frequency)
-                self._output_device.play(data, block_on_queue=False)
+        player = super().play_abc(abc_string, volume)
+        for data in player:
+            self._output_device.play(data, block_on_queue=False)
