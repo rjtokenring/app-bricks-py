@@ -73,7 +73,12 @@ class VideoObjectTracking(VideoObjectDetection):
         # Counter for tracked objects
         self._counter_lock = threading.Lock()
         self._object_counters = Counter()
+        # Map of recent object IDs to their last seen positions (x, y)
         self._recent_objects = LRUDict(maxsize=150)  # To track recent object IDs and their labels
+
+        # Crossing line coordinates
+        self._line_coordinates = (0, 0, 0, 0)  # x1, y1, x2, y2
+        self._crossing_line_object_counters = Counter()
 
     def _is_label_enabled(self, label: str) -> bool:
         """Check if a label is enabled for tracking.
@@ -87,19 +92,68 @@ class VideoObjectTracking(VideoObjectDetection):
             return True
         return label in self._labels_to_track
 
-    def _record_object(self, detected_object: str, object_id: float):
-        """Record that an object with a specific label and ID has been seen."""
+    def _record_object(self, detected_object_label: str, object_id: float, x: int, y: int):
+        """Record that an object with a specific label and ID has been seen.
 
-        if not self._is_label_enabled(detected_object):
+        Args:
+            detected_object_label (str): The label of the detected object.
+            object_id (float): The unique ID of the detected object.
+            x (int): The x-coordinate of the detected object.
+            y (int): The y-coordinate of the detected object.
+        """
+
+        if not self._is_label_enabled(detected_object_label):
+            # Discard if the label is not enabled for tracking
             return
+
         with self._counter_lock:
             if object_id in self._recent_objects:
                 return  # Already recorded recently
 
-            self._recent_objects[object_id] = detected_object
-            self._object_counters[detected_object] += 1
+            self._recent_objects[object_id] = (x, y)
+            self._object_counters[detected_object_label] += 1
 
-    def get_all_identified_objects(self) -> dict:
+    def _record_line_crossing(self, detected_object_label: str, object_id: float, x: int, y: int):
+        """Record that an object with a specific label and ID has crossed the line.
+
+        Args:
+            detected_object_label (str): The label of the detected object.
+            object_id (float): The unique ID of the detected object.
+            x (int): The x-coordinate of the detected object.
+            y (int): The y-coordinate of the detected object.
+        """
+
+        if not self._is_label_enabled(detected_object_label):
+            # Discard if the label is not enabled for tracking
+            return
+
+        with self._counter_lock:
+            if object_id in self._recent_objects:
+                last_x, last_y = self._recent_objects[object_id]
+                x1, y1, x2, y2 = self._line_coordinates
+
+                # Update the last seen position
+                self._recent_objects[object_id] = (x, y)
+
+                # Simple line crossing detection (horizontal line)
+                if (last_y < y1 and y >= y1) or (last_y > y1 and y <= y1):
+                    self._crossing_line_object_counters[detected_object_label] += 1
+                # Simple line crossing detection (vertical line)
+                elif (last_x < x1 and x >= x1) or (last_x > x1 and x <= x1):
+                    self._crossing_line_object_counters[detected_object_label] += 1
+                else:
+                    print("Diagonal line crossing - check if there is a cross.")
+                    if (x2 - x1) != 0:
+                        slope = (y2 - y1) / (x2 - x1)
+                        intercept = y1 - slope * x1
+                        line_y_at_last_x = slope * last_x + intercept
+                        line_y_at_current_x = slope * x + intercept
+                        if (last_y < line_y_at_last_x and y >= line_y_at_current_x) or (last_y > line_y_at_last_x and y <= line_y_at_current_x):
+                            self._crossing_line_object_counters[detected_object_label] += 1
+                    else:
+                        return
+
+    def get_unique_objects_count(self) -> dict:
         """Get all identified object types and their counts since the last reset.
             This includes all distinguished objects seens, based on their unique IDs.
 
@@ -109,11 +163,32 @@ class VideoObjectTracking(VideoObjectDetection):
         with self._counter_lock:
             return dict(self._object_counters)
 
+    def get_line_crossing_counts(self) -> int:
+        """Get the count of a specific identified object type since the last reset.
+            This includes all distinguished objects seens, based on their unique IDs.
+
+        Args:
+            label (str): The label of the object to get the count for.
+
+        Returns:
+            int: The count of the specified object type.
+        """
+        with self._counter_lock:
+            return dict(self._crossing_line_object_counters)
+
+    def set_crossing_line_coordinates(self, x1: int, y1: int, x2: int, y2: int):
+        """Set the coordinates of the line for counting objects crossing it."""
+        with self._counter_lock:
+            self._line_coordinates = (x1, y1, x2, y2)
+
+        self.reset_counters()
+
     def reset_counters(self):
         """Reset the counts of tracked objects."""
         with self._counter_lock:
             self._object_counters.clear()
             self._recent_objects.clear()
+            self._crossing_line_object_counters.clear()
 
     def on_detect(self, object: str, callback: Callable[[], None]):
         """Register a callback invoked when a **specific label** is detected.
@@ -246,7 +321,7 @@ class VideoObjectTracking(VideoObjectDetection):
                     detection_details = {"object_id": object_id, "bounding_box_xyxy": xyxy_bbox}
                     detections[detected_object] = detection_details
 
-                    self._record_object(detected_object=detected_object, object_id=object_id)
+                    self._record_object(detected_object_label=detected_object, object_id=object_id, x=box.get("x", 0), y=box.get("y", 0))
 
                     # Check if the class_id matches any registered handlers
                     super()._execute_handler(detection=detected_object, detection_details=detection_details)
