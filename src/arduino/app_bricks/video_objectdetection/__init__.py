@@ -297,12 +297,12 @@ class VideoObjectDetection:
         if self._model_info is None or self._model_info.thresholds is None or len(self._model_info.thresholds) == 0:
             raise RuntimeError("Model information is not available or does not support threshold override.")
 
-        # Get first threshold and extract id. Then override it with the new confidence value.
-        th = self._model_info.thresholds[0]
-        id = th["id"]
-        message = {"type": "threshold-override", "id": id, "key": "min_score", "value": value}
+        for th in self._model_info.thresholds:
+            if th.get("type") == "object_tracking":
+                id = th["id"]
+                message = {"type": "threshold-override", "id": id, "key": "min_score", "value": value}
 
-        logger.info(f"Overriding detection threshold. New confidence: {value}")
-        ws.send(json.dumps(message))
-        # Update local confidence value
-        self._confidence = value
+                logger.info(f"Overriding detection threshold. New confidence: {value}")
+                ws.send(json.dumps(message))
+                # Update local confidence value
+                self._confidence = value

@@ -52,7 +52,9 @@ class VideoObjectTracking(VideoObjectDetection):
       - Invokes per-label callbacks and/or a catch-all callback.
     """
 
-    def __init__(self, confidence: float = 0.3, debounce_sec: float = 0.0, labels_to_track: list[str] = None):
+    def __init__(
+        self, confidence: float = 0.3, keep_grace: int = 5, max_observations: int = 5, debounce_sec: float = 0.0, labels_to_track: list[str] = None
+    ):
         """Initialize the VideoObjectDetection class.
 
         Args:
@@ -65,6 +67,8 @@ class VideoObjectTracking(VideoObjectDetection):
         """
         super().__init__(confidence=confidence, debounce_sec=debounce_sec)
         self._labels_to_track = labels_to_track
+        self._max_observations = max_observations
+        self._keep_grace = keep_grace
 
         # Counter for tracked objects
         self._counter_lock = threading.Lock()
@@ -185,7 +189,7 @@ class VideoObjectTracking(VideoObjectDetection):
             try:
                 self._model_info = EdgeImpulseRunnerFacade.parse_model_info_message(jmsg)
                 if self._model_info and self._model_info.thresholds is not None:
-                    self._override_threshold(ws, self._confidence)
+                    self._override_thresholds(ws, self._confidence, self._max_observations, self._keep_grace)
 
             except Exception as e:
                 logger.error(f"Error parsing WS hello message: {e}")
@@ -240,14 +244,83 @@ class VideoObjectTracking(VideoObjectDetection):
             # Leave logging for unknown message types for debugging purposes
             logger.warning(f"Unknown message type: {jmsg.get('type')}")
 
-    def override_threshold(self, value: float):
+    def override_confidence(self, confidence: float):
         """Override the threshold for object detection model.
 
         Args:
-            value (float): The new value for the threshold in the range [0.0, 1.0].
+            confidence (float): The new value for the confidence threshold in the range [0.0, 1.0].
 
         Raises:
             TypeError: If the value is not a number.
             RuntimeError: If the model information is not available or does not support threshold override.
         """
-        super().override_threshold(value)
+        with connect(self._uri) as ws:
+            self._override_threshold(ws, confidence, self._max_observations, self._keep_grace)
+
+    def override_keep_grace(self, keep_grace: int):
+        """Override keep grace for object detection model.
+            Keep Grace: how many frames an object is kept if it disappears.
+
+        Args:
+            keep_grace (int): The new value for the keep grace.
+
+        Raises:
+            TypeError: If the value is not a number.
+        """
+        with connect(self._uri) as ws:
+            self._override_threshold(ws, self._confidence, self._max_observations, keep_grace)
+
+    def override_max_observations(self, max_observations: int):
+        """Override max observations for object detection model.
+            Max Observations: how many frames an object is kept if it disappears.
+
+        Args:
+            max_observations (int): The new value for the max observations.
+
+        Raises:
+            TypeError: If the value is not a number.
+            RuntimeError: If the model information is not available or does not support threshold override.
+        """
+        with connect(self._uri) as ws:
+            self._override_threshold(ws, self._confidence, max_observations, self._keep_grace)
+
+    def _override_thresholds(self, ws: ClientConnection, confidence: float, max_observations: int, keep_grace: int):
+        """Override the threshold for object detection model.
+
+        Args:
+            ws (ClientConnection): The WebSocket connection to send the message through.
+            confidence (float): The new value for the threshold.
+            max_observations (int): Maximum number of observations to consider.
+            keep_grace (int): Grace period to keep observations.
+
+        Raises:
+            TypeError: If the value is not a number.
+        """
+        if self._model_info is None or self._model_info.thresholds is None or len(self._model_info.thresholds) == 0:
+            raise RuntimeError("Model information is not available or does not support threshold override.")
+
+        for th in self._model_info.thresholds:
+            if th.get("type") == "object_detection":
+                id = th["id"]
+                message = {"type": "threshold-override", "id": id, "key": "min_score", "value": confidence}
+
+                logger.info(f"Overriding detection threshold. New confidence: {confidence}")
+                ws.send(json.dumps(message))
+                # Update local confidence value
+                self._confidence = confidence
+
+            if th.get("type") == "object_tracking":
+                id = th["id"]
+                message = {"type": "threshold-override", "id": id, "key": "max_observations", "value": max_observations}
+
+                logger.info(f"Overriding max observations. New max_observations: {max_observations}")
+                ws.send(json.dumps(message))
+                # Update local max observations value
+                self._max_observations = max_observations
+
+                message = {"type": "threshold-override", "id": id, "key": "keep_grace", "value": keep_grace}
+
+                logger.info(f"Overriding keep grace. New keep_grace: {keep_grace}")
+                ws.send(json.dumps(message))
+                # Update local keep grace value
+                self._keep_grace = keep_grace
