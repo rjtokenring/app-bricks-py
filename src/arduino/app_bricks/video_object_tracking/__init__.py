@@ -3,21 +3,45 @@
 # SPDX-License-Identifier: MPL-2.0
 
 from arduino.app_utils import brick, Logger
-from arduino.app_internal.core import load_brick_compose_file, resolve_address
+from arduino.app_bricks.video_objectdetection import VideoObjectDetection
 from arduino.app_internal.core import EdgeImpulseRunnerFacade
-import time
-import threading
 from typing import Callable
 from websockets.sync.client import connect, ClientConnection
 from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
 import json
-import inspect
+from collections import Counter, OrderedDict
+import threading
 
 logger = Logger("VideoObjectTracking")
 
 
+class LRUDict(OrderedDict):
+    """A dictionary-like object with a fixed size
+    that evicts the least recently used items.
+    """
+
+    def __init__(self, maxsize=128, *args, **kwargs):
+        self.maxsize = maxsize
+        super().__init__(*args, **kwargs)
+
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        self.move_to_end(key)
+        return value
+
+    def __setitem__(self, key, value):
+        if key in self:
+            self.move_to_end(key)
+
+        super().__setitem__(key, value)
+
+        if len(self) > self.maxsize:
+            # Evict the least recently used item (the first item)
+            self.popitem(last=False)
+
+
 @brick
-class VideoObjectTracking:
+class VideoObjectTracking(VideoObjectDetection):
     """Module for object tracking on a **live video stream** using a specified machine learning model.
 
     This brick:
@@ -28,36 +52,49 @@ class VideoObjectTracking:
       - Invokes per-label callbacks and/or a catch-all callback.
     """
 
-    ALL_HANDLERS_KEY = "__ALL"
-
-    def __init__(self):
+    def __init__(self, confidence: float = 0.3, debounce_sec: float = 0.0, labels_to_track: list[str] = None):
         """Initialize the VideoObjectDetection class.
 
         Args:
             confidence (float): Confidence level for detection. Default is 0.3 (30%).
             debounce_sec (float): Minimum seconds between repeated detections of the same object. Default is 0 seconds.
+            labels_to_track (list[str], optional): List of labels to track. If None, all labels are tracked.
 
         Raises:
             RuntimeError: If the host address could not be resolved.
         """
-        self._last_detected: dict[str, float] = {}
+        super().__init__(confidence=confidence, debounce_sec=debounce_sec)
+        self._labels_to_track = labels_to_track
 
-        self._handlers = {}  # Dictionary to hold handlers for different actions
-        self._handlers_lock = threading.Lock()
+        # Counter for tracked objects
+        self._counter_lock = threading.Lock()
+        self._object_counters = Counter()
+        self._recent_objects = LRUDict(maxsize=100)  # To track recent object IDs and their labels
 
-        self._is_running = threading.Event()
+    def _record_object(self, detected_object: str, object_id: float):
+        """Record that an object with a specific label and ID has been seen."""
 
-        infra = load_brick_compose_file(self.__class__)
-        for k, v in infra["services"].items():
-            self._host = k
-            break  # Only one service is expected
+        with self._counter_lock:
+            if object_id in self._recent_objects:
+                return  # Already recorded recently
 
-        self._host = resolve_address(self._host)
-        if not self._host:
-            raise RuntimeError("Host address could not be resolved. Please check your configuration.")
+            self._recent_objects[object_id] = detected_object
+            self._object_counters[detected_object] += 1
 
-        self._uri = f"ws://{self._host}:4912"
-        logger.info(f"[{self.__class__.__name__}] Host: {self._host} - URL: {self._uri}")
+    def get_tracked_objects(self) -> dict:
+        """Get the current counts of tracked objects by label.
+
+        Returns:
+            dict: A dictionary with labels as keys and their respective counts as values.
+        """
+        with self._counter_lock:
+            return dict(self._object_counters)
+
+    def reset_counters(self):
+        """Reset the counts of tracked objects."""
+        with self._counter_lock:
+            self._object_counters.clear()
+            self._recent_objects.clear()
 
     def on_detect(self, object: str, callback: Callable[[], None]):
         """Register a callback invoked when a **specific label** is detected.
@@ -70,16 +107,7 @@ class VideoObjectTracking:
             TypeError: If `callback` is not a function.
             ValueError: If `callback` accepts any parameters.
         """
-        if not inspect.isfunction(callback):
-            raise TypeError("Callback must be a callable function.")
-        sig_args = inspect.signature(callback).parameters
-        if len(sig_args) > 1:
-            raise ValueError("Callback must accept 0 or 1 dictionary argument")
-
-        with self._handlers_lock:
-            if object in self._handlers:
-                logger.warning(f"Handler for object '{object}' already exists. Overwriting.")
-            self._handlers[object] = callback
+        super().on_detect(object, callback)
 
     def on_detect_all(self, callback: Callable[[dict], None]):
         """Register a callback invoked for **every detection event**.
@@ -94,22 +122,15 @@ class VideoObjectTracking:
             TypeError: If `callback` is not a function.
             ValueError: If `callback` does not accept exactly one argument.
         """
-        if not inspect.isfunction(callback):
-            raise TypeError("Callback must be a callable function.")
-        sig_args = inspect.signature(callback).parameters
-        if len(sig_args) != 1:
-            raise ValueError("Callback must accept exactly one argument: the detected object.")
-
-        with self._handlers_lock:
-            self._handlers[self.ALL_HANDLERS_KEY] = callback
+        super().on_detect_all(callback)
 
     def start(self):
         """Start the video object detection process."""
-        self._is_running.set()
+        super().start()
 
     def stop(self):
         """Stop the video object detection process."""
-        self._is_running.clear()
+        super().stop()
 
     def execute(self):
         """Connect to the model runner and process messages until `stop` is called.
@@ -206,64 +227,18 @@ class VideoObjectTracking:
                     detection_details = {"object_id": object_id, "bounding_box_xyxy": xyxy_bbox}
                     detections[detected_object] = detection_details
 
+                    self._record_object(detected_object=detected_object, object_id=object_id)
+
                     # Check if the class_id matches any registered handlers
-                    self._execute_handler(detection=detected_object, detection_details=detection_details)
+                    super()._execute_handler(detection=detected_object, detection_details=detection_details)
 
                 if len(detections) > 0:
                     # If there are detections, invoke the all-detection handler
-                    self._execute_global_handler(detections=detections)
+                    super()._execute_global_handler(detections=detections)
 
         else:
             # Leave logging for unknown message types for debugging purposes
             logger.warning(f"Unknown message type: {jmsg.get('type')}")
-
-    def _execute_handler(self, detection: str, detection_details: dict):
-        """Execute the handler for the detected object if it exists.
-
-        Args:
-            detection (str): The label of the detected object.
-            detection_details (dict): Dictionary containing 'confidence' (the detection confidence)
-                and 'bounding_box_xyxy' (the detection bounding box coordinates).
-        """
-        now = time.time()
-        with self._handlers_lock:
-            handler = self._handlers.get(detection)
-            if handler:
-                last_time = self._last_detected.get(detection, 0)
-                if now - last_time >= self._debounce_sec:
-                    self._last_detected[detection] = now
-                    logger.debug(f"Detected object: {detection}, invoking handler.")
-                    sig_args = inspect.signature(handler).parameters
-                    if len(sig_args) == 0:
-                        handler()
-                    else:
-                        handler(detection_details)
-
-    def _execute_global_handler(self, detections: dict = None):
-        """Execute the global handler for the detected object if it exists.
-
-        Args:
-            detections (dict): The dictionary of detected objects and their details (e.g., confidence, bounding box).
-        """
-        now = time.time()
-        with self._handlers_lock:
-            handler = self._handlers.get(self.ALL_HANDLERS_KEY)
-            if handler:
-                last_time = self._last_detected.get(self.ALL_HANDLERS_KEY, 0)
-                if now - last_time >= self._debounce_sec:
-                    self._last_detected[self.ALL_HANDLERS_KEY] = now
-                    logger.debug("Detected object: __ALL, invoking handler.")
-                    sig_args = inspect.signature(handler).parameters
-                    if len(sig_args) == 0:
-                        handler()
-                    else:
-                        handler(detections)
-
-    def _send_ws_message(self, ws: ClientConnection, message: dict):
-        try:
-            ws.send(json.dumps(message))
-        except Exception as e:
-            logger.error(f"Failed to send message over WebSocket: {e}")
 
     def override_threshold(self, value: float):
         """Override the threshold for object detection model.
@@ -275,32 +250,4 @@ class VideoObjectTracking:
             TypeError: If the value is not a number.
             RuntimeError: If the model information is not available or does not support threshold override.
         """
-        with connect(self._uri) as ws:
-            self._override_threshold(ws, value)
-
-    def _override_threshold(self, ws: ClientConnection, value: float):
-        """Override the threshold for object detection model.
-
-        Args:
-            ws (ClientConnection): The WebSocket connection to send the message through.
-            value (float): The new value for the threshold.
-
-        Raises:
-            TypeError: If the value is not a number.
-            RuntimeError: If the model information is not available or does not support threshold override.
-        """
-        if not value or not isinstance(value, (int, float)):
-            raise TypeError("Invalid types for value.")
-
-        if self._model_info is None or self._model_info.thresholds is None or len(self._model_info.thresholds) == 0:
-            raise RuntimeError("Model information is not available or does not support threshold override.")
-
-        # Get first threshold and extract id. Then override it with the new confidence value.
-        th = self._model_info.thresholds[0]
-        id = th["id"]
-        message = {"type": "threshold-override", "id": id, "key": "min_score", "value": value}
-
-        logger.info(f"Overriding detection threshold. New confidence: {value}")
-        ws.send(json.dumps(message))
-        # Update local confidence value
-        self._confidence = value
+        super().override_threshold(value)
