@@ -73,11 +73,25 @@ class VideoObjectTracking(VideoObjectDetection):
         # Counter for tracked objects
         self._counter_lock = threading.Lock()
         self._object_counters = Counter()
-        self._recent_objects = LRUDict(maxsize=100)  # To track recent object IDs and their labels
+        self._recent_objects = LRUDict(maxsize=150)  # To track recent object IDs and their labels
+
+    def _is_label_enabled(self, label: str) -> bool:
+        """Check if a label is enabled for tracking.
+
+        Args:
+            label (str): The label to check.
+        Returns:
+            bool: True if the label is enabled for tracking, False otherwise.
+        """
+        if self._labels_to_track is None:
+            return True
+        return label in self._labels_to_track
 
     def _record_object(self, detected_object: str, object_id: float):
         """Record that an object with a specific label and ID has been seen."""
 
+        if not self._is_label_enabled(detected_object):
+            return
         with self._counter_lock:
             if object_id in self._recent_objects:
                 return  # Already recorded recently
@@ -85,8 +99,9 @@ class VideoObjectTracking(VideoObjectDetection):
             self._recent_objects[object_id] = detected_object
             self._object_counters[detected_object] += 1
 
-    def get_tracked_objects(self) -> dict:
-        """Get the current counts of tracked objects by label.
+    def get_all_identified_objects(self) -> dict:
+        """Get all identified object types and their counts since the last reset.
+            This includes all distinguished objects seens, based on their unique IDs.
 
         Returns:
             dict: A dictionary with labels as keys and their respective counts as values.
