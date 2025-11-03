@@ -13,6 +13,7 @@ from .jsonparser import *
 from .logger import *
 from .slidingwindowbuffer import *
 from .userinput import *
+from .caches import *
 
 __all__ = [
     "App",
@@ -31,4 +32,5 @@ __all__ = [
     "SineGenerator",
     "SlidingWindowBuffer",
     "UserTextInput",
+    "LRUDict",
 ]

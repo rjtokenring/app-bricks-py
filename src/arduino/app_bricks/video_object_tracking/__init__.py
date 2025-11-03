@@ -2,42 +2,17 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
-from arduino.app_utils import brick, Logger
+from arduino.app_utils import brick, Logger, LRUDict
 from arduino.app_bricks.video_objectdetection import VideoObjectDetection
 from arduino.app_internal.core import EdgeImpulseRunnerFacade
 from typing import Callable
 from websockets.sync.client import connect, ClientConnection
 from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
 import json
-from collections import Counter, OrderedDict
+from collections import Counter
 import threading
 
 logger = Logger("VideoObjectTracking")
-
-
-class LRUDict(OrderedDict):
-    """A dictionary-like object with a fixed size
-    that evicts the least recently used items.
-    """
-
-    def __init__(self, maxsize=128, *args, **kwargs):
-        self.maxsize = maxsize
-        super().__init__(*args, **kwargs)
-
-    def __getitem__(self, key):
-        value = super().__getitem__(key)
-        self.move_to_end(key)
-        return value
-
-    def __setitem__(self, key, value):
-        if key in self:
-            self.move_to_end(key)
-
-        super().__setitem__(key, value)
-
-        if len(self) > self.maxsize:
-            # Evict the least recently used item (the first item)
-            self.popitem(last=False)
 
 
 @brick
