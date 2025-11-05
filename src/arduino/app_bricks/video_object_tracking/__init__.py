@@ -28,13 +28,22 @@ class VideoObjectTracking(VideoObjectDetection):
     """
 
     def __init__(
-        self, confidence: float = 0.5, keep_grace: int = 3, max_observations: int = 3, debounce_sec: float = 0.0, labels_to_track: list[str] = None
+        self,
+        confidence: float = 0.5,
+        keep_grace: int = 3,
+        max_observations: int = 3,
+        iou_threshold: float = 0.1,
+        debounce_sec: float = 0.0,
+        labels_to_track: list[str] = None,
     ):
         """Initialize the VideoObjectDetection class.
 
         Args:
             confidence (float): Confidence level for detection. Default is 0.3 (30%).
             debounce_sec (float): Minimum seconds between repeated detections of the same object. Default is 0 seconds.
+            keep_grace (int): Number of frames to keep an object if it disappears. Default is 3.
+            max_observations (int): Maximum number of observations to consider. Default is 3
+            iou_threshold (float): Intersection over Union threshold for tracking. Default is 0.1.
             labels_to_track (list[str], optional): List of labels to track. If None, all labels are tracked.
 
         Raises:
@@ -44,6 +53,7 @@ class VideoObjectTracking(VideoObjectDetection):
         self._labels_to_track = labels_to_track
         self._max_observations = max_observations
         self._keep_grace = keep_grace
+        self._iou_threshold = iou_threshold
 
         # Counter for tracked objects
         self._counter_lock = threading.Lock()
@@ -320,7 +330,7 @@ class VideoObjectTracking(VideoObjectDetection):
             RuntimeError: If the model information is not available or does not support threshold override.
         """
         with connect(self._uri) as ws:
-            self._override_threshold(ws, confidence, self._max_observations, self._keep_grace)
+            self._override_threshold(ws, confidence, self._max_observations, self._keep_grace, self._iou_threshold)
 
     def override_keep_grace(self, keep_grace: int):
         """Override keep grace for object detection model.
@@ -333,7 +343,7 @@ class VideoObjectTracking(VideoObjectDetection):
             TypeError: If the value is not a number.
         """
         with connect(self._uri) as ws:
-            self._override_threshold(ws, self._confidence, self._max_observations, keep_grace)
+            self._override_threshold(ws, self._confidence, self._max_observations, keep_grace, self._iou_threshold)
 
     def override_max_observations(self, max_observations: int):
         """Override max observations for object detection model.
@@ -347,9 +357,23 @@ class VideoObjectTracking(VideoObjectDetection):
             RuntimeError: If the model information is not available or does not support threshold override.
         """
         with connect(self._uri) as ws:
-            self._override_threshold(ws, self._confidence, max_observations, self._keep_grace)
+            self._override_threshold(ws, self._confidence, max_observations, self._keep_grace, self._iou_threshold)
 
-    def _override_thresholds(self, ws: ClientConnection, confidence: float, max_observations: int, keep_grace: int):
+    def override_iou_threshold(self, iou_threshold: int):
+        """Override IoU threshold for object detection model.
+            IOU Threshold: Intersection over Union threshold for tracking.
+
+        Args:
+            iou_threshold (float): The new value for the IoU threshold.
+
+        Raises:
+            TypeError: If the value is not a number.
+            RuntimeError: If the model information is not available or does not support threshold override.
+        """
+        with connect(self._uri) as ws:
+            self._override_threshold(ws, self._confidence, self._max_observations, self._keep_grace, iou_threshold)
+
+    def _override_thresholds(self, ws: ClientConnection, confidence: float, max_observations: int, keep_grace: int, iou_threshold: float):
         """Override the threshold for object detection model.
 
         Args:
@@ -357,6 +381,7 @@ class VideoObjectTracking(VideoObjectDetection):
             confidence (float): The new value for the threshold.
             max_observations (int): Maximum number of observations to consider.
             keep_grace (int): Grace period to keep observations.
+            iou_threshold (float): Intersection over Union threshold for tracking.
 
         Raises:
             TypeError: If the value is not a number.
@@ -378,14 +403,21 @@ class VideoObjectTracking(VideoObjectDetection):
                 id = th["id"]
                 message = {"type": "threshold-override", "id": id, "key": "max_observations", "value": max_observations}
 
-                logger.info(f"Overriding max observations. New max_observations: {max_observations}")
                 ws.send(json.dumps(message))
                 # Update local max observations value
                 self._max_observations = max_observations
 
                 message = {"type": "threshold-override", "id": id, "key": "keep_grace", "value": keep_grace}
 
-                logger.info(f"Overriding keep grace. New keep_grace: {keep_grace}")
                 ws.send(json.dumps(message))
                 # Update local keep grace value
                 self._keep_grace = keep_grace
+
+                # Update Intersection over Union threshold
+                message = {"type": "threshold-override", "id": id, "key": "threshold", "value": iou_threshold}
+
+                ws.send(json.dumps(message))
+                # Update local keep grace value
+                self._iou_threshold = iou_threshold
+
+                logger.info(f"Overriding thresholds - max_observations: {max_observations}, keep_grace: {keep_grace}, iou_threshold: {iou_threshold}")
