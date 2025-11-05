@@ -127,7 +127,6 @@ class VideoObjectTracking(VideoObjectDetection):
                 elif (last_x < x1 and x >= x1) or (last_x > x1 and x <= x1):
                     self._crossing_line_object_counters[detected_object_label] += 1
                 else:
-                    print("Diagonal line crossing - check if there is a cross.")
                     if (x2 - x1) != 0:
                         slope = (y2 - y1) / (x2 - x1)
                         intercept = y1 - slope * x1
@@ -167,6 +166,22 @@ class VideoObjectTracking(VideoObjectDetection):
             self._line_coordinates = (x1, y1, x2, y2)
 
         self.reset_counters()
+
+    def set_horizontal_crossing_line(self, y: int):
+        """Set a horizontal line for counting objects crossing it.
+
+        Args:
+            y (int): The y-coordinate of the horizontal line.
+        """
+        self.set_crossing_line_coordinates(0, y, 480, y)
+
+    def set_vertical_crossing_line(self, x: int):
+        """Set a vertical line for counting objects crossing it.
+
+        Args:
+            x (int): The x-coordinate of the vertical line.
+        """
+        self.set_crossing_line_coordinates(x, 0, x, 480)
 
     def reset_counters(self):
         """Reset the counts of tracked objects."""
