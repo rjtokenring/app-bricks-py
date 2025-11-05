@@ -28,7 +28,7 @@ class VideoObjectTracking(VideoObjectDetection):
     """
 
     def __init__(
-        self, confidence: float = 0.3, keep_grace: int = 2, max_observations: int = 2, debounce_sec: float = 0.0, labels_to_track: list[str] = None
+        self, confidence: float = 0.5, keep_grace: int = 3, max_observations: int = 3, debounce_sec: float = 0.0, labels_to_track: list[str] = None
     ):
         """Initialize the VideoObjectDetection class.
 

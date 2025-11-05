@@ -16,7 +16,7 @@ services:
       - ${BIND_ADDRESS:-127.0.0.1}:${BIND_PORT:-1337}:1337
     volumes:
       - "${CUSTOM_MODEL_PATH:-/home/arduino/.arduino-bricks/ei-models}:${CUSTOM_MODEL_PATH:-/home/arduino/.arduino-bricks/ei-models}"
-    command: ["--model-file", "${EI_OBJ_DETECTION_MODEL:-/models/ootb/ei/yolo-x-nano-tracking-quantized.eim}", "--run-http-server", "1337", "--dont-print-predictions"]
+    command: ["--model-file", "${EI_OBJ_DETECTION_MODEL:-/models/ootb/ei/yolo-x-nano.eim}", "--run-http-server", "1337", "--dont-print-predictions"]
     healthcheck:
       test: [ "CMD-SHELL", "wget -q --spider http://localhost:1337/api/info || exit 1" ]
       interval: 2s
