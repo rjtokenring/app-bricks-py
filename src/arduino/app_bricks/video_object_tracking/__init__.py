@@ -92,11 +92,10 @@ class VideoObjectTracking(VideoObjectDetection):
             return
 
         with self._counter_lock:
-            if object_id in self._recent_objects:
-                return  # Already recorded recently
+            if object_id not in self._recent_objects:
+                 self._object_counters[detected_object_label] += 1
 
-            self._recent_objects[object_id] = (x, y)
-            self._object_counters[detected_object_label] += 1
+        self._record_line_crossing(detected_object_label, object_id, x, y)
 
     def _record_line_crossing(self, detected_object_label: str, object_id: float, x: int, y: int):
         """Record that an object with a specific label and ID has crossed the line.
