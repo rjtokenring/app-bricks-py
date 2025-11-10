@@ -87,16 +87,12 @@ class VideoObjectTracking(VideoObjectDetection):
             y (int): The y-coordinate of the detected object.
         """
 
-        logger.debug(f"Recording object: label={detected_object_label}, id={object_id}, x={x}, y={y}")
         if not self._is_label_enabled(detected_object_label):
             # Discard if the label is not enabled for tracking
-            logger.debug(f"Label {detected_object_label} is not enabled for tracking. Discarding.")
             return
 
         with self._counter_lock:
-            logger.debug(f"Current object counters before recording: {self._object_counters}")
             if object_id not in self._recent_objects:
-                logger.debug(f"New object ID {object_id} detected for label {detected_object_label}. Incrementing counter.")
                 self._object_counters[detected_object_label] += 1
 
         self._record_line_crossing(detected_object_label, object_id, x, y)
@@ -110,16 +106,12 @@ class VideoObjectTracking(VideoObjectDetection):
             x (int): The x-coordinate of the detected object.
             y (int): The y-coordinate of the detected object.
         """
-        logger.debug(f"Checking line crossing for object: label={detected_object_label}, id={object_id}, x={x}, y={y}")
-
         if not self._is_label_enabled(detected_object_label):
             # Discard if the label is not enabled for tracking
-            logger.debug(f"Label {detected_object_label} is not enabled for tracking. Discarding line crossing check.")
             return
 
         with self._counter_lock:
             if object_id in self._recent_objects:
-                logger.debug(f"Object ID {object_id} has been seen before. Checking for line crossing.")
                 last_x, last_y = self._recent_objects[object_id]
                 x1, y1, x2, y2 = self._line_coordinates
 
