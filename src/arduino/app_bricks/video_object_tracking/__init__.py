@@ -63,7 +63,7 @@ class VideoObjectTracking(VideoObjectDetection):
 
         # Crossing line coordinates
         self._line_coordinates = (0, 0, 0, 0)  # x1, y1, x2, y2
-        self._crossing_line_object_counters = Counter()
+        self._crossing_line_object = {}  # {label: {"counter": int, "direction": [str, ...]}}
 
     def _is_label_enabled(self, label: str) -> bool:
         """Check if a label is enabled for tracking.
@@ -117,17 +117,22 @@ class VideoObjectTracking(VideoObjectDetection):
 
                 # Update the last seen position
                 self._recent_objects[object_id] = (x, y)
+                # Initialize crossing line entry if not present
+                if detected_object_label not in self._crossing_line_object:
+                    self._crossing_line_object[detected_object_label] = {"counter": 0, "direction": []}
 
                 # Simple line crossing detection (horizontal line)
                 if (last_y < y1 <= y) or (last_y > y1 >= y):
                     logger.debug(
                         f"Object ID {object_id} crossed the horizontal line. Incrementing crossing counter for label {detected_object_label}."
                     )
-                    self._crossing_line_object_counters[detected_object_label] += 1
+                    self._crossing_line_object[detected_object_label]["counter"] += 1
+                    self._crossing_line_object[detected_object_label]["direction"].append("horizontal")
                 # Simple line crossing detection (vertical line)
                 elif (last_x < x1 <= x) or (last_x > x1 >= x):
                     logger.debug(f"Object ID {object_id} crossed the vertical line. Incrementing crossing counter for label {detected_object_label}.")
-                    self._crossing_line_object_counters[detected_object_label] += 1
+                    self._crossing_line_object[detected_object_label]["counter"] += 1
+                    self._crossing_line_object[detected_object_label]["direction"].append("vertical")
                 else:
                     if (x2 - x1) == 0:
                         return
@@ -139,7 +144,8 @@ class VideoObjectTracking(VideoObjectDetection):
                         logger.debug(
                             f"Object ID {object_id} crossed the diagonal line. Incrementing crossing counter for label {detected_object_label}."
                         )
-                        self._crossing_line_object_counters[detected_object_label] += 1
+                        self._crossing_line_object[detected_object_label]["counter"] += 1
+                        self._crossing_line_object[detected_object_label]["direction"].append("diagonal")
             else:
                 # First time seeing this object ID, just record its position
                 logger.debug(f"First time seeing object ID {object_id}. Recording position without line crossing check.")
@@ -160,10 +166,10 @@ class VideoObjectTracking(VideoObjectDetection):
             This includes all distinguished objects sees, based on their unique IDs.
 
         Returns:
-            dict: A dictionary with labels as keys and their respective counts as values.
+            dict: A dictionary with labels as keys and their respective counts and directions as values.
         """
         with self._counter_lock:
-            return dict(self._crossing_line_object_counters)
+            return self._crossing_line_object
 
     def set_crossing_line_coordinates(self, x1: int, y1: int, x2: int, y2: int):
         """Set the coordinates of the line for counting objects crossing it."""
@@ -193,7 +199,7 @@ class VideoObjectTracking(VideoObjectDetection):
         with self._counter_lock:
             self._object_counters.clear()
             self._recent_objects.clear()
-            self._crossing_line_object_counters.clear()
+            self._crossing_line_object.clear()
 
     def on_detect(self, object: str, callback: Callable[[], None]):
         """Register a callback invoked when a **specific label** is detected.
