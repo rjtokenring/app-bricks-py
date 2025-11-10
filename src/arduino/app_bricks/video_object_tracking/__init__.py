@@ -128,7 +128,9 @@ class VideoObjectTracking(VideoObjectDetection):
 
                 # Simple line crossing detection (horizontal line)
                 if (last_y < y1 <= y) or (last_y > y1 >= y):
-                    logger.debug(f"Object ID {object_id} crossed the horizontal line. Incrementing crossing counter for label {detected_object_label}.")
+                    logger.debug(
+                        f"Object ID {object_id} crossed the horizontal line. Incrementing crossing counter for label {detected_object_label}."
+                    )
                     self._crossing_line_object_counters[detected_object_label] += 1
                 # Simple line crossing detection (vertical line)
                 elif (last_x < x1 <= x) or (last_x > x1 >= x):
@@ -142,7 +144,9 @@ class VideoObjectTracking(VideoObjectDetection):
                     line_y_at_last_x = slope * last_x + intercept
                     line_y_at_current_x = slope * x + intercept
                     if (last_y < line_y_at_last_x and y >= line_y_at_current_x) or (last_y > line_y_at_last_x and y <= line_y_at_current_x):
-                        logger.debug(f"Object ID {object_id} crossed the diagonal line. Incrementing crossing counter for label {detected_object_label}.")
+                        logger.debug(
+                            f"Object ID {object_id} crossed the diagonal line. Incrementing crossing counter for label {detected_object_label}."
+                        )
                         self._crossing_line_object_counters[detected_object_label] += 1
             else:
                 # First time seeing this object ID, just record its position
@@ -288,7 +292,7 @@ class VideoObjectTracking(VideoObjectDetection):
             try:
                 self._model_info = EdgeImpulseRunnerFacade.parse_model_info_message(jmsg)
                 if self._model_info and self._model_info.thresholds is not None:
-                    self._override_thresholds(ws, self._confidence, self._max_observations, self._keep_grace)
+                    self._override_thresholds(ws, self._confidence, self._max_observations, self._keep_grace, self._iou_threshold)
 
             except Exception as e:
                 logger.error(f"Error parsing WS hello message: {e}")
