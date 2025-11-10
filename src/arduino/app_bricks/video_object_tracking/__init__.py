@@ -87,13 +87,17 @@ class VideoObjectTracking(VideoObjectDetection):
             y (int): The y-coordinate of the detected object.
         """
 
+        logger.debug(f"Recording object: label={detected_object_label}, id={object_id}, x={x}, y={y}")
         if not self._is_label_enabled(detected_object_label):
             # Discard if the label is not enabled for tracking
+            logger.debug(f"Label {detected_object_label} is not enabled for tracking. Discarding.")
             return
 
         with self._counter_lock:
+            logger.debug(f"Current object counters before recording: {self._object_counters}")
             if object_id not in self._recent_objects:
-                 self._object_counters[detected_object_label] += 1
+                logger.debug(f"New object ID {object_id} detected for label {detected_object_label}. Incrementing counter.")
+                self._object_counters[detected_object_label] += 1
 
         self._record_line_crossing(detected_object_label, object_id, x, y)
 
@@ -106,13 +110,16 @@ class VideoObjectTracking(VideoObjectDetection):
             x (int): The x-coordinate of the detected object.
             y (int): The y-coordinate of the detected object.
         """
+        logger.debug(f"Checking line crossing for object: label={detected_object_label}, id={object_id}, x={x}, y={y}")
 
         if not self._is_label_enabled(detected_object_label):
             # Discard if the label is not enabled for tracking
+            logger.debug(f"Label {detected_object_label} is not enabled for tracking. Discarding line crossing check.")
             return
 
         with self._counter_lock:
             if object_id in self._recent_objects:
+                logger.debug(f"Object ID {object_id} has been seen before. Checking for line crossing.")
                 last_x, last_y = self._recent_objects[object_id]
                 x1, y1, x2, y2 = self._line_coordinates
 
@@ -120,25 +127,31 @@ class VideoObjectTracking(VideoObjectDetection):
                 self._recent_objects[object_id] = (x, y)
 
                 # Simple line crossing detection (horizontal line)
-                if (last_y < y1 and y >= y1) or (last_y > y1 and y <= y1):
+                if (last_y < y1 <= y) or (last_y > y1 >= y):
+                    logger.debug(f"Object ID {object_id} crossed the horizontal line. Incrementing crossing counter for label {detected_object_label}.")
                     self._crossing_line_object_counters[detected_object_label] += 1
                 # Simple line crossing detection (vertical line)
-                elif (last_x < x1 and x >= x1) or (last_x > x1 and x <= x1):
+                elif (last_x < x1 <= x) or (last_x > x1 >= x):
+                    logger.debug(f"Object ID {object_id} crossed the vertical line. Incrementing crossing counter for label {detected_object_label}.")
                     self._crossing_line_object_counters[detected_object_label] += 1
                 else:
-                    if (x2 - x1) != 0:
-                        slope = (y2 - y1) / (x2 - x1)
-                        intercept = y1 - slope * x1
-                        line_y_at_last_x = slope * last_x + intercept
-                        line_y_at_current_x = slope * x + intercept
-                        if (last_y < line_y_at_last_x and y >= line_y_at_current_x) or (last_y > line_y_at_last_x and y <= line_y_at_current_x):
-                            self._crossing_line_object_counters[detected_object_label] += 1
-                    else:
+                    if (x2 - x1) == 0:
                         return
+                    slope = (y2 - y1) / (x2 - x1)
+                    intercept = y1 - slope * x1
+                    line_y_at_last_x = slope * last_x + intercept
+                    line_y_at_current_x = slope * x + intercept
+                    if (last_y < line_y_at_last_x and y >= line_y_at_current_x) or (last_y > line_y_at_last_x and y <= line_y_at_current_x):
+                        logger.debug(f"Object ID {object_id} crossed the diagonal line. Incrementing crossing counter for label {detected_object_label}.")
+                        self._crossing_line_object_counters[detected_object_label] += 1
+            else:
+                # First time seeing this object ID, just record its position
+                logger.debug(f"First time seeing object ID {object_id}. Recording position without line crossing check.")
+                self._recent_objects[object_id] = (x, y)
 
     def get_unique_objects_count(self) -> dict:
         """Get all identified object types and their counts since the last reset.
-            This includes all distinguished objects seens, based on their unique IDs.
+            This includes all distinguished objects sees, based on their unique IDs.
 
         Returns:
             dict: A dictionary with labels as keys and their respective counts as values.
@@ -146,15 +159,12 @@ class VideoObjectTracking(VideoObjectDetection):
         with self._counter_lock:
             return dict(self._object_counters)
 
-    def get_line_crossing_counts(self) -> int:
+    def get_line_crossing_counts(self) -> dict:
         """Get the count of a specific identified object type since the last reset.
-            This includes all distinguished objects seens, based on their unique IDs.
-
-        Args:
-            label (str): The label of the object to get the count for.
+            This includes all distinguished objects sees, based on their unique IDs.
 
         Returns:
-            int: The count of the specified object type.
+            dict: A dictionary with labels as keys and their respective counts as values.
         """
         with self._counter_lock:
             return dict(self._crossing_line_object_counters)
