@@ -117,22 +117,17 @@ class VideoObjectTracking(VideoObjectDetection):
 
                 # Update the last seen position
                 self._recent_objects[object_id] = (x, y)
-                # Initialize crossing line entry if not present
-                if detected_object_label not in self._crossing_line_object:
-                    self._crossing_line_object[detected_object_label] = {"counter": 0, "direction": []}
 
                 # Simple line crossing detection (horizontal line)
                 if (last_y < y1 <= y) or (last_y > y1 >= y):
                     logger.debug(
                         f"Object ID {object_id} crossed the horizontal line. Incrementing crossing counter for label {detected_object_label}."
                     )
-                    self._crossing_line_object[detected_object_label]["counter"] += 1
-                    self._crossing_line_object[detected_object_label]["direction"].append("horizontal")
+                    self._increase_line_crossing_count(detected_object_label, "horizontal")
                 # Simple line crossing detection (vertical line)
                 elif (last_x < x1 <= x) or (last_x > x1 >= x):
                     logger.debug(f"Object ID {object_id} crossed the vertical line. Incrementing crossing counter for label {detected_object_label}.")
-                    self._crossing_line_object[detected_object_label]["counter"] += 1
-                    self._crossing_line_object[detected_object_label]["direction"].append("vertical")
+                    self._increase_line_crossing_count(detected_object_label, "vertical")
                 else:
                     if (x2 - x1) == 0:
                         return
@@ -144,12 +139,24 @@ class VideoObjectTracking(VideoObjectDetection):
                         logger.debug(
                             f"Object ID {object_id} crossed the diagonal line. Incrementing crossing counter for label {detected_object_label}."
                         )
-                        self._crossing_line_object[detected_object_label]["counter"] += 1
-                        self._crossing_line_object[detected_object_label]["direction"].append("diagonal")
+                        self._increase_line_crossing_count(detected_object_label, "diagonal")
             else:
                 # First time seeing this object ID, just record its position
                 logger.debug(f"First time seeing object ID {object_id}. Recording position without line crossing check.")
                 self._recent_objects[object_id] = (x, y)
+
+    def _increase_line_crossing_count(self, label: str, direction: str):
+        """Increase the line crossing count for a specific label and direction.
+
+        Args:
+            label (str): The label of the detected object.
+            direction (str): The direction of crossing ('horizontal', 'vertical', 'diagonal').
+        """
+        with self._counter_lock:
+            if label not in self._crossing_line_object:
+                self._crossing_line_object[label] = {"counter": 0, "direction": []}
+            self._crossing_line_object[label]["counter"] += 1
+            self._crossing_line_object[label]["direction"].append(direction)
 
     def get_unique_objects_count(self) -> dict:
         """Get all identified object types and their counts since the last reset.
