@@ -111,6 +111,100 @@ models:
     bricks:
       - arduino:object_detection
       - arduino:video_object_detection
+ - yolox-object-tracking:
+    runner: brick
+    name : "General purpose object tracking - YoloX"
+    description: "General purpose object tracking model based on YoloX Nano. This model is trained on the COCO dataset and can detect 80 different object classes."
+    model_configuration:
+      "EI_OBJ_TRACKING_MODEL": "/models/ootb/ei/yolo-x-nano-tracking.eim"
+    model_labels:
+      - airplane
+      - apple
+      - backpack
+      - banana
+      - baseball bat
+      - baseball glove
+      - bear
+      - bed
+      - bench
+      - bicycle
+      - bird
+      - boat
+      - book
+      - bottle
+      - bowl
+      - broccoli
+      - bus
+      - cake
+      - car
+      - carrot
+      - cat
+      - cell phone
+      - chair
+      - clock
+      - couch
+      - cow
+      - cup
+      - dining table
+      - dog
+      - donut
+      - elephant
+      - fire hydrant
+      - fork
+      - frisbee
+      - giraffe
+      - hair drier
+      - handbag
+      - hot dog
+      - horse
+      - keyboard
+      - kite
+      - knife
+      - laptop
+      - microwave
+      - motorcycle
+      - mouse
+      - orange
+      - oven
+      - parking meter
+      - person
+      - pizza
+      - potted plant
+      - refrigerator
+      - remote
+      - sandwich
+      - scissors
+      - sheep
+      - sink
+      - skateboard
+      - skis
+      - snowboard
+      - spoon
+      - sports ball
+      - stop sign
+      - suitcase
+      - surfboard
+      - teddy bear
+      - tennis racket
+      - tie
+      - toaster
+      - toilet
+      - toothbrush
+      - traffic light
+      - train
+      - truck
+      - tv
+      - umbrella
+      - vase
+      - wine glass
+      - zebra
+    metadata:
+      source: "edgeimpulse"
+      ei-project-id: 717280
+      ei-model-url: "https://studio.edgeimpulse.com/public/717280/live"
+      source-model-id: "YOLOX-Nano"
+      source-model-url: "https://github.com/Megvii-BaseDetection/YOLOX"
+    bricks:
       - arduino:video_object_tracking
  - mobilenet-image-classification:
     runner: brick
