@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
-import pytest
 from arduino.app_utils import LRUDict
 
 
