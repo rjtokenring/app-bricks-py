@@ -56,7 +56,7 @@ class VideoObjectTracking(VideoObjectDetection):
         self._iou_threshold = iou_threshold
 
         # Counter for tracked objects
-        self._counter_lock = threading.Lock()
+        self._counter_lock = threading.RLock()
         self._object_counters = Counter()
         # Map of recent object IDs to their last seen positions (x, y)
         self._recent_objects = LRUDict(maxsize=150)  # To track recent object IDs and their labels
@@ -119,15 +119,15 @@ class VideoObjectTracking(VideoObjectDetection):
                 self._recent_objects[object_id] = (x, y)
 
                 # Simple line crossing detection (horizontal line)
-                if (last_y < y1 <= y) or (last_y > y1 >= y):
-                    logger.debug(
-                        f"Object ID {object_id} crossed the horizontal line. Incrementing crossing counter for label {detected_object_label}."
-                    )
-                    self._increase_line_crossing_count(detected_object_label, "horizontal")
+                if last_y < y1 <= y:
+                    self._increase_line_crossing_count(detected_object_label, "up")
+                elif last_y > y1 >= y:
+                    self._increase_line_crossing_count(detected_object_label, "down")
                 # Simple line crossing detection (vertical line)
-                elif (last_x < x1 <= x) or (last_x > x1 >= x):
-                    logger.debug(f"Object ID {object_id} crossed the vertical line. Incrementing crossing counter for label {detected_object_label}.")
-                    self._increase_line_crossing_count(detected_object_label, "vertical")
+                elif last_x < x1 <= x:
+                    self._increase_line_crossing_count(detected_object_label, "right")
+                elif last_x > x1 >= x:
+                    self._increase_line_crossing_count(detected_object_label, "left")
                 else:
                     if (x2 - x1) == 0:
                         return
@@ -135,14 +135,12 @@ class VideoObjectTracking(VideoObjectDetection):
                     intercept = y1 - slope * x1
                     line_y_at_last_x = slope * last_x + intercept
                     line_y_at_current_x = slope * x + intercept
-                    if (last_y < line_y_at_last_x and y >= line_y_at_current_x) or (last_y > line_y_at_last_x and y <= line_y_at_current_x):
-                        logger.debug(
-                            f"Object ID {object_id} crossed the diagonal line. Incrementing crossing counter for label {detected_object_label}."
-                        )
-                        self._increase_line_crossing_count(detected_object_label, "diagonal")
+                    if last_y < line_y_at_last_x and y >= line_y_at_current_x:
+                        self._increase_line_crossing_count(detected_object_label, "diagonal_up")
+                    elif last_y > line_y_at_last_x and y <= line_y_at_current_x:
+                        self._increase_line_crossing_count(detected_object_label, "diagonal_down")
             else:
                 # First time seeing this object ID, just record its position
-                logger.debug(f"First time seeing object ID {object_id}. Recording position without line crossing check.")
                 self._recent_objects[object_id] = (x, y)
 
     def _increase_line_crossing_count(self, label: str, direction: str):
@@ -154,8 +152,8 @@ class VideoObjectTracking(VideoObjectDetection):
         """
         with self._counter_lock:
             if label not in self._crossing_line_object:
-                self._crossing_line_object[label] = {"counter": 0, "direction": []}
-            self._crossing_line_object[label]["counter"] += 1
+                self._crossing_line_object[label] = {"count": 0, "direction": []}
+            self._crossing_line_object[label]["count"] += 1
             self._crossing_line_object[label]["direction"].append(direction)
 
     def get_unique_objects_count(self) -> dict:
@@ -252,7 +250,7 @@ class VideoObjectTracking(VideoObjectDetection):
             - Parses ``"hello"`` messages to capture model metadata and optionally
               performs a threshold override to align the runner with the local setting.
             - Parses ``"classification"`` messages, filters detections by confidence,
-              applies debounce, then invokes registered callbacks.
+              applies to debounce, then invokes registered callbacks.
             - Retries on transient WebSocket errors while running.
 
         Exceptions:
