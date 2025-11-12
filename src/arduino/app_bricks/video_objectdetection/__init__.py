@@ -298,7 +298,7 @@ class VideoObjectDetection:
             raise RuntimeError("Model information is not available or does not support threshold override.")
 
         for th in self._model_info.thresholds:
-            if th.get("type") == "object_tracking":
+            if th.get("type") == "object_detection":
                 id = th["id"]
                 message = {"type": "threshold-override", "id": id, "key": "min_score", "value": value}
 
