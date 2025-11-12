@@ -15,7 +15,7 @@ services:
       - "/run/udev:/run/udev"
     command: ["--model-file", "${EI_OBJ_TRACKING_MODEL:-/models/ootb/ei/yolo-x-nano-tracking.eim}", "--dont-print-predictions", "--mode", "streaming", "--preview-original-resolution", "--camera", "${VIDEO_DEVICE:-/dev/video1}"]
     healthcheck:
-      test: [ "CMD-SHELL", "wget -q --spider http://ei-video-obj-detection-runner:4912 || exit 1" ]
+      test: [ "CMD-SHELL", "wget -q --spider http://ei-video-obj-tracking-runner:4912 || exit 1" ]
       interval: 2s
       timeout: 2s
       retries: 25
