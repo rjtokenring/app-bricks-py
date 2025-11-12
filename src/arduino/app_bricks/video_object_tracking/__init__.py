@@ -114,19 +114,24 @@ class VideoObjectTracking(VideoObjectDetection):
             if object_id in self._recent_objects:
                 last_x, last_y = self._recent_objects[object_id]
                 x1, y1, x2, y2 = self._line_coordinates
+                logger.debug(f"Checking line crossing for object ID {object_id} from ({last_x}, {last_y}) to ({x}, {y}) against line ({x1}, {y1}) to ({x2}, {y2})")
 
                 # Update the last seen position
                 self._recent_objects[object_id] = (x, y)
 
                 # Simple line crossing detection (horizontal line)
                 if last_y < y1 <= y:
+                    logger.debug(f"Object ID {object_id} crossed up line from y={last_y} to y={y}")
                     self._increase_line_crossing_count(detected_object_label, "up")
                 elif last_y > y1 >= y:
+                    logger.debug(f"Object ID {object_id} crossed down line from y={last_y} to y={y}")
                     self._increase_line_crossing_count(detected_object_label, "down")
                 # Simple line crossing detection (vertical line)
                 elif last_x < x1 <= x:
+                    logger.debug(f"Object ID {object_id} crossed right line from x={last_x} to x={x}")
                     self._increase_line_crossing_count(detected_object_label, "right")
                 elif last_x > x1 >= x:
+                    logger.debug(f"Object ID {object_id} crossed left line from x={last_x} to x={x}")
                     self._increase_line_crossing_count(detected_object_label, "left")
                 else:
                     if (x2 - x1) == 0:
@@ -136,8 +141,10 @@ class VideoObjectTracking(VideoObjectDetection):
                     line_y_at_last_x = slope * last_x + intercept
                     line_y_at_current_x = slope * x + intercept
                     if last_y < line_y_at_last_x and y >= line_y_at_current_x:
+                        logger.debug(f"Object ID {object_id} crossed diagonal up line from ({last_x}, {last_y}) to ({x}, {y})")
                         self._increase_line_crossing_count(detected_object_label, "diagonal_up")
                     elif last_y > line_y_at_last_x and y <= line_y_at_current_x:
+                        logger.debug(f"Object ID {object_id} crossed diagonal down line from ({last_x}, {last_y}) to ({x}, {y})")
                         self._increase_line_crossing_count(detected_object_label, "diagonal_down")
             else:
                 # First time seeing this object ID, just record its position
