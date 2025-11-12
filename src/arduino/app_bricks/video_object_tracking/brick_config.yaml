@@ -10,6 +10,6 @@ requires_container: true
 mount_devices_into_container: true
 required_devices:
   - camera
-model: yolox-object-tracking
+model: yolox-object-detection
 model_configuration_variables:
-  - EI_OBJ_TRACKING_MODEL
+  - EI_OBJ_DETECTION_MODEL
