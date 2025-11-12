@@ -368,7 +368,7 @@ class VideoObjectTracking(VideoObjectDetection):
             RuntimeError: If the model information is not available or does not support threshold override.
         """
         with connect(self._uri) as ws:
-            self._override_thresholds(ws, confidence, self._max_observations, self._keep_grace, self._iou_threshold)
+            self._override_threshold(ws, confidence, self._max_observations, self._keep_grace, self._iou_threshold)
 
     def override_keep_grace(self, keep_grace: int):
         """Override keep grace for object detection model.
@@ -381,7 +381,7 @@ class VideoObjectTracking(VideoObjectDetection):
             TypeError: If the value is not a number.
         """
         with connect(self._uri) as ws:
-            self._override_thresholds(ws, self._confidence, self._max_observations, keep_grace, self._iou_threshold)
+            self._override_threshold(ws, self._confidence, self._max_observations, keep_grace, self._iou_threshold)
 
     def override_max_observations(self, max_observations: int):
         """Override max observations for object detection model.
@@ -395,7 +395,7 @@ class VideoObjectTracking(VideoObjectDetection):
             RuntimeError: If the model information is not available or does not support threshold override.
         """
         with connect(self._uri) as ws:
-            self._override_thresholds(ws, self._confidence, max_observations, self._keep_grace, self._iou_threshold)
+            self._override_threshold(ws, self._confidence, max_observations, self._keep_grace, self._iou_threshold)
 
     def override_iou_threshold(self, iou_threshold: int):
         """Override IoU threshold for object detection model.
@@ -409,7 +409,7 @@ class VideoObjectTracking(VideoObjectDetection):
             RuntimeError: If the model information is not available or does not support threshold override.
         """
         with connect(self._uri) as ws:
-            self._override_thresholds(ws, self._confidence, self._max_observations, self._keep_grace, iou_threshold)
+            self._override_threshold(ws, self._confidence, self._max_observations, self._keep_grace, iou_threshold)
 
     def _override_thresholds(self, ws: ClientConnection, confidence: float, max_observations: int, keep_grace: int, iou_threshold: float):
         """Override the threshold for object detection model.
@@ -428,7 +428,6 @@ class VideoObjectTracking(VideoObjectDetection):
             raise RuntimeError("Model information is not available or does not support threshold override.")
 
         for th in self._model_info.thresholds:
-            logger.debug(f"Overriding threshold for type: {th.get('type')}, id: {th.get('id')}")
             if th.get("type") == "object_detection":
                 id = th["id"]
                 message = {"type": "threshold-override", "id": id, "key": "min_score", "value": confidence}
