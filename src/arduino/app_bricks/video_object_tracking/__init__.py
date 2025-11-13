@@ -65,6 +65,9 @@ class VideoObjectTracking(VideoObjectDetection):
         self._line_coordinates = (0, 0, 0, 0)  # x1, y1, x2, y2
         self._crossing_line_object = Counter()
 
+        # Directions tracking dict
+        self._object_directions = {}
+
     def _is_label_enabled(self, label: str) -> bool:
         """Check if a label is enabled for tracking.
 
@@ -96,7 +99,15 @@ class VideoObjectTracking(VideoObjectDetection):
             if object_id not in self._recent_objects:
                 self._object_counters[detected_object_label] += 1
 
-        self._record_line_crossing(detected_object_label, object_id, x, y)
+        if object_id in self._recent_objects:
+            last_x, last_y = self._recent_objects[object_id]
+            if last_x == x and last_y == y:
+                # No movement detected; skip further processing
+                return
+            self._record_line_crossing(detected_object_label, object_id, x, y)
+            self._record_object_direction(detected_object_label, object_id, x, y)
+        # Update the last seen position
+        self._recent_objects[object_id] = (x, y)
 
     def _record_line_crossing(self, detected_object_label: str, object_id: float, x: int, y: int):
         """
@@ -121,9 +132,6 @@ class VideoObjectTracking(VideoObjectDetection):
                     f"against line ({x1}, {y1}) to ({x2}, {y2})"
                 )
 
-                # Update the last seen position
-                self._recent_objects[object_id] = (x, y)
-
                 if y1 == y2:
                     # Horizontal line set so check for crossing horizontally only
                     if (last_y < y1 <= y) or (last_y > y1 >= y):
@@ -147,9 +155,34 @@ class VideoObjectTracking(VideoObjectDetection):
                     if crossed_up or crossed_down:
                         logger.debug(f"Object ID {object_id} crossed the diagonal line from ({last_x}, {last_y}) to ({x}, {y})")
                         self._crossing_line_object[detected_object_label] += 1
-            else:
-                # First time seeing this object ID, just record its position
-                self._recent_objects[object_id] = (x, y)
+
+    def _record_object_direction(self, detected_object_label: str, object_id: float, x: int, y: int):
+        """
+        Record the movement direction of an object with a specific label and ID.
+
+        Args:
+            detected_object_label (str): The label of the detected object.
+            object_id (float): The unique ID of the detected object.
+            x (int): The x-coordinate of the detected object.
+            y (int): The y-coordinate of the detected object.
+        """
+        if not self._is_label_enabled(detected_object_label):
+            # Discard if the label is not enabled for tracking
+            return
+
+        with self._counter_lock:
+            if object_id in self._recent_objects:
+                last_x, last_y = self._recent_objects[object_id]
+                direction = _get_direction(last_x, last_y, x, y)
+                # check if last direction is different from current direction to avoid duplicates
+                if object_id in self._object_directions:
+                    if len(self._object_directions[object_id]) > 0 and self._object_directions[object_id][-1] == direction:
+                        return
+                else:
+                    # Initialize the list if no object ID entry exists
+                    self._object_directions[object_id] = []
+                self._object_directions[object_id].append(direction)
+                logger.debug(f"Object ID {object_id} moved {direction} from ({last_x}, {last_y}) to ({x}, {y})")
 
     def get_unique_objects_count(self) -> dict:
         """
@@ -172,6 +205,16 @@ class VideoObjectTracking(VideoObjectDetection):
         """
         with self._counter_lock:
             return dict(self._crossing_line_object)
+
+    def get_objects_directions(self) -> dict:
+        """
+        Get the last known movement directions of tracked objects.
+
+        Returns:
+            dict: A dictionary with object IDs as keys and their respective movement directions as values.
+        """
+        with self._counter_lock:
+            return dict(self._object_directions)
 
     def set_crossing_line_coordinates(self, x1: int, y1: int, x2: int, y2: int):
         """
@@ -448,3 +491,50 @@ class VideoObjectTracking(VideoObjectDetection):
                 logger.debug(f"Overriding value for type: {th.get('type')}, id: {th.get('id')}, key: {key}, value: {value}")
                 message = {"type": "threshold-override", "id": th["id"], "key": key, "value": value}
                 ws.send(json.dumps(message))
+
+
+def _get_direction(last_x: int, last_y: int, x: int, y: int) -> str:
+    """
+    Determine the movement direction based on the change in coordinates.
+    Note: The directions are mirrored both horizontally and vertically.
+
+    Args:
+        last_x (int): The previous x-coordinate.
+        last_y (int): The previous y-coordinate.
+        x (int): The current x-coordinate.
+        y (int): The current y-coordinate.
+
+    Returns:
+        str: The movement direction ('up', 'down', 'left', 'right', 'up-left', 'up-right', 'down-left', 'down-right',
+        or 'stationary').
+    """
+    logger.debug(f"Calculating direction change from ({last_x}, {last_y}) to ({x}, {y})")
+    dx = x - last_x
+    dy = y - last_y
+
+    if abs(dx) < 1 and abs(dy) < 1:
+        direction = "stationary"
+    elif abs(dx) == abs(dy):
+        logger.debug(f"Diagonal movement detected.")
+        if dx > 0 and dy > 0:
+            direction = "down-left"  # up-right becomes down-left
+        elif dx > 0 > dy:
+            direction = "up-left"  # down-right becomes up-left
+        elif dx < 0 < dy:
+            direction = "down-right"  # up-left becomes down-right ok
+        elif dx < 0 and dy < 0:
+            direction = "up-right"  # down-left becomes up-right ok
+    elif abs(dx) > abs(dy):
+        logger.debug(f"Horizontal movement detected.")
+        if dx > 0:
+            direction = "left"  # right becomes left
+        else:
+            direction = "right"  # left becomes right
+    else:
+        logger.debug(f"Vertical movement detected.")
+        if dy > 0:
+            direction = "down"  # up becomes down
+        else:
+            direction = "up"  # down becomes up
+
+    return direction
