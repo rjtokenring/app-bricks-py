@@ -410,7 +410,7 @@ class VideoObjectTracking(VideoObjectDetection):
             raise
 
     def _override_config_value(self, ws: ClientConnection, key: str, value: float | int):
-        """Override the threshold for object detection model.
+        """Override a specific configuration value for the object tracking model.
 
         Args:
             ws (ClientConnection): The WebSocket connection to send the message through.
