@@ -161,10 +161,10 @@ class VideoObjectTracking(VideoObjectDetection):
             This includes all distinguished objects sees, based on their unique IDs.
 
         Returns:
-            dict: A dictionary with labels as keys and their respective counts and directions as values.
+            dict: A dictionary with labels as keys and their respective counts as values.
         """
         with self._counter_lock:
-            return self._crossing_line_object
+            return dict(self._crossing_line_object)
 
     def set_crossing_line_coordinates(self, x1: int, y1: int, x2: int, y2: int):
         """Set the coordinates of the line for counting objects crossing it."""
