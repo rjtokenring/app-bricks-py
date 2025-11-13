@@ -4,5 +4,8 @@ description: "Connects to Arduino Cloud"
 variables:
 - name: ARDUINO_DEVICE_ID
   description: Arduino Cloud Device ID
+  mandatory: true
 - name: ARDUINO_SECRET
   description: Arduino Cloud Secret
+  mandatory: true
+  secret: true

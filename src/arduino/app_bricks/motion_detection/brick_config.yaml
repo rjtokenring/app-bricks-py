@@ -9,3 +9,13 @@ requires_model: true
 model: updown-wave-motion-detection
 model_configuration_variables:
   - EI_MOTION_DETECTION_MODEL
+variables:
+- name: EI_MOTION_DETECTION_MODEL
+  description: Path to the model file
+  private: true
+- name: CUSTOM_MODEL_PATH
+  description: Path to the custom model directory
+  private: true
+- name: BIND_ADDRESS
+  description: Bind address
+  private: true

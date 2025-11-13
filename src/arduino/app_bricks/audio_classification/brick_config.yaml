@@ -9,3 +9,13 @@ requires_model: true
 model: glass-breaking
 model_configuration_variables:
   - EI_AUDIO_CLASSIFICATION_MODEL
+variables:
+- name: EI_AUDIO_CLASSIFICATION_MODEL
+  description: Path to the model file
+  private: true
+- name: CUSTOM_MODEL_PATH
+  description: Path to the custom model directory
+  private: true
+- name: BIND_ADDRESS
+  description: Bind address
+  private: true

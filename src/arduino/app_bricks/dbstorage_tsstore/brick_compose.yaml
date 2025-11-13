@@ -1,6 +1,6 @@
 # BIND_ADDRESS = external container address
 # BIND_PORT = container port
-# DB_USERNAME = Edge Impulse project API key
+# DB_USERNAME = Database username
 # DB_PASSWORD = Database password
 # INFLUXDB_ADMIN_TOKEN = InfluxDB admin token
 services:
