@@ -341,7 +341,7 @@ class VideoObjectTracking(VideoObjectDetection):
             logger.warning(f"Unknown message type: {jmsg.get('type')}")
 
     def override_confidence(self, confidence: float):
-        """Override the threshold for object detection model.
+        """Override the confidence threshold for object detection model.
 
         Args:
             confidence (float): The new value for the confidence threshold in the range [0.0, 1.0].
@@ -350,11 +350,10 @@ class VideoObjectTracking(VideoObjectDetection):
             TypeError: If the value is not a number.
             RuntimeError: If the model information is not available or does not support threshold override.
         """
-        with connect(self._uri) as ws:
-            self._override_thresholds(ws, confidence, self._max_observations, self._keep_grace, self._iou_threshold)
+        super().override_threshold(confidence)
 
     def override_keep_grace(self, keep_grace: int):
-        """Override keep grace for object detection model.
+        """Override keep grace for object tracking model.
             Keep Grace: how many frames an object is kept if it disappears.
 
         Args:
@@ -362,12 +361,18 @@ class VideoObjectTracking(VideoObjectDetection):
 
         Raises:
             TypeError: If the value is not a number.
+            RuntimeError: If the model information is not available or does not support threshold override.
         """
-        with connect(self._uri) as ws:
-            self._override_thresholds(ws, self._confidence, self._max_observations, keep_grace, self._iou_threshold)
+        try:
+            with connect(self._uri) as ws:
+                self._override_config_value(ws, "keep_grace", keep_grace)
+            self._keep_grace = keep_grace
+        except Exception as e:
+            logger.error(f"Failed to override keep grace: {e}")
+            raise
 
     def override_max_observations(self, max_observations: int):
-        """Override max observations for object detection model.
+        """Override max observations for object tracking model.
             Max Observations: how many frames an object is kept if it disappears.
 
         Args:
@@ -377,11 +382,16 @@ class VideoObjectTracking(VideoObjectDetection):
             TypeError: If the value is not a number.
             RuntimeError: If the model information is not available or does not support threshold override.
         """
-        with connect(self._uri) as ws:
-            self._override_thresholds(ws, self._confidence, max_observations, self._keep_grace, self._iou_threshold)
+        try:
+            with connect(self._uri) as ws:
+                self._override_config_value(ws, "max_observations", max_observations)
+            self._max_observations = max_observations
+        except Exception as e:
+            logger.error(f"Failed to override max observations: {e}")
+            raise
 
-    def override_iou_threshold(self, iou_threshold: int):
-        """Override IoU threshold for object detection model.
+    def override_iou_threshold(self, iou_threshold: float):
+        """Override IoU threshold for object tracking model.
             IOU Threshold: Intersection over Union threshold for tracking.
 
         Args:
@@ -391,55 +401,35 @@ class VideoObjectTracking(VideoObjectDetection):
             TypeError: If the value is not a number.
             RuntimeError: If the model information is not available or does not support threshold override.
         """
-        with connect(self._uri) as ws:
-            self._override_thresholds(ws, self._confidence, self._max_observations, self._keep_grace, iou_threshold)
+        try:
+            with connect(self._uri) as ws:
+                self._override_config_value(ws, "iou_threshold", iou_threshold)
+            self._iou_threshold = iou_threshold
+        except Exception as e:
+            logger.error(f"Failed to override IoU threshold: {e}")
+            raise
 
-    def _override_thresholds(self, ws: ClientConnection, confidence: float, max_observations: int, keep_grace: int, iou_threshold: float):
+    def _override_config_value(self, ws: ClientConnection, key: str, value: float | int):
         """Override the threshold for object detection model.
 
         Args:
             ws (ClientConnection): The WebSocket connection to send the message through.
-            confidence (float): The new value for the threshold.
-            max_observations (int): Maximum number of observations to consider.
-            keep_grace (int): Grace period to keep observations.
-            iou_threshold (float): Intersection over Union threshold for tracking.
+            key (str): The configuration key to override.
+            value (float | int): The new value for the configuration.
 
         Raises:
+            RuntimeError: If the model information is not available or does not support threshold override.
             TypeError: If the value is not a number.
         """
         if self._model_info is None or self._model_info.thresholds is None or len(self._model_info.thresholds) == 0:
             raise RuntimeError("Model information is not available or does not support threshold override.")
 
+        if not value or not isinstance(value, (int, float)):
+            raise TypeError("Invalid types for value.")
+
         for th in self._model_info.thresholds:
-            logger.debug(f"Overriding threshold for type: {th.get('type')}, id: {th.get('id')}")
-            if th.get("type") == "object_detection":
-                id = th["id"]
-                message = {"type": "threshold-override", "id": id, "key": "min_score", "value": confidence}
-
-                logger.info(f"Overriding detection threshold. New confidence: {confidence}")
-                ws.send(json.dumps(message))
-                # Update local confidence value
-                self._confidence = confidence
-
+            logger.debug(f"Overriding value for type: {th.get('type')}, id: {th.get('id')}, key: {key}, value: {value}")
             if th.get("type") == "object_tracking":
                 id = th["id"]
-                message = {"type": "threshold-override", "id": id, "key": "max_observations", "value": max_observations}
-
+                message = {"type": "threshold-override", "id": id, "key": key, "value": value}
                 ws.send(json.dumps(message))
-                # Update local max observations value
-                self._max_observations = max_observations
-
-                message = {"type": "threshold-override", "id": id, "key": "keep_grace", "value": keep_grace}
-
-                ws.send(json.dumps(message))
-                # Update local keep grace value
-                self._keep_grace = keep_grace
-
-                # Update Intersection over Union threshold
-                message = {"type": "threshold-override", "id": id, "key": "threshold", "value": iou_threshold}
-
-                ws.send(json.dumps(message))
-                # Update local keep grace value
-                self._iou_threshold = iou_threshold
-
-                logger.info(f"Overriding thresholds - max_observations: {max_observations}, keep_grace: {keep_grace}, iou_threshold: {iou_threshold}")
