@@ -89,7 +89,7 @@ def test_vertical_line_crossing(detector: VideoObjectTracking):
     assert detections["car"] == 1
 
     # left
-    detector._record_line_crossing(detected_object_label="car", object_id=1, x=150, y=100)
+    detector._record_line_crossing(detected_object_label="car", object_id=1, x=100, y=100)
     detections = detector.get_line_crossing_counts()
     assert "car" in detections
     assert detections["car"] == 2
@@ -102,20 +102,20 @@ def test_diagonal_line_crossing(detector: VideoObjectTracking):
         detector (VideoObjectTracking): An instance of the VideoObjectTracking class.
     """
 
-    detector.set_crossing_line_coordinates(x1=0, y1=0, x2=200, y2=200)  # letter-box image
+    detector.set_crossing_line_coordinates(x1=0, y1=0, x2=200, y2=200)
 
     detector._record_line_crossing(detected_object_label="dog", object_id=1, x=50, y=30)
     detections = detector.get_line_crossing_counts()
     assert "dog" not in detections
 
     # diagonal up
-    detector._record_line_crossing(detected_object_label="dog", object_id=1, x=200, y=220)  # above line
+    detector._record_line_crossing(detected_object_label="dog", object_id=1, x=200, y=220)
     detections = detector.get_line_crossing_counts()
     assert "dog" in detections
     assert detections["dog"] == 1
 
     # diagonal down
-    detector._record_line_crossing(detected_object_label="dog", object_id=1, x=50, y=30)  # below line
+    detector._record_line_crossing(detected_object_label="dog", object_id=1, x=50, y=30)
     detections = detector.get_line_crossing_counts()
     assert "dog" in detections
     assert detections["dog"] == 2

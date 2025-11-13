@@ -124,15 +124,18 @@ class VideoObjectTracking(VideoObjectDetection):
                 # Update the last seen position
                 self._recent_objects[object_id] = (x, y)
 
-                # Simple line crossing detection (horizontal line)
-                if (last_y < y1 <= y) or (last_y > y1 >= y):
-                    logger.debug(f"Object ID {object_id} crossed the horizontal line from y={last_y} to y={y}")
-                    self._crossing_line_object[detected_object_label] += 1
-                # Simple line crossing detection (vertical line)
-                elif (last_x < x1 <= x) or (last_x > x1 >= x):
-                    logger.debug(f"Object ID {object_id} crossed the vertical line from x={last_x} to x={x}")
-                    self._crossing_line_object[detected_object_label] += 1
+                if y1 == y2:
+                    # Horizontal line set so check for crossing horizontally only
+                    if (last_y < y1 <= y) or (last_y > y1 >= y):
+                        logger.debug(f"Object ID {object_id} crossed the horizontal line from y={last_y} to y={y}")
+                        self._crossing_line_object[detected_object_label] += 1
+                elif x1 == x2:
+                    # Vertical line set so check for crossing vertically only
+                    if (last_x < x1 <= x) or (last_x > x1 >= x):
+                        logger.debug(f"Object ID {object_id} crossed the vertical line from x={last_x} to x={x}")
+                        self._crossing_line_object[detected_object_label] += 1
                 else:
+                    # Diagonal line
                     if (x2 - x1) == 0:
                         return
                     slope = (y2 - y1) / (x2 - x1)
