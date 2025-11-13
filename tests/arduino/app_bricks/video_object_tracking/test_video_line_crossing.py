@@ -128,12 +128,11 @@ def test_no_line_set(detector: VideoObjectTracking):
         detector (VideoObjectTracking): An instance of the VideoObjectTracking class.
     """
 
-    detector._record_line_crossing(detected_object_label="bicycle", object_id=1, x=0, y=-1)
+    detector._record_line_crossing(detected_object_label="bicycle", object_id=1, x=100, y=50)
     detector._record_line_crossing(detected_object_label="bicycle", object_id=1, x=150, y=200)
     detections = detector.get_line_crossing_counts()
-    assert "bicycle" in detections
-    assert detections["bicycle"] == 1
-
+    # since no line is set means the x1,y1 and x2,y2 are all zero, so no crossing can be detected
+    assert "bicycle" not in detections
 
 def test_record_object(detector: VideoObjectTracking):
     """Test the _record_object method.
