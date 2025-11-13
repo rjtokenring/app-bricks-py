@@ -428,8 +428,7 @@ class VideoObjectTracking(VideoObjectDetection):
             raise TypeError("Invalid types for value.")
 
         for th in self._model_info.thresholds:
-            logger.debug(f"Overriding value for type: {th.get('type')}, id: {th.get('id')}, key: {key}, value: {value}")
             if th.get("type") == "object_tracking":
-                id = th["id"]
-                message = {"type": "threshold-override", "id": id, "key": key, "value": value}
+                logger.debug(f"Overriding value for type: {th.get('type')}, id: {th.get('id')}, key: {key}, value: {value}")
+                message = {"type": "threshold-override", "id": th["id"], "key": key, "value": value}
                 ws.send(json.dumps(message))
