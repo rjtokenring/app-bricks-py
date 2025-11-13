@@ -78,7 +78,8 @@ class VideoObjectTracking(VideoObjectDetection):
         return label in self._labels_to_track
 
     def _record_object(self, detected_object_label: str, object_id: float, x: int, y: int):
-        """Record that an object with a specific label and ID has been seen.
+        """
+        Record that an object with a specific label and ID has been seen.
 
         Args:
             detected_object_label (str): The label of the detected object.
@@ -98,7 +99,8 @@ class VideoObjectTracking(VideoObjectDetection):
         self._record_line_crossing(detected_object_label, object_id, x, y)
 
     def _record_line_crossing(self, detected_object_label: str, object_id: float, x: int, y: int):
-        """Record that an object with a specific label and ID has crossed the line.
+        """
+        Record that an object with a specific label and ID has crossed the line.
 
         Args:
             detected_object_label (str): The label of the detected object.
@@ -147,7 +149,8 @@ class VideoObjectTracking(VideoObjectDetection):
                 self._recent_objects[object_id] = (x, y)
 
     def get_unique_objects_count(self) -> dict:
-        """Get all identified object types and their counts since the last reset.
+        """
+        Get all identified object types and their counts since the last reset.
             This includes all distinguished objects sees, based on their unique IDs.
 
         Returns:
@@ -157,7 +160,8 @@ class VideoObjectTracking(VideoObjectDetection):
             return dict(self._object_counters)
 
     def get_line_crossing_counts(self) -> dict:
-        """Get the count of a specific identified object type since the last reset.
+        """
+        Get the count of objects that have crossed the defined line since the last reset.
             This includes all distinguished objects sees, based on their unique IDs.
 
         Returns:
@@ -167,14 +171,23 @@ class VideoObjectTracking(VideoObjectDetection):
             return dict(self._crossing_line_object)
 
     def set_crossing_line_coordinates(self, x1: int, y1: int, x2: int, y2: int):
-        """Set the coordinates of the line for counting objects crossing it."""
+        """
+        Set the coordinates of the line for counting objects crossing it.
+
+        Args:
+            x1 (int): The x-coordinate of the first point of the line.
+            y1 (int): The y-coordinate of the first point of the line.
+            x2 (int): The x-coordinate of the second point of the line.
+            y2 (int): The y-coordinate of the second point of the line.
+        """
         with self._counter_lock:
             self._line_coordinates = (x1, y1, x2, y2)
 
         self.reset_counters()
 
     def set_horizontal_crossing_line(self, y: int):
-        """Set a horizontal line for counting objects crossing it.
+        """
+        Set a horizontal line for counting objects crossing it.
 
         Args:
             y (int): The y-coordinate of the horizontal line.
@@ -182,7 +195,8 @@ class VideoObjectTracking(VideoObjectDetection):
         self.set_crossing_line_coordinates(0, y, 480, y)
 
     def set_vertical_crossing_line(self, x: int):
-        """Set a vertical line for counting objects crossing it.
+        """
+        Set a vertical line for counting objects crossing it.
 
         Args:
             x (int): The x-coordinate of the vertical line.
@@ -196,18 +210,18 @@ class VideoObjectTracking(VideoObjectDetection):
             self._recent_objects.clear()
             self._crossing_line_object.clear()
 
-    def on_detect(self, object: str, callback: Callable[[], None]):
+    def on_detect(self, obj: str, callback: Callable[[], None]):
         """Register a callback invoked when a **specific label** is detected.
 
         Args:
-            object (str): The label of the object to check for in the classification results.
+            obj (str): The label of the object to check for in the classification results.
             callback (Callable[[], None]): A function with **no parameters**.
 
         Raises:
             TypeError: If `callback` is not a function.
             ValueError: If `callback` accepts any parameters.
         """
-        super().on_detect(object, callback)
+        super().on_detect(obj, callback)
 
     def on_detect_all(self, callback: Callable[[dict], None]):
         """Register a callback invoked for **every detection event**.
@@ -237,10 +251,9 @@ class VideoObjectTracking(VideoObjectDetection):
 
         Behavior:
             - Establishes a WebSocket connection to the runner.
-            - Parses ``"hello"`` messages to capture model metadata and optionally
-              performs a threshold override to align the runner with the local setting.
-            - Parses ``"classification"`` messages, filters detections by confidence,
-              applies to debounce, then invokes registered callbacks.
+            - Processes incoming messages for detections.
+            - Invokes registered callbacks for detected objects.
+            - Handles clean disconnection when stopping.
             - Retries on transient WebSocket errors while running.
 
         Exceptions:
