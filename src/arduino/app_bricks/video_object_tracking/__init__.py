@@ -35,6 +35,7 @@ class VideoObjectTracking(VideoObjectDetection):
         iou_threshold: float = 0.1,
         debounce_sec: float = 0.0,
         labels_to_track: list[str] = None,
+        min_movement_threshold: int = 10,
     ):
         """Initialize the VideoObjectDetection class.
 
@@ -45,6 +46,8 @@ class VideoObjectTracking(VideoObjectDetection):
             max_observations (int): Maximum number of observations to consider. Default is 3
             iou_threshold (float): Intersection over Union threshold for tracking. Default is 0.1.
             labels_to_track (list[str], optional): List of labels to track. If None, all labels are tracked.
+            min_movement_threshold(int): Minimum distance in pixels to consider a movement significant for
+                direction tracking. Default is 10.
 
         Raises:
             RuntimeError: If the host address could not be resolved.
@@ -67,6 +70,7 @@ class VideoObjectTracking(VideoObjectDetection):
 
         # Directions tracking dict
         self._object_directions = {}
+        self._min_movement_threshold = min_movement_threshold
 
     def _is_label_enabled(self, label: str) -> bool:
         """Check if a label is enabled for tracking.
@@ -173,7 +177,7 @@ class VideoObjectTracking(VideoObjectDetection):
         with self._counter_lock:
             if object_id in self._recent_objects:
                 last_x, last_y = self._recent_objects[object_id]
-                direction = _get_direction(last_x, last_y, x, y)
+                direction = _get_direction(last_x, last_y, x, y, self._min_movement_threshold)
                 # check if last direction is different from current direction to avoid duplicates
                 if object_id in self._object_directions:
                     if len(self._object_directions[object_id]) > 0 and self._object_directions[object_id][-1] == direction:
@@ -493,7 +497,7 @@ class VideoObjectTracking(VideoObjectDetection):
                 ws.send(json.dumps(message))
 
 
-def _get_direction(last_x: int, last_y: int, x: int, y: int) -> str:
+def _get_direction(last_x: int, last_y: int, x: int, y: int, min_movement_threshold: int = 10) -> str | None:
     """
     Determine the movement direction based on the change in coordinates.
     Note: The directions are mirrored both horizontally and vertically.
@@ -503,18 +507,20 @@ def _get_direction(last_x: int, last_y: int, x: int, y: int) -> str:
         last_y (int): The previous y-coordinate.
         x (int): The current x-coordinate.
         y (int): The current y-coordinate.
+        min_movement_threshold (int): Minimum distance in pixels to consider a movement significant. Default is 10.
 
     Returns:
-        str: The movement direction ('up', 'down', 'left', 'right', 'up-left', 'up-right', 'down-left', 'down-right',
-        or 'stationary').
+        str: The movement direction ('up', 'down', 'left', 'right', 'up-left', 'up-right', 'down-left', 'down-right').
     """
     logger.debug(f"Calculating direction change from ({last_x}, {last_y}) to ({x}, {y})")
     dx = x - last_x
     dy = y - last_y
 
-    if abs(dx) < 1 and abs(dy) < 1:
-        direction = "stationary"
-    elif abs(dx) == abs(dy):
+    # Check for minimal movement to avoid noise detection as direction change
+    if abs(dx) < min_movement_threshold and abs(dy) < min_movement_threshold:
+        return None
+
+    if abs(dx) == abs(dy):
         logger.debug(f"Diagonal movement detected.")
         if dx > 0 and dy > 0:
             direction = "down-left"  # up-right becomes down-left
