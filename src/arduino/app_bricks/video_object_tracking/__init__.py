@@ -178,6 +178,8 @@ class VideoObjectTracking(VideoObjectDetection):
             if object_id in self._recent_objects:
                 last_x, last_y = self._recent_objects[object_id]
                 direction = _get_direction(last_x, last_y, x, y, self._min_movement_threshold)
+                if direction is None:
+                    return
                 # check if last direction is different from current direction to avoid duplicates
                 if object_id in self._object_directions:
                     if len(self._object_directions[object_id]) > 0 and self._object_directions[object_id][-1] == direction:
