@@ -52,23 +52,21 @@ def test_horizontal_line_crossing(detector: VideoObjectTracking):
 
     detector.set_horizontal_crossing_line(y=200)
 
-    detector._record_line_crossing(detected_object_label="person", object_id=1, x=100, y=150)
+    detector._record_object(detected_object_label="person", object_id=1, x=100, y=150)
     detections = detector.get_line_crossing_counts()
     assert "person" not in detections
 
     # up
-    detector._record_line_crossing(detected_object_label="person", object_id=1, x=100, y=250)
+    detector._record_object(detected_object_label="person", object_id=1, x=100, y=250)
     detections = detector.get_line_crossing_counts()
     assert "person" in detections
-    assert detections["person"]["count"] == 1
-    assert detections["person"]["direction"] == ["up"]
+    assert detections["person"] == 1
 
     # down
-    detector._record_line_crossing(detected_object_label="person", object_id=1, x=100, y=100)
+    detector._record_object(detected_object_label="person", object_id=1, x=100, y=100)
     detections = detector.get_line_crossing_counts()
     assert "person" in detections
-    assert detections["person"]["count"] == 2
-    assert detections["person"]["direction"] == ["up", "down"]
+    assert detections["person"] == 2
 
 
 def test_vertical_line_crossing(detector: VideoObjectTracking):
@@ -80,23 +78,21 @@ def test_vertical_line_crossing(detector: VideoObjectTracking):
 
     detector.set_vertical_crossing_line(x=200)
 
-    detector._record_line_crossing(detected_object_label="car", object_id=1, x=150, y=100)
+    detector._record_object(detected_object_label="car", object_id=1, x=150, y=100)
     detections = detector.get_line_crossing_counts()
     assert "car" not in detections
 
     # right
-    detector._record_line_crossing(detected_object_label="car", object_id=1, x=250, y=100)
+    detector._record_object(detected_object_label="car", object_id=1, x=250, y=100)
     detections = detector.get_line_crossing_counts()
     assert "car" in detections
-    assert detections["car"]["count"] == 1
-    assert detections["car"]["direction"] == ["right"]
+    assert detections["car"] == 1
 
     # left
-    detector._record_line_crossing(detected_object_label="car", object_id=1, x=150, y=100)
+    detector._record_object(detected_object_label="car", object_id=1, x=100, y=100)
     detections = detector.get_line_crossing_counts()
     assert "car" in detections
-    assert detections["car"]["count"] == 2
-    assert detections["car"]["direction"] == ["right", "left"]
+    assert detections["car"] == 2
 
 
 def test_diagonal_line_crossing(detector: VideoObjectTracking):
@@ -106,25 +102,23 @@ def test_diagonal_line_crossing(detector: VideoObjectTracking):
         detector (VideoObjectTracking): An instance of the VideoObjectTracking class.
     """
 
-    detector.set_crossing_line_coordinates(x1=0, y1=0, x2=200, y2=200)  # letter-box image
+    detector.set_crossing_line_coordinates(x1=0, y1=0, x2=200, y2=200)
 
-    detector._record_line_crossing(detected_object_label="dog", object_id=1, x=50, y=30)
+    detector._record_object(detected_object_label="dog", object_id=1, x=50, y=30)
     detections = detector.get_line_crossing_counts()
     assert "dog" not in detections
 
     # diagonal up
-    detector._record_line_crossing(detected_object_label="dog", object_id=1, x=200, y=220)  # above line
+    detector._record_object(detected_object_label="dog", object_id=1, x=200, y=220)
     detections = detector.get_line_crossing_counts()
     assert "dog" in detections
-    assert detections["dog"]["count"] == 1
-    assert detections["dog"]["direction"] == ["diagonal_up"]
+    assert detections["dog"] == 1
 
     # diagonal down
-    detector._record_line_crossing(detected_object_label="dog", object_id=1, x=50, y=30)  # below line
+    detector._record_object(detected_object_label="dog", object_id=1, x=50, y=30)
     detections = detector.get_line_crossing_counts()
     assert "dog" in detections
-    assert detections["dog"]["count"] == 2
-    assert detections["dog"]["direction"] == ["diagonal_up", "diagonal_down"]
+    assert detections["dog"] == 2
 
 
 def test_no_line_set(detector: VideoObjectTracking):
@@ -134,12 +128,11 @@ def test_no_line_set(detector: VideoObjectTracking):
         detector (VideoObjectTracking): An instance of the VideoObjectTracking class.
     """
 
-    detector._record_line_crossing(detected_object_label="bicycle", object_id=1, x=0, y=-1)
-    detector._record_line_crossing(detected_object_label="bicycle", object_id=1, x=150, y=200)
+    detector._record_object(detected_object_label="bicycle", object_id=1, x=100, y=50)
+    detector._record_object(detected_object_label="bicycle", object_id=1, x=150, y=200)
     detections = detector.get_line_crossing_counts()
-    assert "bicycle" in detections
-    assert detections["bicycle"]["count"] == 1
-    assert detections["bicycle"]["direction"] == ["up"]
+    # since no line is set means the x1,y1 and x2,y2 are all zero, so no crossing can be detected
+    assert "bicycle" not in detections
 
 
 def test_record_object(detector: VideoObjectTracking):
@@ -182,7 +175,7 @@ def test_reset_counters(detector: VideoObjectTracking):
 
     line_crossings = detector.get_line_crossing_counts()
     assert "cat" in line_crossings
-    assert line_crossings["cat"]["count"] == 1
+    assert line_crossings["cat"] == 1
 
     detector.reset_counters()
 
@@ -191,3 +184,32 @@ def test_reset_counters(detector: VideoObjectTracking):
 
     line_crossings = detector.get_line_crossing_counts()
     assert line_crossings == {}
+
+
+def test_get_objects_directions(detector: VideoObjectTracking):
+    """Test the get_objects_directions method.
+
+    Args:
+        detector (VideoObjectTracking): An instance of the VideoObjectTracking class.
+    """
+    detector._record_object(detected_object_label="person", object_id=1, x=50, y=50)  # first position
+    detector._record_object(detected_object_label="person", object_id=1, x=50, y=150) # down
+    detector._record_object(detected_object_label="person", object_id=1, x=50, y=50)  # up
+    detector._record_object(detected_object_label="person", object_id=1, x=70, y=50)  # left
+    detector._record_object(detected_object_label="person", object_id=1, x=50, y=50)  # right
+    detector._record_object(detected_object_label="person", object_id=1, x=30, y=70)  # down-right
+    detector._record_object(detected_object_label="person", object_id=1, x=10, y=50)  # up-right
+    detector._record_object(detected_object_label="person", object_id=1, x=30, y=70)  # down-left
+    detector._record_object(detected_object_label="person", object_id=1, x=80, y=20)  # up-left
+
+    directions = detector.get_objects_directions()
+    assert directions.get(1) == ["down", "up", "left", "right", "down-right", "up-right", "down-left", "up-left"]
+
+    detector._min_movement_threshold = 20
+    detector._record_object(detected_object_label="person", object_id=1, x=50, y=50) # first position
+    detector._record_object(detected_object_label="person", object_id=2, x=45, y=50) # right (less than 20 pixels)
+    directions = detector.get_objects_directions()
+    assert not directions.get(2)  # movement should not be recorded because of the movement is less than 20 pixels
+    detector._record_object(detected_object_label="person", object_id=2, x=20, y=50) # right (more than 20 pixels)
+    directions = detector.get_objects_directions()
+    assert directions.get(2) == ["right"]  # movement should be recorded

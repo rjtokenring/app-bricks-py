@@ -35,6 +35,7 @@ class VideoObjectTracking(VideoObjectDetection):
         iou_threshold: float = 0.1,
         debounce_sec: float = 0.0,
         labels_to_track: list[str] = None,
+        min_movement_threshold: int = 10,
     ):
         """Initialize the VideoObjectDetection class.
 
@@ -45,6 +46,8 @@ class VideoObjectTracking(VideoObjectDetection):
             max_observations (int): Maximum number of observations to consider. Default is 3
             iou_threshold (float): Intersection over Union threshold for tracking. Default is 0.1.
             labels_to_track (list[str], optional): List of labels to track. If None, all labels are tracked.
+            min_movement_threshold(int): Minimum distance in pixels to consider a movement significant for
+                direction tracking. Default is 10.
 
         Raises:
             RuntimeError: If the host address could not be resolved.
@@ -63,7 +66,11 @@ class VideoObjectTracking(VideoObjectDetection):
 
         # Crossing line coordinates
         self._line_coordinates = (0, 0, 0, 0)  # x1, y1, x2, y2
-        self._crossing_line_object = {}  # {label: {"counter": int, "direction": [str, ...]}}
+        self._crossing_line_object = Counter()
+
+        # Directions tracking dict
+        self._object_directions = {}
+        self._min_movement_threshold = min_movement_threshold
 
     def _is_label_enabled(self, label: str) -> bool:
         """Check if a label is enabled for tracking.
@@ -78,7 +85,8 @@ class VideoObjectTracking(VideoObjectDetection):
         return label in self._labels_to_track
 
     def _record_object(self, detected_object_label: str, object_id: float, x: int, y: int):
-        """Record that an object with a specific label and ID has been seen.
+        """
+        Record that an object with a specific label and ID has been seen.
 
         Args:
             detected_object_label (str): The label of the detected object.
@@ -95,10 +103,19 @@ class VideoObjectTracking(VideoObjectDetection):
             if object_id not in self._recent_objects:
                 self._object_counters[detected_object_label] += 1
 
-        self._record_line_crossing(detected_object_label, object_id, x, y)
+        if object_id in self._recent_objects:
+            last_x, last_y = self._recent_objects[object_id]
+            if last_x == x and last_y == y:
+                # No movement detected; skip further processing
+                return
+            self._record_line_crossing(detected_object_label, object_id, x, y)
+            self._record_object_direction(detected_object_label, object_id, x, y)
+        # Update the last seen position
+        self._recent_objects[object_id] = (x, y)
 
     def _record_line_crossing(self, detected_object_label: str, object_id: float, x: int, y: int):
-        """Record that an object with a specific label and ID has crossed the line.
+        """
+        Record that an object with a specific label and ID has crossed the line.
 
         Args:
             detected_object_label (str): The label of the detected object.
@@ -114,57 +131,68 @@ class VideoObjectTracking(VideoObjectDetection):
             if object_id in self._recent_objects:
                 last_x, last_y = self._recent_objects[object_id]
                 x1, y1, x2, y2 = self._line_coordinates
-                logger.debug(f"Checking line crossing for object ID {object_id} from ({last_x}, {last_y}) to ({x}, {y}) against line ({x1}, {y1}) to ({x2}, {y2})")
+                logger.debug(
+                    f"Checking line crossing for object ID {object_id} from ({last_x}, {last_y}) to ({x}, {y}) "
+                    f"against line ({x1}, {y1}) to ({x2}, {y2})"
+                )
 
-                # Update the last seen position
-                self._recent_objects[object_id] = (x, y)
-
-                # Simple line crossing detection (horizontal line)
-                if last_y < y1 <= y:
-                    logger.debug(f"Object ID {object_id} crossed up line from y={last_y} to y={y}")
-                    self._increase_line_crossing_count(detected_object_label, "up")
-                elif last_y > y1 >= y:
-                    logger.debug(f"Object ID {object_id} crossed down line from y={last_y} to y={y}")
-                    self._increase_line_crossing_count(detected_object_label, "down")
-                # Simple line crossing detection (vertical line)
-                elif last_x < x1 <= x:
-                    logger.debug(f"Object ID {object_id} crossed right line from x={last_x} to x={x}")
-                    self._increase_line_crossing_count(detected_object_label, "right")
-                elif last_x > x1 >= x:
-                    logger.debug(f"Object ID {object_id} crossed left line from x={last_x} to x={x}")
-                    self._increase_line_crossing_count(detected_object_label, "left")
+                if y1 == y2:
+                    # Horizontal line set so check for crossing horizontally only
+                    if (last_y < y1 <= y) or (last_y > y1 >= y):
+                        logger.debug(f"Object ID {object_id} crossed the horizontal line from y={last_y} to y={y}")
+                        self._crossing_line_object[detected_object_label] += 1
+                elif x1 == x2:
+                    # Vertical line set so check for crossing vertically only
+                    if (last_x < x1 <= x) or (last_x > x1 >= x):
+                        logger.debug(f"Object ID {object_id} crossed the vertical line from x={last_x} to x={x}")
+                        self._crossing_line_object[detected_object_label] += 1
                 else:
+                    # Diagonal line
                     if (x2 - x1) == 0:
                         return
                     slope = (y2 - y1) / (x2 - x1)
                     intercept = y1 - slope * x1
                     line_y_at_last_x = slope * last_x + intercept
                     line_y_at_current_x = slope * x + intercept
-                    if last_y < line_y_at_last_x and y >= line_y_at_current_x:
-                        logger.debug(f"Object ID {object_id} crossed diagonal up line from ({last_x}, {last_y}) to ({x}, {y})")
-                        self._increase_line_crossing_count(detected_object_label, "diagonal_up")
-                    elif last_y > line_y_at_last_x and y <= line_y_at_current_x:
-                        logger.debug(f"Object ID {object_id} crossed diagonal down line from ({last_x}, {last_y}) to ({x}, {y})")
-                        self._increase_line_crossing_count(detected_object_label, "diagonal_down")
-            else:
-                # First time seeing this object ID, just record its position
-                self._recent_objects[object_id] = (x, y)
+                    crossed_up = last_y < line_y_at_last_x and y >= line_y_at_current_x
+                    crossed_down = last_y > line_y_at_last_x and y <= line_y_at_current_x
+                    if crossed_up or crossed_down:
+                        logger.debug(f"Object ID {object_id} crossed the diagonal line from ({last_x}, {last_y}) to ({x}, {y})")
+                        self._crossing_line_object[detected_object_label] += 1
 
-    def _increase_line_crossing_count(self, label: str, direction: str):
-        """Increase the line crossing count for a specific label and direction.
+    def _record_object_direction(self, detected_object_label: str, object_id: float, x: int, y: int):
+        """
+        Record the movement direction of an object with a specific label and ID.
 
         Args:
-            label (str): The label of the detected object.
-            direction (str): The direction of crossing ('horizontal', 'vertical', 'diagonal').
+            detected_object_label (str): The label of the detected object.
+            object_id (float): The unique ID of the detected object.
+            x (int): The x-coordinate of the detected object.
+            y (int): The y-coordinate of the detected object.
         """
+        if not self._is_label_enabled(detected_object_label):
+            # Discard if the label is not enabled for tracking
+            return
+
         with self._counter_lock:
-            if label not in self._crossing_line_object:
-                self._crossing_line_object[label] = {"count": 0, "direction": []}
-            self._crossing_line_object[label]["count"] += 1
-            self._crossing_line_object[label]["direction"].append(direction)
+            if object_id in self._recent_objects:
+                last_x, last_y = self._recent_objects[object_id]
+                direction = _get_direction(last_x, last_y, x, y, self._min_movement_threshold)
+                if direction is None:
+                    return
+                # check if last direction is different from current direction to avoid duplicates
+                if object_id in self._object_directions:
+                    if len(self._object_directions[object_id]) > 0 and self._object_directions[object_id][-1] == direction:
+                        return
+                else:
+                    # Initialize the list if no object ID entry exists
+                    self._object_directions[object_id] = []
+                self._object_directions[object_id].append(direction)
+                logger.debug(f"Object ID {object_id} moved {direction} from ({last_x}, {last_y}) to ({x}, {y})")
 
     def get_unique_objects_count(self) -> dict:
-        """Get all identified object types and their counts since the last reset.
+        """
+        Get all identified object types and their counts since the last reset.
             This includes all distinguished objects sees, based on their unique IDs.
 
         Returns:
@@ -174,24 +202,44 @@ class VideoObjectTracking(VideoObjectDetection):
             return dict(self._object_counters)
 
     def get_line_crossing_counts(self) -> dict:
-        """Get the count of a specific identified object type since the last reset.
+        """
+        Get the count of objects that have crossed the defined line since the last reset.
             This includes all distinguished objects sees, based on their unique IDs.
 
         Returns:
-            dict: A dictionary with labels as keys and their respective counts and directions as values.
+            dict: A dictionary with labels as keys and their respective counts as values.
         """
         with self._counter_lock:
-            return self._crossing_line_object
+            return dict(self._crossing_line_object)
+
+    def get_objects_directions(self) -> dict:
+        """
+        Get the last known movement directions of tracked objects.
+
+        Returns:
+            dict: A dictionary with object IDs as keys and their respective movement directions as values.
+        """
+        with self._counter_lock:
+            return dict(self._object_directions)
 
     def set_crossing_line_coordinates(self, x1: int, y1: int, x2: int, y2: int):
-        """Set the coordinates of the line for counting objects crossing it."""
+        """
+        Set the coordinates of the line for counting objects crossing it.
+
+        Args:
+            x1 (int): The x-coordinate of the first point of the line.
+            y1 (int): The y-coordinate of the first point of the line.
+            x2 (int): The x-coordinate of the second point of the line.
+            y2 (int): The y-coordinate of the second point of the line.
+        """
         with self._counter_lock:
             self._line_coordinates = (x1, y1, x2, y2)
 
         self.reset_counters()
 
     def set_horizontal_crossing_line(self, y: int):
-        """Set a horizontal line for counting objects crossing it.
+        """
+        Set a horizontal line for counting objects crossing it.
 
         Args:
             y (int): The y-coordinate of the horizontal line.
@@ -199,7 +247,8 @@ class VideoObjectTracking(VideoObjectDetection):
         self.set_crossing_line_coordinates(0, y, 480, y)
 
     def set_vertical_crossing_line(self, x: int):
-        """Set a vertical line for counting objects crossing it.
+        """
+        Set a vertical line for counting objects crossing it.
 
         Args:
             x (int): The x-coordinate of the vertical line.
@@ -213,18 +262,18 @@ class VideoObjectTracking(VideoObjectDetection):
             self._recent_objects.clear()
             self._crossing_line_object.clear()
 
-    def on_detect(self, object: str, callback: Callable[[], None]):
+    def on_detect(self, obj: str, callback: Callable[[], None]):
         """Register a callback invoked when a **specific label** is detected.
 
         Args:
-            object (str): The label of the object to check for in the classification results.
+            obj (str): The label of the object to check for in the classification results.
             callback (Callable[[], None]): A function with **no parameters**.
 
         Raises:
             TypeError: If `callback` is not a function.
             ValueError: If `callback` accepts any parameters.
         """
-        super().on_detect(object, callback)
+        super().on_detect(obj, callback)
 
     def on_detect_all(self, callback: Callable[[dict], None]):
         """Register a callback invoked for **every detection event**.
@@ -254,10 +303,9 @@ class VideoObjectTracking(VideoObjectDetection):
 
         Behavior:
             - Establishes a WebSocket connection to the runner.
-            - Parses ``"hello"`` messages to capture model metadata and optionally
-              performs a threshold override to align the runner with the local setting.
-            - Parses ``"classification"`` messages, filters detections by confidence,
-              applies to debounce, then invokes registered callbacks.
+            - Processes incoming messages for detections.
+            - Invokes registered callbacks for detected objects.
+            - Handles clean disconnection when stopping.
             - Retries on transient WebSocket errors while running.
 
         Exceptions:
@@ -358,7 +406,7 @@ class VideoObjectTracking(VideoObjectDetection):
             logger.warning(f"Unknown message type: {jmsg.get('type')}")
 
     def override_confidence(self, confidence: float):
-        """Override the threshold for object detection model.
+        """Override the confidence threshold for object detection model.
 
         Args:
             confidence (float): The new value for the confidence threshold in the range [0.0, 1.0].
@@ -367,11 +415,10 @@ class VideoObjectTracking(VideoObjectDetection):
             TypeError: If the value is not a number.
             RuntimeError: If the model information is not available or does not support threshold override.
         """
-        with connect(self._uri) as ws:
-            self._override_thresholds(ws, confidence, self._max_observations, self._keep_grace, self._iou_threshold)
+        super().override_threshold(confidence)
 
     def override_keep_grace(self, keep_grace: int):
-        """Override keep grace for object detection model.
+        """Override keep grace for object tracking model.
             Keep Grace: how many frames an object is kept if it disappears.
 
         Args:
@@ -379,12 +426,18 @@ class VideoObjectTracking(VideoObjectDetection):
 
         Raises:
             TypeError: If the value is not a number.
+            RuntimeError: If the model information is not available or does not support threshold override.
         """
-        with connect(self._uri) as ws:
-            self._override_thresholds(ws, self._confidence, self._max_observations, keep_grace, self._iou_threshold)
+        try:
+            with connect(self._uri) as ws:
+                self._override_config_value(ws, "keep_grace", keep_grace)
+            self._keep_grace = keep_grace
+        except Exception as e:
+            logger.error(f"Failed to override keep grace: {e}")
+            raise
 
     def override_max_observations(self, max_observations: int):
-        """Override max observations for object detection model.
+        """Override max observations for object tracking model.
             Max Observations: how many frames an object is kept if it disappears.
 
         Args:
@@ -394,11 +447,16 @@ class VideoObjectTracking(VideoObjectDetection):
             TypeError: If the value is not a number.
             RuntimeError: If the model information is not available or does not support threshold override.
         """
-        with connect(self._uri) as ws:
-            self._override_thresholds(ws, self._confidence, max_observations, self._keep_grace, self._iou_threshold)
+        try:
+            with connect(self._uri) as ws:
+                self._override_config_value(ws, "max_observations", max_observations)
+            self._max_observations = max_observations
+        except Exception as e:
+            logger.error(f"Failed to override max observations: {e}")
+            raise
 
-    def override_iou_threshold(self, iou_threshold: int):
-        """Override IoU threshold for object detection model.
+    def override_iou_threshold(self, iou_threshold: float):
+        """Override IoU threshold for object tracking model.
             IOU Threshold: Intersection over Union threshold for tracking.
 
         Args:
@@ -408,55 +466,83 @@ class VideoObjectTracking(VideoObjectDetection):
             TypeError: If the value is not a number.
             RuntimeError: If the model information is not available or does not support threshold override.
         """
-        with connect(self._uri) as ws:
-            self._override_thresholds(ws, self._confidence, self._max_observations, self._keep_grace, iou_threshold)
+        try:
+            with connect(self._uri) as ws:
+                self._override_config_value(ws, "iou_threshold", iou_threshold)
+            self._iou_threshold = iou_threshold
+        except Exception as e:
+            logger.error(f"Failed to override IoU threshold: {e}")
+            raise
 
-    def _override_thresholds(self, ws: ClientConnection, confidence: float, max_observations: int, keep_grace: int, iou_threshold: float):
-        """Override the threshold for object detection model.
+    def _override_config_value(self, ws: ClientConnection, key: str, value: float | int):
+        """Override a specific configuration value for the object tracking model.
 
         Args:
             ws (ClientConnection): The WebSocket connection to send the message through.
-            confidence (float): The new value for the threshold.
-            max_observations (int): Maximum number of observations to consider.
-            keep_grace (int): Grace period to keep observations.
-            iou_threshold (float): Intersection over Union threshold for tracking.
+            key (str): The configuration key to override.
+            value (float | int): The new value for the configuration.
 
         Raises:
+            RuntimeError: If the model information is not available or does not support threshold override.
             TypeError: If the value is not a number.
         """
         if self._model_info is None or self._model_info.thresholds is None or len(self._model_info.thresholds) == 0:
             raise RuntimeError("Model information is not available or does not support threshold override.")
 
+        if not value or not isinstance(value, (int, float)):
+            raise TypeError("Invalid types for value.")
+
         for th in self._model_info.thresholds:
-            logger.debug(f"Overriding threshold for type: {th.get('type')}, id: {th.get('id')}")
-            if th.get("type") == "object_detection":
-                id = th["id"]
-                message = {"type": "threshold-override", "id": id, "key": "min_score", "value": confidence}
-
-                logger.info(f"Overriding detection threshold. New confidence: {confidence}")
-                ws.send(json.dumps(message))
-                # Update local confidence value
-                self._confidence = confidence
-
             if th.get("type") == "object_tracking":
-                id = th["id"]
-                message = {"type": "threshold-override", "id": id, "key": "max_observations", "value": max_observations}
-
+                logger.debug(f"Overriding value for type: {th.get('type')}, id: {th.get('id')}, key: {key}, value: {value}")
+                message = {"type": "threshold-override", "id": th["id"], "key": key, "value": value}
                 ws.send(json.dumps(message))
-                # Update local max observations value
-                self._max_observations = max_observations
 
-                message = {"type": "threshold-override", "id": id, "key": "keep_grace", "value": keep_grace}
 
-                ws.send(json.dumps(message))
-                # Update local keep grace value
-                self._keep_grace = keep_grace
+def _get_direction(last_x: int, last_y: int, x: int, y: int, min_movement_threshold: int = 10) -> str | None:
+    """
+    Determine the movement direction based on the change in coordinates.
+    Note: The directions are mirrored both horizontally and vertically.
 
-                # Update Intersection over Union threshold
-                message = {"type": "threshold-override", "id": id, "key": "threshold", "value": iou_threshold}
+    Args:
+        last_x (int): The previous x-coordinate.
+        last_y (int): The previous y-coordinate.
+        x (int): The current x-coordinate.
+        y (int): The current y-coordinate.
+        min_movement_threshold (int): Minimum distance in pixels to consider a movement significant. Default is 10.
 
-                ws.send(json.dumps(message))
-                # Update local keep grace value
-                self._iou_threshold = iou_threshold
+    Returns:
+        str: The movement direction ('up', 'down', 'left', 'right', 'up-left', 'up-right', 'down-left', 'down-right').
+    """
+    logger.debug(f"Calculating direction change from ({last_x}, {last_y}) to ({x}, {y})")
+    dx = x - last_x
+    dy = y - last_y
 
-                logger.info(f"Overriding thresholds - max_observations: {max_observations}, keep_grace: {keep_grace}, iou_threshold: {iou_threshold}")
+    # Check for minimal movement to avoid noise detection as direction change
+    if abs(dx) < min_movement_threshold and abs(dy) < min_movement_threshold:
+        return None
+
+    if abs(dx) == abs(dy):
+        logger.debug(f"Diagonal movement detected.")
+        if dx > 0 and dy > 0:
+            direction = "down-left"  # up-right becomes down-left
+        elif dx > 0 > dy:
+            direction = "up-left"  # down-right becomes up-left
+        elif dx < 0 < dy:
+            direction = "down-right"  # up-left becomes down-right ok
+        elif dx < 0 and dy < 0:
+            direction = "up-right"  # down-left becomes up-right ok
+    elif abs(dx) > abs(dy):
+        logger.debug(f"Horizontal movement detected.")
+        if dx > 0:
+            direction = "left"  # right becomes left
+        else:
+            direction = "right"  # left becomes right
+    else:
+        logger.debug(f"Vertical movement detected.")
+        if dy > 0:
+            direction = "down"  # up becomes down
+        else:
+            direction = "up"  # down becomes up
+
+    return direction
