@@ -33,6 +33,7 @@ class VideoObjectTracking(VideoObjectDetection):
         keep_grace: int = 3,
         max_observations: int = 3,
         iou_threshold: float = 0.1,
+        euclidean_distance_threshold: int = 50,
         debounce_sec: float = 0.0,
         labels_to_track: list[str] = None,
         min_movement_threshold: int = 10,
@@ -44,7 +45,8 @@ class VideoObjectTracking(VideoObjectDetection):
             debounce_sec (float): Minimum seconds between repeated detections of the same object. Default is 0 seconds.
             keep_grace (int): Number of frames to keep an object if it disappears. Default is 3.
             max_observations (int): Maximum number of observations to consider. Default is 3
-            iou_threshold (float): Intersection over Union threshold for tracking. Default is 0.1.
+            iou_threshold (float): Intersection over Union threshold for tracking. Default is 0.1. This is used in case of object detection models.
+            euclidean_distance_threshold (int): Maximum distance in pixels. Default is 50 (px). This is used in case of centroids models, like FOMO.
             labels_to_track (list[str], optional): List of labels to track. If None, all labels are tracked.
             min_movement_threshold(int): Minimum distance in pixels to consider a movement significant for
                 direction tracking. Default is 10.
@@ -57,6 +59,7 @@ class VideoObjectTracking(VideoObjectDetection):
         self._max_observations = max_observations
         self._keep_grace = keep_grace
         self._iou_threshold = iou_threshold
+        self._euclidean_distance_threshold = euclidean_distance_threshold
 
         # Counter for tracked objects
         self._counter_lock = threading.RLock()
@@ -350,7 +353,7 @@ class VideoObjectTracking(VideoObjectDetection):
             try:
                 self._model_info = EdgeImpulseRunnerFacade.parse_model_info_message(jmsg)
                 if self._model_info and self._model_info.thresholds is not None:
-                    self._override_thresholds(ws, self._confidence, self._max_observations, self._keep_grace, self._iou_threshold)
+                    self._set_thresholds()
 
             except Exception as e:
                 logger.error(f"Error parsing WS hello message: {e}")
@@ -405,6 +408,13 @@ class VideoObjectTracking(VideoObjectDetection):
             # Leave logging for unknown message types for debugging purposes
             logger.warning(f"Unknown message type: {jmsg.get('type')}")
 
+    def _set_thresholds(self):
+        """Set the thresholds for the object tracking model."""
+        self.override_confidence(self._confidence)
+        self.override_keep_grace(self._keep_grace)
+        self.override_max_observations(self._max_observations)
+        self.override_iou_threshold(self._iou_threshold)
+
     def override_confidence(self, confidence: float):
         """Override the confidence threshold for object detection model.
 
@@ -457,6 +467,7 @@ class VideoObjectTracking(VideoObjectDetection):
 
     def override_iou_threshold(self, iou_threshold: float):
         """Override IoU threshold for object tracking model.
+            This is valid for bounding box object detection based models, like Yolo.
             IOU Threshold: Intersection over Union threshold for tracking.
 
         Args:
@@ -466,9 +477,41 @@ class VideoObjectTracking(VideoObjectDetection):
             TypeError: If the value is not a number.
             RuntimeError: If the model information is not available or does not support threshold override.
         """
+
+        if self._model_info is not None and self._model_info.model_type is not None:
+            if self._model_info.model_type == "constrained_object_detection":
+                logger.debug("The model type is 'centroids'. Consider using 'override_euclidean_distance_threshold' instead for better results.")
+                return
+
         try:
             with connect(self._uri) as ws:
-                self._override_config_value(ws, "iou_threshold", iou_threshold)
+                self._override_config_value(ws, "threshold", iou_threshold)
+            self._iou_threshold = iou_threshold
+        except Exception as e:
+            logger.error(f"Failed to override IoU threshold: {e}")
+            raise
+
+    def override_euclidean_distance_threshold(self, iou_threshold: float):
+        """Override euclidean distance threshold for object tracking model.
+            This is valid for centroids based detection models, like FOMO.
+            Euclidean Distance Threshold: Maximum distance in pixels to consider two detections as the same object.
+
+        Args:
+            iou_threshold (float): The new value for the IoU threshold.
+
+        Raises:
+            TypeError: If the value is not a number.
+            RuntimeError: If the model information is not available or does not support threshold override.
+        """
+
+        if self._model_info is not None and self._model_info.model_type is not None:
+            if self._model_info.model_type == "object_detection":
+                logger.debug("The model type is 'constrained_object_detection'. Consider using 'override_iou_threshold' instead for better results.")
+                return
+
+        try:
+            with connect(self._uri) as ws:
+                self._override_config_value(ws, "threshold", iou_threshold)
             self._iou_threshold = iou_threshold
         except Exception as e:
             logger.error(f"Failed to override IoU threshold: {e}")

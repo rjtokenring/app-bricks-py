@@ -193,7 +193,7 @@ def test_get_objects_directions(detector: VideoObjectTracking):
         detector (VideoObjectTracking): An instance of the VideoObjectTracking class.
     """
     detector._record_object(detected_object_label="person", object_id=1, x=50, y=50)  # first position
-    detector._record_object(detected_object_label="person", object_id=1, x=50, y=150) # down
+    detector._record_object(detected_object_label="person", object_id=1, x=50, y=150)  # down
     detector._record_object(detected_object_label="person", object_id=1, x=50, y=50)  # up
     detector._record_object(detected_object_label="person", object_id=1, x=70, y=50)  # left
     detector._record_object(detected_object_label="person", object_id=1, x=50, y=50)  # right
@@ -206,10 +206,10 @@ def test_get_objects_directions(detector: VideoObjectTracking):
     assert directions.get(1) == ["down", "up", "left", "right", "down-right", "up-right", "down-left", "up-left"]
 
     detector._min_movement_threshold = 20
-    detector._record_object(detected_object_label="person", object_id=1, x=50, y=50) # first position
-    detector._record_object(detected_object_label="person", object_id=2, x=45, y=50) # right (less than 20 pixels)
+    detector._record_object(detected_object_label="person", object_id=1, x=50, y=50)  # first position
+    detector._record_object(detected_object_label="person", object_id=2, x=45, y=50)  # right (less than 20 pixels)
     directions = detector.get_objects_directions()
     assert not directions.get(2)  # movement should not be recorded because of the movement is less than 20 pixels
-    detector._record_object(detected_object_label="person", object_id=2, x=20, y=50) # right (more than 20 pixels)
+    detector._record_object(detected_object_label="person", object_id=2, x=20, y=50)  # right (more than 20 pixels)
     directions = detector.get_objects_directions()
     assert directions.get(2) == ["right"]  # movement should be recorded
