@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+#
+# SPDX-License-Identifier: MPL-2.0
+
 NODE_COMMAND=("node" "/app/linux/node/build/cli/linux/runner.js" "$@")
 
 trap_signal() {
