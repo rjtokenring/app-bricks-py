@@ -5,8 +5,8 @@
 FROM public.ecr.aws/z9b3d4t5/inference-container-qc-adreno-702:4d7979284677b6bdb557abe8948fa1395dc89a63
 
 # Add all EI OOTB models to the container with specific ownership
-COPY --chown=arduino:arduino ./models/ei-ootb-models/arm64/* /models/ootb/ei/
-COPY --chown=arduino:arduino ./src/start-runner.sh /home/arduino/start-runner.sh
+COPY ./models/ei-ootb-models/arm64/* /models/ootb/ei/
+COPY ./src/start-runner.sh /home/arduino/start-runner.sh
 
 # Create the user and group needed to run the container as non-root
 RUN set -ex; \
@@ -15,6 +15,8 @@ RUN set -ex; \
     groupadd -g 991 render || true; \
     groupadd -g 1000 arduino || true; \
     useradd -u 1000 -g arduino -G audio,video,render -ms /bin/bash arduino; \
+    chown -R arduino:arduino /models/; \
+    chown -R arduino:arduino /home/arduino/; \
     chmod +x /home/arduino/start-runner.sh
 
 WORKDIR /home/arduino
