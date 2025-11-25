@@ -14,12 +14,12 @@ RUN set -ex; \
 
 # Add all EI OOTB models to the container with specific ownership
 COPY --chown=arduino:arduino ./models/ei-ootb-models/arm64/* /models/ootb/ei/
+COPY --chown=arduino:arduino ./src/start-runner.sh /home/arduino/start-runner.sh
+
+WORKDIR /home/arduino
+ENV HOME=/home/arduino
 
 USER arduino
-
-WORKDIR /app
-
-ENV HOME=/home/arduino
 ENV USER=arduino
 
-ENTRYPOINT ["node", "/app/linux/node/build/cli/linux/runner.js"]
+ENTRYPOINT ["/home/arduino/start-runner.sh"]
