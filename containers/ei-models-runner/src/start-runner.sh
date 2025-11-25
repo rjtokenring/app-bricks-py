@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo("$@")
+echo "$@"
 
 NODE_COMMAND=("node" "/app/linux/node/build/cli/linux/runner.js" "$@")
 
@@ -13,7 +13,7 @@ NODE_COMMAND=("node" "/app/linux/node/build/cli/linux/runner.js" "$@")
 #trap 'trap_signal INT' INT
 
 while true; do
-  echo "🚀 Starting runner..."
+  echo "🚀 Starting EI runner..."
 
   "${NODE_COMMAND[@]}"
 
