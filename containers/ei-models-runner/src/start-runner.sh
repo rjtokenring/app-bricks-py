@@ -2,6 +2,14 @@
 
 NODE_COMMAND=("node" "/app/linux/node/build/cli/linux/runner.js" "$@")
 
+trap_signal() {
+  echo "Caught signal $1. Exiting wrapper immediately..."
+  exit 0
+}
+
+trap 'trap_signal TERM' TERM
+trap 'trap_signal INT' INT
+
 while true; do
   echo "🚀 Starting runner..."
 
@@ -18,3 +26,5 @@ while true; do
     sleep 1
   fi
 done
+
+exit $EXIT_CODE
