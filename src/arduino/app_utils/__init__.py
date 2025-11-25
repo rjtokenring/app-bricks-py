@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 ARDUINO SA <http://www.arduino.cc>
+# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
 #
 # SPDX-License-Identifier: MPL-2.0
 
@@ -11,9 +11,11 @@ from .httprequest import *
 from .image import *
 from .jsonparser import *
 from .logger import *
+from .ledmatrix import *
 from .slidingwindowbuffer import *
 from .userinput import *
 from .caches import *
+from .leds import *
 
 __all__ = [
     "App",
@@ -23,6 +25,8 @@ __all__ = [
     "call",
     "provide",
     "FolderWatcher",
+    "Frame",
+    "FrameDesigner",
     "HttpClient",
     "draw_bounding_boxes",
     "get_image_bytes",
@@ -33,4 +37,5 @@ __all__ = [
     "SlidingWindowBuffer",
     "UserTextInput",
     "LRUDict",
+    "Leds",
 ]
