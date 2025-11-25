@@ -1,5 +1,7 @@
 #!/bin/bash
 
+echo("$@")
+
 NODE_COMMAND=("node" "/app/linux/node/build/cli/linux/runner.js" "$@")
 
 #trap_signal() {
