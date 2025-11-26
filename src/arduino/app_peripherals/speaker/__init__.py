@@ -148,15 +148,21 @@ class Speaker:
 
         logger.debug(f"Applying dmix wrapper to: {device}")
 
-        match = re.search(r"plughw:CARD=([\w]+),DEV=([\w])", device)
+        match = re.search(r"(plughw|hw):CARD=([\w]+),DEV=([\w])", device)
         if match:
-            card = match.group(1)
-            device_num = match.group(2)
+            card = match.group(2)
+            device_num = match.group(3)
             device_key = f"{card}_{device_num}"
+            card_names = alsaaudio.cards()
+            try:
+                card_index = card_names.index(card)
+            except ValueError:
+                print(f"Card '{card}' not found.")
+                return None
         else:
             device_key = re.sub(r"[^a-zA-Z0-9]", "_", device)
 
-        device = device.replace("plughw:", "hw:", 1) if device.startswith("plughw:") else device
+        device_hw = f"hw:{card_index},{device_num}"
         dmix_device = f"{device_key}_wrapped"
 
         ipc_key = Speaker._ipc_key
@@ -168,7 +174,7 @@ pcm.{device_key}_dmix {{
     ipc_key {ipc_key} 
     ipc_key_add_uid true
     slave {{
-        pcm "{device}"
+        pcm "{device_hw}"
     }}
 }}
 
@@ -185,7 +191,7 @@ pcm.{dmix_device} {{
     control {{
         name "{dmix_device}"
         # card must be aligned with the above card definition
-        card 2
+        card {card_index}
     }}
 }}
 """
@@ -204,7 +210,7 @@ pcm.{dmix_device} {{
                     return dmix_device
 
         with open(alsa_sound_src_path, "a") as f:
-            f.write(f"\n<{alsa_conf_path}>")
+            f.write(f"\n<{alsa_conf_path}>\n")
 
         return dmix_device
 
