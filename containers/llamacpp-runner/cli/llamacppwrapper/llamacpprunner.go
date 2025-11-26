@@ -74,8 +74,6 @@ func DownloadMode(model string) (int, error) {
 								if err == nil {
 									barOut := generateProgressBar(percent, 100, 30)
 									fmt.Print(barOut)
-								} else {
-									fmt.Printf("\r%s%%", progress)
 								}
 							}
 						}
@@ -107,7 +105,9 @@ func DownloadMode(model string) (int, error) {
 		}
 	}
 
-	fmt.Println("Process finished with exit code:", exitCode)
+	if exitCode != 0 {
+		fmt.Println("\nProcess finished with exit code:", exitCode)
+	}
 
 	return exitCode, nil
 }
