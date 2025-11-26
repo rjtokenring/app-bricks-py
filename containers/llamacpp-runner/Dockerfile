@@ -49,6 +49,13 @@ RUN cd ~/dev/llm; \
         -DGGML_OPENCL=ON; \
     ninja -j`nproc`
 
+RUN cd ~/dev/llm/llama.cpp/build/; \
+    mv bin bin-full; \
+    mkdir -p bin; \
+    cp bin-full/llama-run bin/; \
+    cp bin-full/llama-cli bin/; \
+    cp bin-full/llama-server bin/
+
 FROM ubuntu:24.04 AS production
 
 COPY --from=builder /root/dev/llm/llama.cpp/build/bin /usr/local/bin/
