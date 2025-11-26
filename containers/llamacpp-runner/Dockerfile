@@ -2,11 +2,11 @@ FROM ubuntu:24.04 AS builder
 
 # Install OpenCL
 RUN export DEBIAN_FRONTEND=noninteractive; \
-    apt-get update; \
-    apt-get install --no-install-recommends -y software-properties-common; \
+    apt update; \
+    apt install --no-install-recommends -y software-properties-common; \
     apt-add-repository -y ppa:ubuntu-qcom-iot/qcom-ppa; \
-    apt-get update; \
-    apt-get install --no-install-recommends -y clinfo qcom-adreno1; \
+    apt update; \
+    apt install --no-install-recommends -y clinfo qcom-adreno1; \
     apt install --no-install-recommends -y cmake ninja-build curl libcurl4-openssl-dev build-essential git; \
     mkdir -p ~/dev/llm; \
     rm -f /usr/lib/libOpenCL.so; \
@@ -67,13 +67,13 @@ RUN set -ex; \
     usermod -aG render ubuntu || true;
 
 RUN export DEBIAN_FRONTEND=noninteractive; \
-    apt-get update; \
-    apt-get install --no-install-recommends -y software-properties-common; \
+    apt update; \
+    apt install --no-install-recommends -y software-properties-common; \
     apt-add-repository -y ppa:ubuntu-qcom-iot/qcom-ppa; \
-    apt-get update; \
-    apt-get install --no-install-recommends -y clinfo qcom-adreno1 curl libgomp1; \
+    apt update; \
+    apt install --no-install-recommends -y clinfo qcom-adreno1 curl libgomp1; \
     apt remove -y software-properties-common; \
-    apt-get autoremove -y; \
+    apt autoremove -y; \
     apt dist-clean; \
     rm -f /usr/lib/libOpenCL.so; \
     ln -s /lib/aarch64-linux-gnu/libOpenCL.so.1.0.0 /usr/lib/libOpenCL.so
