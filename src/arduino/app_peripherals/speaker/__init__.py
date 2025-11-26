@@ -7,6 +7,7 @@ import numpy as np
 import threading
 import queue
 import re
+import os
 from arduino.app_utils import Logger
 
 logger = Logger("Speaker")
@@ -20,6 +21,9 @@ class SpeakerException(Exception):
 
 class Speaker:
     """Speaker class for reproducing audio using ALSA PCM interface."""
+
+    # Default IPC key for dmix wrapper - counter to avoid conflicts
+    _ipc_key = 1024
 
     USB_SPEAKER_1 = "USB_SPEAKER_1"
     USB_SPEAKER_2 = "USB_SPEAKER_2"
@@ -90,7 +94,7 @@ class Speaker:
         self._native_rate = None
         self._is_reproducing = threading.Event()
         self._playing_queue: bytes = queue.Queue(maxsize=100)  # Queue for audio data to play with limited capacity
-        self.device = self._resolve_device(device)
+        self.device = self._apply_dmix_wrapper(self._resolve_device(device))
         self._mixer: alsaaudio.Mixer = self._load_mixer()
 
     def _resolve_device(self, device: str) -> str:
@@ -129,6 +133,80 @@ class Speaker:
 
         logger.info(f"Using explicit device: {device}")
         return device
+
+    def _apply_dmix_wrapper(self, device: str) -> str:
+        """Apply dmix wrapper to the given ALSA device name.
+
+        Args:
+            device (str): The original ALSA device name.
+
+        Returns:
+            str: The ALSA device name wrapped with dmix.
+        """
+        if device is None or device == "":
+            raise SpeakerException("Invalid device name")
+
+        logger.debug(f"Applying dmix wrapper to: {device}")
+
+        match = re.search(r"plughw:CARD=([\w]+),DEV=([\w])", device)
+        if match:
+            card = match.group(1)
+            device_num = match.group(2)
+            device_key = f"{card}_{device_num}"
+        else:
+            device_key = re.sub(r"[^a-zA-Z0-9]", "_", device)
+
+        device = device.replace("plughw:", "hw:", 1) if device.startswith("plughw:") else device
+        dmix_device = f"{device_key}_wrapped"
+
+        ipc_key = Speaker._ipc_key
+        Speaker._ipc_key += 1  # Increment for next use
+
+        dmix_wrapper_file_template = f"""
+pcm.{device_key}_dmix {{
+    type dmix
+    ipc_key {ipc_key} 
+    ipc_key_add_uid true
+    slave {{
+        pcm "{device}"
+    }}
+}}
+
+pcm.{device_key}_plug_dmix {{
+    type plug
+    slave.pcm "{device_key}_dmix"
+}}
+
+pcm.{dmix_device} {{
+    type softvol
+    slave {{
+        pcm "{device_key}_plug_dmix"
+    }}
+    control {{
+        name "{dmix_device}"
+        # card must be aligned with the above card definition
+        card 2
+    }}
+}}
+"""
+        home_directory = os.getenv("HOME")
+        alsa_sound_src_path = os.path.join(home_directory, ".asoundrc")
+        alsa_conf_path = os.path.join(home_directory, f"speaker_{device_key}.conf")
+        with open(alsa_conf_path, "w") as f:
+            f.write(dmix_wrapper_file_template)
+            Speaker._ipc_key += 1  # Increment IPC key for next use
+
+        if os.path.exists(alsa_sound_src_path):
+            with open(alsa_sound_src_path, "r") as f:
+                file_content = f.read()
+                if f"<{alsa_conf_path}>" in file_content:
+                    logger.debug(f"ALSA config {alsa_conf_path} already included in {alsa_sound_src_path}")
+                    return dmix_device
+
+        with open(alsa_sound_src_path, "a") as f:
+            f.write(f"\n<{alsa_conf_path}>")
+
+        return dmix_device
 
     @staticmethod
     def _list_usb_speakers() -> list:
