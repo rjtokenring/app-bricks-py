@@ -7,8 +7,8 @@ import numpy as np
 import threading
 import queue
 import re
-import os
 from arduino.app_utils import Logger
+from arduino.app_peripherals import _write_alsa_config, _get_next_alsa_ipc_key
 
 logger = Logger("Speaker")
 
@@ -21,9 +21,6 @@ class SpeakerException(Exception):
 
 class Speaker:
     """Speaker class for reproducing audio using ALSA PCM interface."""
-
-    # Default IPC key for dmix wrapper - counter to avoid conflicts
-    _ipc_key = 1024
 
     USB_SPEAKER_1 = "USB_SPEAKER_1"
     USB_SPEAKER_2 = "USB_SPEAKER_2"
@@ -134,6 +131,27 @@ class Speaker:
         logger.info(f"Using explicit device: {device}")
         return device
 
+    def _resolve_device_index(self, device: str) -> tuple[str, int, int]:
+        """Resolve the ALSA device name to (card_index, device_index).
+        Args:
+            device (str): The ALSA device name.
+        Returns:
+            tuple[int, int]: (card_index, device_index) or None if not resolvable.
+        """
+        match = re.search(r"(plughw|hw):CARD=([\w]+),DEV=([\w])", device)
+        if match:
+            card = match.group(2)
+            device_num = match.group(3)
+            card_names = alsaaudio.cards()
+            try:
+                card_index = card_names.index(card)
+                return card, card_index, int(device_num)
+            except ValueError:
+                print(f"Card '{card}' not found.")
+                return None, None, None
+
+        return None, None, None
+
     def _apply_dmix_wrapper(self, device: str) -> str:
         """Apply dmix wrapper to the given ALSA device name.
 
@@ -148,33 +166,25 @@ class Speaker:
 
         logger.debug(f"Applying dmix wrapper to: {device}")
 
-        match = re.search(r"(plughw|hw):CARD=([\w]+),DEV=([\w])", device)
-        if match:
-            card = match.group(2)
-            device_num = match.group(3)
-            device_key = f"{card}_{device_num}"
-            card_names = alsaaudio.cards()
-            try:
-                card_index = card_names.index(card)
-            except ValueError:
-                print(f"Card '{card}' not found.")
-                return None
-        else:
+        card, card_index, device_num = self._resolve_device_index(device)
+        if card is None:
             device_key = re.sub(r"[^a-zA-Z0-9]", "_", device)
+        else:
+            device_key = f"{card}_{device_num}"
 
-        device_hw = f"hw:{card_index},{device_num}"
+        # Define the new device name wrapped with all the necessary plugins
         dmix_device = f"{device_key}_wrapped"
+        ipc_key = _get_next_alsa_ipc_key()
 
-        ipc_key = Speaker._ipc_key
-        Speaker._ipc_key += 1  # Increment for next use
-
+        # This is the template to apply dmix+plughw+softvol plugings to the ALSA device
+        # It will create a new ALSA device with the name <device_key>_wrapped.
         dmix_wrapper_file_template = f"""
 pcm.{device_key}_dmix {{
     type dmix
     ipc_key {ipc_key} 
     ipc_key_add_uid true
     slave {{
-        pcm "{device_hw}"
+        pcm "hw:{card_index},{device_num}"
     }}
 }}
 
@@ -195,22 +205,9 @@ pcm.{dmix_device} {{
     }}
 }}
 """
-        home_directory = os.getenv("HOME")
-        alsa_sound_src_path = os.path.join(home_directory, ".asoundrc")
-        alsa_conf_path = os.path.join(home_directory, f"speaker_{device_key}.conf")
-        with open(alsa_conf_path, "w") as f:
-            f.write(dmix_wrapper_file_template)
-            Speaker._ipc_key += 1  # Increment IPC key for next use
 
-        if os.path.exists(alsa_sound_src_path):
-            with open(alsa_sound_src_path, "r") as f:
-                file_content = f.read()
-                if f"<{alsa_conf_path}>" in file_content:
-                    logger.debug(f"ALSA config {alsa_conf_path} already included in {alsa_sound_src_path}")
-                    return dmix_device
-
-        with open(alsa_sound_src_path, "a") as f:
-            f.write(f"\n<{alsa_conf_path}>\n")
+        # Write the ALSA config for the dmix wrapper
+        _write_alsa_config(f"speaker_{device_key}.conf", dmix_wrapper_file_template)
 
         return dmix_device
 
@@ -397,7 +394,7 @@ pcm.{dmix_device} {{
     def stop(self):
         """Close the PCM device if open."""
         if not self._is_reproducing.is_set():
-            logger.warning("Spaker is not recording, nothing to stop.")
+            logger.warning("Spaker is not playing, nothing to stop.")
             return
 
         # Stop the playback thread

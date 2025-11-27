@@ -24,6 +24,7 @@ dependencies = [
     "requests",
     "Pillow",
     "msgpack",
+    "filelock",
 ]
 
 [project.optional-dependencies]
