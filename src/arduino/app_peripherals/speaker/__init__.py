@@ -8,7 +8,7 @@ import threading
 import queue
 import re
 from arduino.app_utils import Logger
-from arduino.app_peripherals import _write_alsa_config, _get_next_alsa_ipc_key, _resolve_alsa_device_index
+from arduino.app_peripherals import _resolve_alsa_device_index
 
 logger = Logger("Speaker")
 
@@ -149,50 +149,14 @@ class Speaker:
         if device is None or device == "":
             raise SpeakerException("Invalid device name")
 
-        logger.debug(f"Applying dmix wrapper to: {device}")
-
         card, card_index, device_num = _resolve_alsa_device_index(device)
         if card is None:
-            device_key = re.sub(r"[^a-zA-Z0-9]", "_", device)
+            return device  # Cannot resolve, return as is
         else:
-            device_key = f"{card}_{device_num}"
+            device_key = f"card_{card_index}"
 
         # Define the new device name wrapped with all the necessary plugins
-        dmix_device = f"{device_key}_spk_wrapped"
-        ipc_key = _get_next_alsa_ipc_key(device, "dmix")
-
-        # This is the template to apply dmix+plughw+softvol plugings to the ALSA device
-        # It will create a new ALSA device with the name <device_key>_spk_wrapped.
-        dmix_wrapper_file_template = f"""
-pcm.{device_key}_dmix {{
-    type dmix
-    ipc_key {ipc_key}
-    ipc_key_add_uid true
-    slave {{
-        pcm "hw:{card_index},{device_num}"
-    }}
-}}
-
-pcm.{device_key}_plug_dmix {{
-    type plug
-    slave.pcm "{device_key}_dmix"
-}}
-
-pcm.{dmix_device} {{
-    type softvol
-    slave {{
-        pcm "{device_key}_plug_dmix"
-    }}
-    control {{
-        name "{dmix_device}"
-        # card must be aligned with the above card definition
-        card {card_index}
-    }}
-}}
-"""
-
-        # Write the ALSA config for the dmix wrapper
-        _write_alsa_config(f"speaker_{device_key}.conf", dmix_wrapper_file_template)
+        dmix_device = f"{device_key}_spk_wr"
 
         return dmix_device
 
