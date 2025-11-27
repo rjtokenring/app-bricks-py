@@ -315,24 +315,36 @@ pcm.{dmix_device} {{
 
     def _load_mixer(self) -> alsaaudio.Mixer:
         try:
-            cards = alsaaudio.cards()
-            card_indexes = alsaaudio.card_indexes()
-            for card_name, card_index in zip(cards, card_indexes):
-                logger.debug(f"Checking Card {card_name} (index {card_index}, device {self.device})")
-                if f"CARD={card_name}," in self.device:
-                    try:
-                        mixer = alsaaudio.mixers(cardindex=card_index)
-                        if len(mixer) == 0:
-                            logger.warning(f"No mixers found for card {card_name}.")
-                            continue
-                        mx = alsaaudio.Mixer(mixer[0])
-                        logger.debug(f"Loaded mixer: {mixer[0]} for card {card_name}")
-                        return mx
-                    except alsaaudio.ALSAAudioError as e:
-                        logger.debug(f"Failed to load mixer for card {card_name}: {e}")
+            if self.use_raw_pcm_device:
+                cards = alsaaudio.cards()
+                card_indexes = alsaaudio.card_indexes()
+                for card_name, card_index in zip(cards, card_indexes):
+                    logger.debug(f"Checking Card {card_name} (index {card_index}, device {self.device})")
+                    if f"CARD={card_name}," in self.device:
+                        try:
+                            mixer = alsaaudio.mixers(cardindex=card_index)
+                            if len(mixer) == 0:
+                                logger.warning(f"No mixers found for card {card_name}.")
+                                continue
+                            if "Headset" in mixer:
+                                mx = alsaaudio.Mixer("Headset", cardindex=card_index)
+                                logger.debug(f"Loaded mixer: Headset for card {card_name}")
+                                return mx
 
-            # No suitable mixer found, return None
-            return None
+                            # Fallback to first available mixer
+                            mx = alsaaudio.Mixer(mixer[0])
+                            logger.debug(f"Loaded mixer: {mixer[0]} for card {card_name}")
+                            return mx
+                        except alsaaudio.ALSAAudioError as e:
+                            logger.debug(f"Failed to load mixer for card {card_name}: {e}")
+
+                # No suitable mixer found, return None
+                return None
+            else:
+                # Wrapper is defining a mixer with the same name of the device
+                mx = alsaaudio.Mixer(self.device)
+                logger.debug(f"Loaded mixer for device {self.device}: {mx.mixer()}")
+                return mx
         except alsaaudio.ALSAAudioError as e:
             logger.warning(f"Error loading mixer {self.device}: {e}")
             return None
