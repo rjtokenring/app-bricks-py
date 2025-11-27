@@ -9,6 +9,7 @@ import threading
 import logging
 import re
 from arduino.app_utils import Logger
+from arduino.app_peripherals import _write_alsa_config, _get_next_alsa_ipc_key, _resolve_alsa_device_index
 
 logger = Logger("Microphone")
 
@@ -71,6 +72,7 @@ class Microphone:
         periodsize: int = 1024,
         max_reconnect_attempts: int = 30,
         reconnect_delay: float = 2.0,
+        use_raw_pcm_device: bool = False,
     ):
         """Initialize the Microphone object.
 
@@ -82,6 +84,7 @@ class Microphone:
             periodsize (int): Period size in frames (default: 1024).
             max_reconnect_attempts (int): Maximum attempts to reconnect on disconnection (default: 30).
             reconnect_delay (float): Delay in seconds between reconnection attempts (default: 2.0).
+            use_raw_pcm_device (bool): If True, use the raw PCM device without dsnoop wrapper.
 
         Raises:
             MicrophoneException: If the microphone cannot be initialized or if the device is busy.
@@ -94,7 +97,11 @@ class Microphone:
             format,
             periodsize,
         )
-        self.device = self._resolve_device(device)
+        self.use_raw_pcm_device = use_raw_pcm_device
+        if self.use_raw_pcm_device:
+            self.device = self._resolve_device(device)
+        else:
+            self.device = self._apply_dsnoop_wrapper(self._resolve_device(device))
         self.sample_rate = sample_rate
         self.channels = channels
         if format not in self.FORMAT_MAP:
@@ -148,26 +155,97 @@ class Microphone:
         logger.debug(f"Using explicit device: {device}")
         return device
 
+    def _apply_dsnoop_wrapper(self, device: str) -> str:
+        """Apply dsnoop wrapper to the given ALSA device name.
+
+        Args:
+            device (str): The original ALSA device name.
+
+        Returns:
+            str: The ALSA device name wrapped with dmix.
+        """
+        if device is None or device == "":
+            raise MicrophoneException("Invalid device name")
+
+        logger.debug(f"Applying dsnoop wrapper to: {device}")
+
+        card, card_index, device_num = _resolve_alsa_device_index(device)
+        if card is None:
+            device_key = re.sub(r"[^a-zA-Z0-9]", "_", device)
+        else:
+            device_key = f"{card}_{device_num}"
+
+        # Define the new device name wrapped with all the necessary plugins
+        dmix_device = f"{device_key}_mic_wrapped"
+        ipc_key = _get_next_alsa_ipc_key(device, "dsnoop")
+
+        # This is the template to apply dsnoop+plughw+softvol plugings to the ALSA device
+        # It will create a new ALSA device with the name <device_key>_mic_wrapped.
+        dmix_wrapper_file_template = f"""
+pcm.{device_key}_dsnoop {{
+    type dsnoop
+    ipc_key {ipc_key}
+    ipc_key_add_uid true
+    slave {{
+        pcm "hw:{card_index},{device_num}"
+    }}
+}}
+
+pcm.{device_key}_plug_dsnoop {{
+    type plug
+    slave.pcm "{device_key}_dsnoop"
+}}
+
+pcm.{dmix_device} {{
+    type softvol
+    slave {{
+        pcm "{device_key}_plug_dsnoop"
+    }}
+    control {{
+        name "{dmix_device}"
+        # card must be aligned with the above card definition
+        card {card_index}
+    }}
+}}
+"""
+
+        # Write the ALSA config for the dsnoop wrapper
+        _write_alsa_config(f"microphone_{device_key}.conf", dmix_wrapper_file_template)
+
+        return dmix_device
+
     def _load_mixer(self) -> alsaaudio.Mixer:
         try:
-            cards = alsaaudio.cards()
-            card_indexes = alsaaudio.card_indexes()
-            for card_name, card_index in zip(cards, card_indexes):
-                logger.debug(f"Checking Mic {card_name} (index {card_index}, device {self.device})")
-                if f"CARD={card_name}," in self.device:
-                    try:
-                        mixer = alsaaudio.mixers(cardindex=card_index)
-                        if len(mixer) == 0:
-                            logger.warning(f"No mixers found for mic {card_name}.")
-                            continue
-                        mx = alsaaudio.Mixer(mixer[0])
-                        logger.debug(f"Loaded mixer: {mixer[0]} for mic {card_name}")
-                        return mx
-                    except alsaaudio.ALSAAudioError as e:
-                        logger.debug(f"Failed to load mixer for mic {card_name}: {e}")
+            if self.use_raw_pcm_device:
+                cards = alsaaudio.cards()
+                card_indexes = alsaaudio.card_indexes()
+                for card_name, card_index in zip(cards, card_indexes):
+                    logger.debug(f"Checking Card {card_name} (index {card_index}, device {self.device})")
+                    if f"CARD={card_name}," in self.device:
+                        try:
+                            mixer = alsaaudio.mixers(cardindex=card_index)
+                            if len(mixer) == 0:
+                                logger.warning(f"No mixers found for card {card_name}.")
+                                continue
+                            if "Headset" in mixer:
+                                mx = alsaaudio.Mixer("Headset", cardindex=card_index)
+                                logger.debug(f"Loaded mixer: Headset for card {card_name}")
+                                return mx
 
-            # No suitable mixer found, return None
-            return None
+                            # Fallback to first available mixer
+                            mx = alsaaudio.Mixer(mixer[0])
+                            logger.debug(f"Loaded mixer: {mixer[0]} for card {card_name}")
+                            return mx
+                        except alsaaudio.ALSAAudioError as e:
+                            logger.debug(f"Failed to load mixer for card {card_name}: {e}")
+
+                # No suitable mixer found, return None
+                return None
+            else:
+                # Wrapper is defining a mixer with the same name of the device
+                mx = alsaaudio.Mixer(self.device)
+                logger.debug(f"Loaded mixer for device {self.device}: {mx.mixer()}")
+                return mx
         except alsaaudio.ALSAAudioError as e:
             logger.warning(f"Error loading mixer {self.device}: {e}")
             return None

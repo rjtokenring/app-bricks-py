@@ -8,7 +8,7 @@ import threading
 import queue
 import re
 from arduino.app_utils import Logger
-from arduino.app_peripherals import _write_alsa_config, _get_next_alsa_ipc_key
+from arduino.app_peripherals import _write_alsa_config, _get_next_alsa_ipc_key, _resolve_alsa_device_index
 
 logger = Logger("Speaker")
 
@@ -137,27 +137,6 @@ class Speaker:
         logger.info(f"Using explicit device: {device}")
         return device
 
-    def _resolve_device_index(self, device: str) -> tuple[str, int, int]:
-        """Resolve the ALSA device name to (card_index, device_index).
-        Args:
-            device (str): The ALSA device name.
-        Returns:
-            tuple[int, int]: (card_index, device_index) or None if not resolvable.
-        """
-        match = re.search(r"(plughw|hw):CARD=([\w]+),DEV=([\w])", device)
-        if match:
-            card = match.group(2)
-            device_num = match.group(3)
-            card_names = alsaaudio.cards()
-            try:
-                card_index = card_names.index(card)
-                return card, card_index, int(device_num)
-            except ValueError:
-                print(f"Card '{card}' not found.")
-                return None, None, None
-
-        return None, None, None
-
     def _apply_dmix_wrapper(self, device: str) -> str:
         """Apply dmix wrapper to the given ALSA device name.
 
@@ -172,18 +151,18 @@ class Speaker:
 
         logger.debug(f"Applying dmix wrapper to: {device}")
 
-        card, card_index, device_num = self._resolve_device_index(device)
+        card, card_index, device_num = _resolve_alsa_device_index(device)
         if card is None:
             device_key = re.sub(r"[^a-zA-Z0-9]", "_", device)
         else:
             device_key = f"{card}_{device_num}"
 
         # Define the new device name wrapped with all the necessary plugins
-        dmix_device = f"{device_key}_wrapped"
-        ipc_key = _get_next_alsa_ipc_key(device)
+        dmix_device = f"{device_key}_spk_wrapped"
+        ipc_key = _get_next_alsa_ipc_key(device, "dmix")
 
         # This is the template to apply dmix+plughw+softvol plugings to the ALSA device
-        # It will create a new ALSA device with the name <device_key>_wrapped.
+        # It will create a new ALSA device with the name <device_key>_spk_wrapped.
         dmix_wrapper_file_template = f"""
 pcm.{device_key}_dmix {{
     type dmix
