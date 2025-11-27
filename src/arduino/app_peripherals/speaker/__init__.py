@@ -59,6 +59,7 @@ class Speaker:
         sample_rate: int = 16000,
         channels: int = 1,
         format: str = "S16_LE",
+        use_raw_pcm_device: bool = False,
     ):
         """Initialize the Speaker object.
 
@@ -67,6 +68,7 @@ class Speaker:
             sample_rate (int): Sample rate in Hz (default: 16000).
             channels (int): Number of audio channels (default: 1).
             format (str): Audio format (default: "S16_LE").
+            use_raw_pcm_device (bool): If True, use raw PCM device without dmix/softvol plugins chain.
 
         Raises:
             SpeakerException: If the speaker cannot be initialized or if the device is busy.
@@ -78,6 +80,7 @@ class Speaker:
             channels,
             format,
         )
+        self.use_raw_pcm_device = use_raw_pcm_device
         self.sample_rate = sample_rate
         self.channels = channels
         if format not in self.FORMAT_MAP:
@@ -91,7 +94,10 @@ class Speaker:
         self._native_rate = None
         self._is_reproducing = threading.Event()
         self._playing_queue: bytes = queue.Queue(maxsize=100)  # Queue for audio data to play with limited capacity
-        self.device = self._apply_dmix_wrapper(self._resolve_device(device))
+        if self.use_raw_pcm_device:
+            self.device = self._resolve_device(device)
+        else:
+            self.device = self._apply_dmix_wrapper(self._resolve_device(device))
         self._mixer: alsaaudio.Mixer = self._load_mixer()
 
     def _resolve_device(self, device: str) -> str:
@@ -174,14 +180,14 @@ class Speaker:
 
         # Define the new device name wrapped with all the necessary plugins
         dmix_device = f"{device_key}_wrapped"
-        ipc_key = _get_next_alsa_ipc_key()
+        ipc_key = _get_next_alsa_ipc_key(device)
 
         # This is the template to apply dmix+plughw+softvol plugings to the ALSA device
         # It will create a new ALSA device with the name <device_key>_wrapped.
         dmix_wrapper_file_template = f"""
 pcm.{device_key}_dmix {{
     type dmix
-    ipc_key {ipc_key} 
+    ipc_key {ipc_key}
     ipc_key_add_uid true
     slave {{
         pcm "hw:{card_index},{device_num}"
@@ -251,7 +257,7 @@ pcm.{dmix_device} {{
 
     def _open_pcm(self):
         """Open the ALSA PCM device and set parameters, with fallback and error handling."""
-        logger.debug(f"Opening PCM device: {self.device}")
+        logger.info(f"Opening PCM device: {self.device}")
         try:
             self._pcm = alsaaudio.PCM(
                 type=alsaaudio.PCM_PLAYBACK,
