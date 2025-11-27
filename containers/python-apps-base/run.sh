@@ -70,7 +70,7 @@ if [ -f "$REQUIREMENTS_FILE" ]; then
 fi
 
 # Pre provision ALSA wrapped devices
-bahs /gen-alsa-wrapped-devices.sh
+bash /gen-alsa-wrapped-devices.sh
 
 if [ "$1" = "provision" ]; then
   arduino-bricks-list-modules --provision-compose
