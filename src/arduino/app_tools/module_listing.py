@@ -41,7 +41,7 @@ class ArduinoBrick:
         fs_path: str,
         model_name: str,
         category: str = "miscellaneous",
-        require_devices: bool = False,
+        mount_devices_into_container: bool = False,
         requires_display: str = None,
         required_device_classes: List[str] = None,
         env_variables: Dict[str, str] = None,
@@ -60,7 +60,7 @@ class ArduinoBrick:
         self.model_name: str = model_name
         self.require_model: bool = model_name != ""
         self.category = category
-        self.require_devices: bool = require_devices
+        self.mount_devices_into_container: bool = mount_devices_into_container
         self.requires_display: Optional[str] = requires_display
         self.required_device_classes: Optional[List[str]] = required_device_classes
         self.env_variables: Optional[Dict[str, str]] = env_variables
@@ -72,8 +72,7 @@ class ArduinoBrick:
             "description": self.brick_description,
             "require_container": self.require_container,
             "require_model": self.require_model,
-            "require_devices": self.require_devices,  # Keep for backward compatibility. To be removed in future versions.
-            "mount_devices_into_container": self.require_devices,
+            "mount_devices_into_container": self.mount_devices_into_container,
             "ports": self.ports,
             "category": self.category,
         }
