@@ -1,4 +1,10 @@
-FROM ubuntu:24.04 AS builder
+FROM golang:1.25-alpine AS cli-builder
+
+COPY ./cli /home/cli
+
+RUN cd /home/cli && go build -o /model-downloader main.go
+
+FROM ubuntu:24.04 AS llamacpp-builder
 
 # Install OpenCL
 RUN export DEBIAN_FRONTEND=noninteractive; \
@@ -58,7 +64,8 @@ RUN cd ~/dev/llm/llama.cpp/build/; \
 
 FROM ubuntu:24.04 AS production
 
-COPY --from=builder /root/dev/llm/llama.cpp/build/bin /usr/local/bin/
+COPY --from=llamacpp-builder /root/dev/llm/llama.cpp/build/bin /usr/local/bin/
+COPY --from=cli-builder /model-downloader /usr/local/bin/model-downloader
 
 RUN set -ex; \
     groupadd -g 44 video || true; \
