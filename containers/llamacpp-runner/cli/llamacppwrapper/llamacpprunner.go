@@ -72,9 +72,9 @@ func DownloadMode(model string) (int, error) {
 							if len(splitted) > 1 {
 								percent, err := strconv.Atoi(splitted[1])
 								if err == nil {
-									barOut := generateProgressBar(percent, 100, 30)
-									fmt.Print(barOut)
+									fmt.Print(generateProgressBar(percent, 100, 30))
 								}
+								// Discard error...
 							}
 						}
 					}
@@ -107,6 +107,8 @@ func DownloadMode(model string) (int, error) {
 
 	if exitCode != 0 {
 		fmt.Println("\nProcess finished with exit code:", exitCode)
+	} else {
+		fmt.Print(generateProgressBar(100, 100, 30))
 	}
 
 	return exitCode, nil
