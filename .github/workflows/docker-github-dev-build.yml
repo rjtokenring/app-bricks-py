@@ -31,7 +31,11 @@ jobs:
             context: ./containers/ei-models-runner
             image: ghcr.io/${{ github.repository_owner }}/app-bricks/ei-models-runner
             build_python_package: false
-      max-parallel: 2
+          - dockerfile: ./containers/lightweight-asr-runner/Dockerfile
+            context: ./containers/lightweight-asr-runner
+            image: ghcr.io/${{ github.repository_owner }}/app-bricks/lightweight-asr-runner
+            build_python_package: false           
+      max-parallel: 3
 
     steps:
       - name: Checkout repository
