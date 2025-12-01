@@ -1137,7 +1137,7 @@ models:
       source-model-url: "https://studio.edgeimpulse.com/studio/757509/live"
       private: true
     bricks:
-      - arduino:keyword_spotter:
+      - arduino:keyword_spotting:
           model_configuration:
             "EI_KEYWORD_SPOTTING_MODEL": "/models/ootb/ei/keyword-spotting-hey-arduino.eim"
  - updown-wave-motion-detection:
@@ -1188,6 +1188,6 @@ models:
       source-model-url: "https://studio.edgeimpulse.com/public/749446/live"
       private: true
     bricks:
-      - arduino:audio_classifier:
+      - arduino:audio_classification:
           model_configuration:
             "EI_AUDIO_CLASSIFICATION_MODEL": "/models/ootb/ei/glass-breaking.eim"
