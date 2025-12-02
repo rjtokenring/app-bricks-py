@@ -184,8 +184,13 @@ class Microphone:
         if self._mixer is None:
             return -1  # No mixer available, return -1 to indicate no volume control
         try:
-            volume = self._mixer.getvolume()[0]
-            return volume
+            # Get current mixer value and map it back to 0-100 range
+            current_value = self._mixer.getvolume()[0]
+            min_vol, max_vol = self._mixer.getrange()
+            if max_vol == min_vol:
+                return 100  # Avoid division by zero
+            percentage = int(((current_value - min_vol) / (max_vol - min_vol)) * 100)
+            return max(0, min(100, percentage))
         except alsaaudio.ALSAAudioError as e:
             logger.error(f"Error getting volume: {e}")
             raise MicrophoneException(f"Error getting volume: {e}")
@@ -204,8 +209,11 @@ class Microphone:
         if not (0 <= volume <= 100):
             raise ValueError("Volume must be between 0 and 100.")
         try:
-            self._mixer.setvolume(volume)
-            logger.info(f"Volume set to {volume}%")
+            # Get mixer's actual range and map 0-100 to it
+            min_vol, max_vol = self._mixer.getrange()
+            actual_value = int(min_vol + (max_vol - min_vol) * (volume / 100.0))
+            self._mixer.setvolume(actual_value)
+            logger.info(f"Volume set to {volume}% (mixer value: {actual_value}/{max_vol})")
         except alsaaudio.ALSAAudioError as e:
             logger.error(f"Error setting volume: {e}")
             raise MicrophoneException(f"Error setting volume: {e}")
