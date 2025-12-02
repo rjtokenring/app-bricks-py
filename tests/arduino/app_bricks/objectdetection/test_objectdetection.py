@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 ARDUINO SA <http://www.arduino.cc>
+# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
 #
 # SPDX-License-Identifier: MPL-2.0
 
@@ -7,6 +7,12 @@ from pathlib import Path
 import io
 from PIL import Image
 from arduino.app_bricks.object_detection import ObjectDetection
+from arduino.app_utils import HttpClient
+
+
+class ModelInfo:
+    def __init__(self, model_type: str):
+        self.model_type = model_type
 
 
 @pytest.fixture(autouse=True)
@@ -15,10 +21,64 @@ def mock_dependencies(monkeypatch: pytest.MonkeyPatch):
 
     This is needed to avoid network calls and other side effects.
     """
-    fake_compose = {"services": {"models-runner": {"ports": ["${BIND_ADDRESS:-127.0.0.1}:${BIND_PORT:-8100}:8100"]}}}
-    monkeypatch.setattr("arduino.app_internal.core.load_brick_compose_file", lambda cls: fake_compose)
+    fake_compose = {"services": {"ei-inference": {"ports": ["${BIND_ADDRESS:-127.0.0.1}:${BIND_PORT:-1337}:1337"]}}}
+    monkeypatch.setattr("arduino.app_internal.core.ei.load_brick_compose_file", lambda cls: fake_compose)
     monkeypatch.setattr("arduino.app_internal.core.resolve_address", lambda host: "127.0.0.1")
-    monkeypatch.setattr("arduino.app_internal.core.parse_docker_compose_variable", lambda x: [(None, None), (None, "8100")])
+    monkeypatch.setattr("arduino.app_internal.core.parse_docker_compose_variable", lambda x: [(None, None), (None, "1337")])
+    monkeypatch.setattr("arduino.app_bricks.object_detection.ObjectDetection.get_model_info", lambda self: ModelInfo("object-detection"))
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "project": {
+                    "deploy_version": 11,
+                    "id": 774707,
+                    "impulse_id": 1,
+                    "impulse_name": "Time series data, Spectral Analysis, Classification (Keras), Anomaly Detection (K-means)",
+                    "name": "Fan Monitoring - Advanced Anomaly Detection",
+                    "owner": "Arduino",
+                },
+                "modelParameters": {
+                    "has_visual_anomaly_detection": False,
+                    "axis_count": 3,
+                    "frequency": 100,
+                    "has_anomaly": 1,
+                    "has_object_tracking": False,
+                    "has_performance_calibration": False,
+                    "image_channel_count": 0,
+                    "image_input_frames": 0,
+                    "image_input_height": 0,
+                    "image_input_width": 0,
+                    "image_resize_mode": "none",
+                    "inferencing_engine": 4,
+                    "input_features_count": 600,
+                    "interval_ms": 10,
+                    "label_count": 2,
+                    "labels": ["nominal", "off"],
+                    "model_type": "classification",
+                    "sensor": 2,
+                    "slice_size": 50,
+                    "thresholds": [],
+                    "use_continuous_mode": False,
+                    "sensorType": "accelerometer",
+                },
+            }
+
+    def fake_get(
+        self,
+        url: str,
+        method: str = "GET",
+        data: dict | str = None,
+        json: dict = None,
+        headers: dict = None,
+        timeout: int = 5,
+    ):
+        return FakeResp()
+
+    # Mock the requests.get method to return a fake response
+    monkeypatch.setattr(HttpClient, "request_with_retry", fake_get)
 
 
 @pytest.fixture

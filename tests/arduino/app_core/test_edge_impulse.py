@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 ARDUINO SA <http://www.arduino.cc>
+# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
 #
 # SPDX-License-Identifier: MPL-2.0
 
@@ -235,6 +235,64 @@ def test_infer_from_features(monkeypatch: pytest.MonkeyPatch, facade: EdgeImpuls
 
     # Mock the requests.post method to return a fake response
     monkeypatch.setattr("arduino.app_internal.core.ei.requests.post", fake_post)
+
+    class FakeResp2:
+        status_code = 200
+
+        def json(self):
+            return {
+                "project": {
+                    "deploy_version": 163,
+                    "id": 412593,
+                    "impulse_id": 1,
+                    "impulse_name": "Impulse #1",
+                    "name": "Tutorial: Continuous motion recognition",
+                    "owner": "Edge Impulse Inc.",
+                },
+                "modelParameters": {
+                    "has_visual_anomaly_detection": False,
+                    "axis_count": 3,
+                    "frequency": 62.5,
+                    "has_anomaly": 1,
+                    "has_object_tracking": False,
+                    "image_channel_count": 0,
+                    "image_input_frames": 0,
+                    "image_input_height": 0,
+                    "image_input_width": 0,
+                    "image_resize_mode": "none",
+                    "inferencing_engine": 4,
+                    "input_features_count": 375,
+                    "interval_ms": 16,
+                    "label_count": 4,
+                    "labels": ["idle", "snake", "updown", "wave"],
+                    "model_type": "classification",
+                    "sensor": 2,
+                    "slice_size": 31,
+                    "thresholds": [],
+                    "use_continuous_mode": False,
+                    "sensorType": "accelerometer",
+                },
+            }
+
+    def fake_get(
+        self,
+        url: str,
+        method: str = "GET",
+        data: dict | str = None,
+        json: dict = None,
+        headers: dict = None,
+        timeout: int = 5,
+    ):
+        return FakeResp2()
+
+    # Mock the requests.get method to return a fake response
+    monkeypatch.setattr(HttpClient, "request_with_retry", fake_get)
+
+    # Mock docker-compose related functions
+    fake_compose = {"services": {"ei-inference": {"ports": ["${BIND_ADDRESS:-127.0.0.1}:${BIND_PORT:-1337}:1337"]}}}
+    monkeypatch.setattr("arduino.app_internal.core.ei.load_brick_compose_file", lambda cls: fake_compose)
+    monkeypatch.setattr("arduino.app_internal.core.resolve_address", lambda h: "127.0.0.1")
+    monkeypatch.setattr("arduino.app_internal.core.parse_docker_compose_variable", lambda s: [(None, None), (None, "1337")])
 
     result = facade.infer_from_features(features)
     assert captured["url"].endswith("/api/features")

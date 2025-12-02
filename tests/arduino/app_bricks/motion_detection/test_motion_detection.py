@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 ARDUINO SA <http://www.arduino.cc>
+# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
 #
 # SPDX-License-Identifier: MPL-2.0
 
@@ -24,10 +24,10 @@ def app_instance(monkeypatch):
 @pytest.fixture(autouse=True)
 def mock_dependencies(monkeypatch: pytest.MonkeyPatch):
     """Mock out docker-compose lookups and image helpers."""
-    fake_compose = {"services": {"models-runner": {"ports": ["${BIND_ADDRESS:-127.0.0.1}:${BIND_PORT:-8100}:8100"]}}}
-    monkeypatch.setattr("arduino.app_internal.core.load_brick_compose_file", lambda cls: fake_compose)
+    fake_compose = {"services": {"ei-inference": {"ports": ["${BIND_ADDRESS:-127.0.0.1}:${BIND_PORT:-1337}:1337"]}}}
+    monkeypatch.setattr("arduino.app_internal.core.ei.load_brick_compose_file", lambda cls: fake_compose)
     monkeypatch.setattr("arduino.app_internal.core.resolve_address", lambda host: "127.0.0.1")
-    monkeypatch.setattr("arduino.app_internal.core.parse_docker_compose_variable", lambda x: [(None, None), (None, "8200")])
+    monkeypatch.setattr("arduino.app_internal.core.parse_docker_compose_variable", lambda x: [(None, None), (None, "1337")])
 
     class FakeResp:
         status_code = 200

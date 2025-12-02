@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2025 ARDUINO SA <http://www.arduino.cc>
+# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
 #
 # SPDX-License-Identifier: MPL-2.0
 
@@ -133,7 +133,7 @@ class MotionDetection(EdgeImpulseRunnerFacade):
             return
 
         try:
-            ret = super().infer_from_features(features[: int(self._model_info.input_features_count)].flatten().tolist())
+            ret = self.infer_from_features(features.flatten().tolist())
             spotted_movement = self._movement_spotted(ret)
             if spotted_movement is not None:
                 keyword, confidence, complete_detection = spotted_movement
