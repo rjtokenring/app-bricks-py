@@ -133,7 +133,7 @@ class VibrationAnomalyDetection(EdgeImpulseRunnerFacade):
             if features is None or len(features) == 0:
                 return
 
-            ret = super().infer_from_features(features[: int(self._model_info.input_features_count)].flatten().tolist())
+            ret = self.infer_from_features(features.flatten().tolist())
             logger.debug(f"Inference result: {ret}")
             spotted_anomaly = self._extract_anomaly_score(ret)
             if spotted_anomaly is not None:

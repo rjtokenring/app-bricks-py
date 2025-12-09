@@ -6,7 +6,5 @@
 # EXAMPLE_REQUIRES = "Requires an audio file with the glass breaking sound."
 from arduino.app_bricks.audio_classification import AudioClassification
 
-classifier = AudioClassification()
-
-classification = classifier.classify_from_file("glass_breaking.wav")
+classification = AudioClassification.classify_from_file("glass_breaking.wav")
 print("Result:", classification)

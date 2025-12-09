@@ -85,17 +85,24 @@ class AudioDetector(EdgeImpulseRunnerFacade):
             self._mic.stop()
         self._buffer.flush()
 
-    def get_best_match(self, item: dict, confidence: int = None) -> tuple[str, float] | None:
+    @staticmethod
+    def get_best_match(item: dict, confidence: float) -> tuple[str, float] | None:
         """Extract the best matched keyword from the classification results.
 
         Args:
         item (dict): The classification result from the inference.
-        confidence (int): The confidence threshold for classification. If None, uses the instance's confidence level.
+        confidence (float): The confidence threshold for classification.
 
         Returns:
         tuple[str, float] | None: The best matched keyword and its confidence, or None if no match is found.
+
+        Raises:
+        ValueError: If confidence level is not provided.
         """
-        classification = _extract_classification(item, confidence or self.confidence)
+        if confidence is None:
+            raise ValueError("Confidence level must be provided.")
+
+        classification = _extract_classification(item, confidence)
         if not classification:
             return None
 
@@ -141,8 +148,8 @@ class AudioDetector(EdgeImpulseRunnerFacade):
 
         logger.debug(f"Processing sensor data with {len(features)} features.")
         try:
-            ret = super().infer_from_features(features[: int(self.model_info.input_features_count)].tolist())
-            spotted_keyword = self.get_best_match(ret)
+            ret = self.infer_from_features(features.tolist())
+            spotted_keyword = self.get_best_match(ret, self.confidence)
             if spotted_keyword:
                 keyword, confidence = spotted_keyword
                 keyword = keyword.lower()

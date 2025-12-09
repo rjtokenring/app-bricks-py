@@ -60,6 +60,8 @@ class Speaker:
         channels: int = 1,
         format: str = "S16_LE",
         use_raw_pcm_device: bool = False,
+        periodsize: int = None,
+        queue_maxsize: int = 100,
     ):
         """Initialize the Speaker object.
 
@@ -69,6 +71,12 @@ class Speaker:
             channels (int): Number of audio channels (default: 1).
             format (str): Audio format (default: "S16_LE").
             use_raw_pcm_device (bool): If True, use raw PCM device without dmix/softvol plugins chain.
+            periodsize (int): ALSA period size in frames (default: None = use hardware default).
+                For real-time synthesis, set to match generation block size.
+                For streaming/file playback, leave as None for hardware-optimal value.
+            queue_maxsize (int): Maximum application queue depth in blocks (default: 100).
+                Lower values (5-20) reduce latency for interactive audio.
+                Higher values (50-200) provide stability for streaming.
 
         Raises:
             SpeakerException: If the speaker cannot be initialized or if the device is busy.
@@ -93,11 +101,13 @@ class Speaker:
         self._pcm_lock = threading.Lock()
         self._native_rate = None
         self._is_reproducing = threading.Event()
-        self._playing_queue: bytes = queue.Queue(maxsize=100)  # Queue for audio data to play with limited capacity
         if self.use_raw_pcm_device:
             self.device = self._resolve_device(device)
         else:
             self.device = self._apply_dmix_wrapper(self._resolve_device(device))
+        self._periodsize = periodsize  # Store configured periodsize (None = hardware default)
+        self._playing_queue: bytes = queue.Queue(maxsize=queue_maxsize)  # Queue for audio data to play with limited capacity
+        self.device = self._resolve_device(device)
         self._mixer: alsaaudio.Mixer = self._load_mixer()
 
     def _resolve_device(self, device: str) -> str:
@@ -211,6 +221,19 @@ class Speaker:
                 self._pcm.setchannels(self.channels)
                 self._pcm.setrate(self.sample_rate)
                 self._pcm.setformat(getattr(alsaaudio, self._alsa_format))
+
+                # Configure periodsize only if explicitly set (for real-time synthesis)
+                # Otherwise use hardware-optimal default (for streaming/file playback)
+                if self._periodsize is not None:
+                    try:
+                        self._pcm.setperiodsize(self._periodsize)
+                        logger.debug(
+                            f"PCM period size set to {self._periodsize} frames "
+                            f"({self._periodsize / self.sample_rate * 1000:.1f}ms @ {self.sample_rate}Hz)"
+                        )
+                    except Exception as period_err:
+                        logger.debug(f"Could not set period size: {period_err}")
+
                 self._native_rate = self.sample_rate
                 logger.debug(
                     "PCM opened with requested params: %s, %dHz, %dch, %s",
@@ -232,6 +255,18 @@ class Speaker:
                     self._pcm.setchannels(self.channels)
                     self._pcm.setrate(self.sample_rate)
                     self._pcm.setformat(getattr(alsaaudio, self._alsa_format))
+
+                    # Configure periodsize only if explicitly set
+                    if self._periodsize is not None:
+                        try:
+                            self._pcm.setperiodsize(self._periodsize)
+                            logger.debug(
+                                f"PCM period size set to {self._periodsize} frames "
+                                f"({self._periodsize / self.sample_rate * 1000:.1f}ms @ {self.sample_rate}Hz)"
+                            )
+                        except Exception as period_err:
+                            logger.debug(f"Could not set period size: {period_err}")
+
                     self.device = plugdev
                     self._native_rate = self.sample_rate
                     logger.debug(f"PCM opened with plughw fallback: {plugdev}")
@@ -245,6 +280,18 @@ class Speaker:
                     self._pcm.setchannels(self.channels)
                     self._native_rate = self._pcm.rate()
                     self._pcm.setformat(getattr(alsaaudio, self._alsa_format))
+
+                    # Configure periodsize even in native fallback for consistency
+                    if self._periodsize is not None:
+                        try:
+                            self._pcm.setperiodsize(self._periodsize)
+                            logger.debug(
+                                f"PCM period size set to {self._periodsize} frames "
+                                f"({self._periodsize / self._native_rate * 1000:.1f}ms @ {self._native_rate}Hz) [native fallback]"
+                            )
+                        except Exception as period_err:
+                            logger.warning(f"Could not set period size in native fallback: {period_err}")
+
                     logger.debug("PCM opened with native params: %s, %dHz", self.device, self._native_rate)
         except alsaaudio.ALSAAudioError as e:
             logger.error(f"ALSAAudioError opening PCM device {self.device}: {e}")
@@ -304,8 +351,13 @@ class Speaker:
         if self._mixer is None:
             return -1  # No mixer available, return -1 to indicate no volume control
         try:
-            volume = self._mixer.getvolume()[0]
-            return volume
+            # Get current mixer value and map it back to 0-100 range
+            current_value = self._mixer.getvolume()[0]
+            min_vol, max_vol = self._mixer.getrange()
+            if max_vol == min_vol:
+                return 100  # Avoid division by zero
+            percentage = int(((current_value - min_vol) / (max_vol - min_vol)) * 100)
+            return max(0, min(100, percentage))
         except alsaaudio.ALSAAudioError as e:
             logger.error(f"Error getting volume: {e}")
             raise SpeakerException(f"Error getting volume: {e}")
@@ -324,8 +376,11 @@ class Speaker:
         if not (0 <= volume <= 100):
             raise ValueError("Volume must be between 0 and 100.")
         try:
-            self._mixer.setvolume(volume)
-            logger.info(f"Volume set to {volume}%")
+            # Get mixer's actual range and map 0-100 to it
+            min_vol, max_vol = self._mixer.getrange()
+            actual_value = int(min_vol + (max_vol - min_vol) * (volume / 100.0))
+            self._mixer.setvolume(actual_value)
+            logger.info(f"Volume set to {volume}% (mixer value: {actual_value}/{max_vol})")
         except alsaaudio.ALSAAudioError as e:
             logger.error(f"Error setting volume: {e}")
             raise SpeakerException(f"Error setting volume: {e}")
@@ -410,16 +465,45 @@ class Speaker:
     def _playback_loop(self):
         """Thread function to handle audio playback."""
         logger.debug("Starting playback thread.")
+        queue_warn_threshold = self._playing_queue.maxsize * 0.8 if self._playing_queue.maxsize > 0 else 40
         while self._is_reproducing.is_set():
             try:
                 data = self._playing_queue.get(timeout=1)  # Wait for audio data
                 if data is None:
                     continue  # Skip if no data is available
 
+                # Check queue depth periodically
+                queue_size = self._playing_queue.qsize()
+                if queue_size > queue_warn_threshold:
+                    logger.warning(
+                        f"Playback queue depth high: {queue_size}/{self._playing_queue.maxsize if self._playing_queue.maxsize > 0 else 'unlimited'}"
+                    )
+
                 with self._pcm_lock:
                     if self._pcm is not None:
-                        self._pcm.write(data)
+                        try:
+                            written = self._pcm.write(data)
 
+                            # Check for ALSA errors (negative return values)
+                            if written < 0:
+                                # Negative values are ALSA error codes
+                                if written == -32:  # -EPIPE: buffer underrun
+                                    logger.debug(f"PCM buffer underrun (-EPIPE), recovering...")
+                                    try:
+                                        self._pcm.pause(0)  # Resume playback
+                                    except Exception:
+                                        pass
+                                else:
+                                    logger.warning(f"PCM write error code: {written}")
+                            elif written == 0:
+                                logger.debug(f"PCM write returned 0 frames (buffer full or device busy)")
+                        except Exception as pcm_err:
+                            logger.warning(f"PCM write exception: {type(pcm_err).__name__}: {pcm_err}")
+                            # Try to recover from underrun
+                            try:
+                                self._pcm.pause(0)  # Resume if paused due to underrun
+                            except Exception:
+                                pass
                 self._playing_queue.task_done()  # Mark the task as done
             except queue.Empty:
                 continue
@@ -445,6 +529,11 @@ class Speaker:
             if isinstance(data, bytes):
                 self._playing_queue.put(data, block=block_on_queue)
             elif isinstance(data, np.ndarray):
+                # Debug: check for clipping before conversion
+                max_val = np.max(np.abs(data))
+                if max_val > 1.0:
+                    logger.warning(f"Audio data exceeds range: max={max_val:.3f} (should be <=1.0)")
+
                 # Convert numpy array to bytes
                 data_bytes = data.astype(self._dtype).tobytes()
                 self._playing_queue.put(data_bytes, block=block_on_queue)
