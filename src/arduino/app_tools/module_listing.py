@@ -97,7 +97,8 @@ class ArduinoBrick:
                 name = var.get("name")
                 description = var.get("description", "")
                 default = var.get("default_value", "")
-                additional_vars.append(EnvVariable(name, description, default))
+                hidden = var.get("hidden", False)
+                additional_vars.append(EnvVariable(name, description, default, hidden))
             if "variables" in out_dict:
                 out_dict["variables"].extend([var.to_dict() for var in additional_vars])
             else:
