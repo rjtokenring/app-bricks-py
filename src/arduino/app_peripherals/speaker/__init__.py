@@ -153,7 +153,7 @@ class Speaker:
                     desc_str = desc[1] if isinstance(desc, tuple) else str(desc)
                     if "usb" in card_name.lower() or "usb" in desc_str.lower():
                         # Find all plughw devices for this card
-                        for dev in alsaaudio.pcms(alsaaudio.PCM_CAPTURE):
+                        for dev in alsaaudio.pcms(alsaaudio.PCM_PLAYBACK):
                             if dev.startswith("plughw:CARD=") and f"CARD={card_name}" in dev:
                                 usb_devices.append(dev)
                 except Exception as e:
