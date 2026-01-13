@@ -58,7 +58,8 @@ RUN cd ~/dev/llm; \
 RUN cd ~/dev/llm/llama.cpp/build/; \
     mv bin bin-full; \
     mkdir -p bin; \
-    cp bin-full/llama-run bin/; \
+    # Only for testing, copy ALL binaries
+    cp bin-full/llama-* bin/; \
     cp bin-full/llama-cli bin/; \
     cp bin-full/llama-server bin/
 
@@ -66,6 +67,7 @@ FROM ubuntu:24.04 AS production
 
 COPY --from=llamacpp-builder /root/dev/llm/llama.cpp/build/bin /usr/local/bin/
 COPY --from=cli-builder /model-downloader /usr/local/bin/model-downloader
+COPY ./run.sh /
 
 RUN set -ex; \
     groupadd -g 44 video || true; \
@@ -83,4 +85,5 @@ RUN export DEBIAN_FRONTEND=noninteractive; \
     apt autoremove -y; \
     apt dist-clean; \
     rm -f /usr/lib/libOpenCL.so; \
-    ln -s /lib/aarch64-linux-gnu/libOpenCL.so.1.0.0 /usr/lib/libOpenCL.so
+    ln -s /lib/aarch64-linux-gnu/libOpenCL.so.1.0.0 /usr/lib/libOpenCL.so; \
+    chmod +x /usr/local/bin/*
