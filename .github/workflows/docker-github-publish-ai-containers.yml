@@ -26,7 +26,10 @@ jobs:
           - dockerfile: ./containers/ei-models-runner/Dockerfile
             context: ./containers/ei-models-runner
             image: /app-bricks/ei-models-runner
-      max-parallel: 1
+          - dockerfile: ./containers/llamacpp-runner/Dockerfile
+            context: ./containers/llamacpp-runner
+            image: /app-bricks/llamacpp-runner
+      max-parallel: 2
 
     steps:
       - name: Log into destination image registry ${{ env.GHCR_REGISTRY }}
