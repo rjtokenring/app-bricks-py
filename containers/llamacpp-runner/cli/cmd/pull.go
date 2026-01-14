@@ -31,15 +31,10 @@ func downloadModel(cmd *cobra.Command) error {
 		}
 
 		fmt.Printf("Pulling model: %s\n", model)
-		exitCode, err := llamacppwrapper.DownloadMode(model)
-		if err != nil {
+		if err := llamacppwrapper.DownloadMode("ollama", model); err != nil {
 			return err
 		}
-		if exitCode != 0 {
-			return fmt.Errorf("failed to pull model, exit code: %d", exitCode)
-		} else {
-			fmt.Println("Model pulled successfully")
-		}
+		fmt.Println("Model pulled successfully")
 	}
 
 	return nil

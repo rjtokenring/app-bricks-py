@@ -42,14 +42,23 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$MODEL_ARG" ]]; then
-  echo "Error: --model argument not provided. Exiting." >&2
-  exit 1
-fi
+MAX_MODESLS = 2
 
+if [[ -z "$MODEL_ARG" ]]; then
 /usr/local/bin/llama-server \
-  --model "/models/$MODEL_ARG" \
+  --models-dir "/models/" \
+  --models-max "$MAX_MODESLS" \
   --host "$HOST" \
   --port "$PORT_ARG" \
   --gpu-layers "$GPU_LAYERS_ARG"
+else
+/usr/local/bin/llama-server \
+  --model "/models/$MODEL_ARG" \
+  --models-max "$MAX_MODESLS" \
+  --host "$HOST" \
+  --port "$PORT_ARG" \
+  --gpu-layers "$GPU_LAYERS_ARG"
+fi
+
+
     

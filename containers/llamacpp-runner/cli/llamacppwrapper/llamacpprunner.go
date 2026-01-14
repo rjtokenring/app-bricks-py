@@ -1,115 +1,103 @@
 package llamacppwrapper
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
-	"os"
-	"os/exec"
-	"regexp"
-	"strconv"
+	"log/slog"
+	"net/http"
 	"strings"
-	"syscall"
+	"time"
+
+	"github.com/cavaliergopher/grab/v3"
 )
 
-func generateProgressBar(currentStep int, totalSteps int, barWidth int) string {
-	if totalSteps <= 0 {
-		return "[]"
+func DownloadMode(mode, model string) error {
+	switch mode {
+	case "ollama":
+		return downloadOllamaHostedModel(model)
+	default:
+		return fmt.Errorf("unsupported download mode: %s", mode)
 	}
-	if currentStep < 0 {
-		currentStep = 0
-	}
-	if currentStep > totalSteps {
-		currentStep = totalSteps
-	}
-
-	progress := float64(currentStep) / float64(totalSteps)
-	percent := int(progress * 100)
-	filledChars := int(float64(barWidth) * progress)
-	emptyChars := barWidth - filledChars
-
-	bar := "[" + strings.Repeat("#", filledChars) + strings.Repeat("-", emptyChars) + "]"
-
-	return fmt.Sprintf("\rProcessing: %s %3d%% Complete (%d/%d)", bar, percent, currentStep, totalSteps)
 }
 
-func DownloadMode(model string) (int, error) {
-	if inf, err := os.Stat(fmt.Sprintf("%s.partial", model)); err == nil && inf.Size() > 0 {
-		fmt.Println("Resuming partial download...")
+type layer struct {
+	MediaType string `json:"mediaType"`
+	Size      int64  `json:"size"`
+	Digest    string `json:"digest"`
+}
+
+type ollamaLayer struct {
+	Layers []layer `json:"layers"`
+}
+
+func downloadOllamaHostedModel(model string) error {
+	if !strings.Contains(model, ":") {
+		return fmt.Errorf("invalid model format for ollama, expected 'model:version'")
 	}
 
-	cmd := exec.Command("llama-run", model, "-ngl", "16", "\"1+1=?\"")
+	parts := strings.SplitN(model, ":", 2)
+	modelName := strings.TrimSpace(parts[0])
+	version := strings.TrimSpace(parts[1])
+	slog.Info("Downloading Ollama model", "model", modelName, "version", version)
+	// Get layers for the model
+	if resp, err := http.Get(fmt.Sprintf("https://registry.ollama.ai/v2/library/%s/manifests/%s", modelName, version)); err != nil {
+		return err
+	} else {
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("failed to get model manifest, status code: %d", resp.StatusCode)
+		}
+		// Here you would parse the manifest and download the layers accordingly.
+		// For brevity, we'll skip the actual download implementation.
+		slog.Info("Successfully fetched model manifest", "model", modelName, "version", version)
 
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		panic(err)
-	}
-	cmd.Stderr = cmd.Stdout
+		bytesBuffer := new(bytes.Buffer)
+		bytesBuffer.ReadFrom(resp.Body)
+		slog.Debug("Manifest content", "content", bytesBuffer.String())
 
-	if err := cmd.Start(); err != nil {
-		panic(err)
-	}
+		layers := ollamaLayer{}
+		if err = json.Unmarshal(bytesBuffer.Bytes(), &layers); err != nil {
+			return err
+		}
 
-	go func() {
-		whitespaceRe := regexp.MustCompile(`\s+\|`)
-		fullCharRe := regexp.MustCompile(`[^\x00-\x7F]+`)
-		replaceTag := []byte("")
+		// Now you would iterate over layers and download the actual model files.
+		for _, layer := range layers.Layers {
+			if layer.MediaType == "application/vnd.ollama.image.model" {
+				slog.Info("Found model layer", "digest", layer.Digest, "size", layer.Size)
+				// Download the layer here
+				downloadUrl := fmt.Sprintf("https://registry.ollama.ai/v2/library/%s/blobs/%s", modelName, layer.Digest)
+				if downRequest, err := grab.NewRequest(fmt.Sprintf("%s-%s.gguf", modelName, version), downloadUrl); err != nil {
+					return err
+				} else {
+					slog.Info("Starting download", "url", downloadUrl)
+					resp := grab.DefaultClient.Do(downRequest)
+					if resp.DidResume {
+						slog.Info("Resumed previous download", "filename", resp.Filename)
+					}
 
-		buf := make([]byte, 2048)
-		for {
-			n, err := stdoutPipe.Read(buf)
-			if n > 0 {
-				out := whitespaceRe.ReplaceAll(buf[:n], replaceTag)
-				out = fullCharRe.ReplaceAll(out, replaceTag)
-				line := strings.TrimSpace(string(out))
-				if line == "" {
-					continue
-				} else if strings.Contains(line, "%") {
-					// Extract and print progress
-					parts := strings.Split(line, "%")
-					if len(parts) > 0 {
-						progress := strings.TrimSpace(parts[0])
-						if strings.Contains(progress, " ") {
-							splitted := strings.Split(progress, " ")
-							if len(splitted) > 1 {
-								percent, err := strconv.Atoi(splitted[1])
-								if err == nil {
-									fmt.Print(generateProgressBar(percent, 100, 30))
-								}
-								// Discard error...
-							}
+					// User feedback loop
+					t := time.NewTicker(2000 * time.Millisecond)
+					defer t.Stop()
+
+					for {
+						select {
+						case <-t.C:
+							fmt.Printf("  transferred %v / %v bytes (%.2f%%)\n",
+								resp.BytesComplete(),
+								resp.Size(),
+								100*resp.Progress())
+
+						case <-resp.Done:
+							// Download is finished
+							fmt.Printf("Download saved to %v\n", resp.Filename)
+							return nil
 						}
 					}
 				}
 			}
-			if err != nil {
-				break
-			}
 		}
-	}()
 
-	// Wait for command to finish
-	err = cmd.Wait()
-
-	// Get exit code
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
-				exitCode = status.ExitStatus()
-			}
-		} else {
-			fmt.Println("Error running command:", err)
-		}
-	} else {
-		if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok {
-			exitCode = status.ExitStatus()
-		}
+		return nil
 	}
-
-	if exitCode != 0 {
-		fmt.Println("\nProcess finished with exit code:", exitCode)
-	} else {
-		fmt.Print(generateProgressBar(100, 100, 30))
-	}
-
-	return exitCode, nil
 }

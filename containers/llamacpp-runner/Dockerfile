@@ -58,8 +58,6 @@ RUN cd ~/dev/llm; \
 RUN cd ~/dev/llm/llama.cpp/build/; \
     mv bin bin-full; \
     mkdir -p bin; \
-    # Only for testing, copy ALL binaries
-    cp bin-full/llama-* bin/; \
     cp bin-full/llama-cli bin/; \
     cp bin-full/llama-server bin/
 
