@@ -1,8 +1,5 @@
-FROM golang:1.25-alpine AS cli-builder
+FROM docker.io/ollama/ollama:latest AS ollama
 
-COPY ./cli /home/cli
-
-RUN cd /home/cli && go build -o /model-downloader main.go
 
 FROM ubuntu:24.04 AS llamacpp-builder
 
@@ -64,8 +61,12 @@ RUN cd ~/dev/llm/llama.cpp/build/; \
 FROM ubuntu:24.04 AS production
 
 COPY --from=llamacpp-builder /root/dev/llm/llama.cpp/build/bin /usr/local/bin/
-COPY --from=cli-builder /model-downloader /usr/local/bin/model-downloader
 COPY ./run.sh /
+
+COPY --from=ollama /usr/bin/ollama /usr/bin/ollama
+COPY --from=ollama /usr/lib/ollama/libggml-* /usr/lib/ollama/
+# Environment variable setup
+ENV OLLAMA_HOST=0.0.0.0
 
 RUN set -ex; \
     groupadd -g 44 video || true; \
@@ -84,4 +85,6 @@ RUN export DEBIAN_FRONTEND=noninteractive; \
     apt dist-clean; \
     rm -f /usr/lib/libOpenCL.so; \
     ln -s /lib/aarch64-linux-gnu/libOpenCL.so.1.0.0 /usr/lib/libOpenCL.so; \
-    chmod +x /usr/local/bin/*
+    chmod +x /usr/local/bin/*; \
+    chmod +x /usr/bin/ollama; \
+    chmod +x /run.sh
