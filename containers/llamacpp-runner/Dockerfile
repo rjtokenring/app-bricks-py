@@ -80,7 +80,6 @@ RUN export DEBIAN_FRONTEND=noninteractive; \
     apt-add-repository -y ppa:ubuntu-qcom-iot/qcom-ppa; \
     apt update; \
     apt install --no-install-recommends -y clinfo qcom-adreno1 curl libgomp1; \
-    apt remove -y software-properties-common; \
     apt autoremove -y; \
     apt dist-clean; \
     rm -f /usr/lib/libOpenCL.so; \
