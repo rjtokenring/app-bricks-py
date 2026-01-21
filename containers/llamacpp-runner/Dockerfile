@@ -19,8 +19,6 @@ RUN apt-get install -y \
     curl \
     ninja-build \
     ca-certificates \
-    libopenblas \
-    libopenblas-dev \
     libgomp1 \
     libssl-dev:arm64 \
     && update-ca-certificates
@@ -74,8 +72,9 @@ RUN cd ~/dev/llm; \
 RUN cd ~/dev/llm/llama.cpp/build/; \
     mv bin bin-full; \
     mkdir -p bin; \
-    #cp bin-full/llama-cli bin/; \
-    cp bin-full/* bin/
+    cp bin-full/llama-cli bin/; \
+    cp bin-full/llama-server bin/; \
+    cp bin-full/lib* bin/
 
 FROM ubuntu:24.04 AS production
 
@@ -93,11 +92,10 @@ RUN export DEBIAN_FRONTEND=noninteractive; \
     apt install --no-install-recommends -y software-properties-common; \
     apt-add-repository -y ppa:ubuntu-qcom-iot/qcom-ppa; \
     apt update; \
-    apt install --no-install-recommends -y clinfo qcom-adreno1 curl libgomp1 libopenblas; \
+    apt install --no-install-recommends -y clinfo qcom-adreno1 curl libgomp1; \
     apt autoremove -y; \
     apt dist-clean; \
     rm -f /usr/lib/libOpenCL.so; \
     ln -s /lib/aarch64-linux-gnu/libOpenCL.so.1.0.0 /usr/lib/libOpenCL.so; \
     chmod +x /usr/local/bin/*; \
-    chmod +x /usr/bin/ollama; \
     chmod +x /run.sh
