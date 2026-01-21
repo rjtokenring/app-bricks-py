@@ -1,6 +1,3 @@
-FROM docker.io/ollama/ollama:latest AS ollama
-
-
 FROM ubuntu:24.04 AS llamacpp-builder
 
 # Install OpenCL
@@ -9,11 +6,24 @@ RUN export DEBIAN_FRONTEND=noninteractive; \
     apt install --no-install-recommends -y software-properties-common; \
     apt-add-repository -y ppa:ubuntu-qcom-iot/qcom-ppa; \
     apt update; \
-    apt install --no-install-recommends -y clinfo qcom-adreno1; \
-    apt install --no-install-recommends -y cmake ninja-build curl libcurl4-openssl-dev build-essential git; \
+    apt install --no-install-recommends -y clinfo qcom-adreno1 cmake ninja-build curl libcurl4-openssl-dev build-essential git; \
     mkdir -p ~/dev/llm; \
     rm -f /usr/lib/libOpenCL.so; \
     ln -s /lib/aarch64-linux-gnu/libOpenCL.so.1.0.0 /usr/lib/libOpenCL.so
+
+# Install dependencies for building llama.cpp
+RUN apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    curl \
+    ninja-build \
+    ca-certificates \
+    libopenblas \
+    libopenblas-dev \
+    libgomp1 \
+    libssl-dev:arm64 \
+    && update-ca-certificates
 
 # Install OpenCL Headers
 RUN cd ~/dev/llm; \
@@ -47,26 +57,30 @@ RUN cd ~/dev/llm; \
     mkdir -p build; \
     cd build; \
     cmake .. -G Ninja \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DBUILD_SHARED_LIBS=OFF \
+		-DCMAKE_SYSTEM_NAME=Linux \
+		-DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DGGML_NATIVE=OFF \
+		-DLLAMA_BUILD_TESTS=OFF \
+		-DGGML_BACKEND_DL=ON \
+        # Disabling CPU repacking for compatibility issues
+		-DGGML_USE_CPU_REPACK=OFF \
+		-DGGML_CPU_ALL_VARIANTS=OFF \
+        # Enable OpenCL
         -DGGML_OPENCL=ON; \
     ninja -j`nproc`
 
 RUN cd ~/dev/llm/llama.cpp/build/; \
     mv bin bin-full; \
     mkdir -p bin; \
-    cp bin-full/llama-cli bin/; \
-    cp bin-full/llama-server bin/
+    #cp bin-full/llama-cli bin/; \
+    cp bin-full/* bin/
 
 FROM ubuntu:24.04 AS production
 
 COPY --from=llamacpp-builder /root/dev/llm/llama.cpp/build/bin /usr/local/bin/
 COPY ./run.sh /
-
-COPY --from=ollama /usr/bin/ollama /usr/bin/ollama
-COPY --from=ollama /usr/lib/ollama/libggml-* /usr/lib/ollama/
-# Environment variable setup
-ENV OLLAMA_HOST=0.0.0.0
 
 RUN set -ex; \
     groupadd -g 44 video || true; \
@@ -79,7 +93,7 @@ RUN export DEBIAN_FRONTEND=noninteractive; \
     apt install --no-install-recommends -y software-properties-common; \
     apt-add-repository -y ppa:ubuntu-qcom-iot/qcom-ppa; \
     apt update; \
-    apt install --no-install-recommends -y clinfo qcom-adreno1 curl libgomp1; \
+    apt install --no-install-recommends -y clinfo qcom-adreno1 curl libgomp1 libopenblas; \
     apt autoremove -y; \
     apt dist-clean; \
     rm -f /usr/lib/libOpenCL.so; \
