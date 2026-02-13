@@ -1,0 +1,5 @@
+id: arduino:mcp_client
+name: MCP Client
+description: |
+  This brick communicates with the MCP server to perform various tasks.
+category: ai
