@@ -4,12 +4,16 @@
 
 # EXAMPLE_NAME = "Basic mcp client usage example"
 
-from arduino.app_bricks.mcp_client import MCPClient, LocalPythonMCPEndpoint
+from arduino.app_bricks.mcp_client import MCPClient, LocalPythonMCPEndpoint, HTTPEndpoint
 from arduino.app_utils import App
+
+external_mcp = HTTPEndpoint(name="filesystem", url="http://localhost:8080/mcp")
+
+print("-------------------------------------------------")
 
 local = LocalPythonMCPEndpoint(name="local_mcp", script_path="math_server.py")
 
-client = MCPClient(clients=[local])
+client = MCPClient(clients=[local, external_mcp])
 
 print(client.list_tools())
 

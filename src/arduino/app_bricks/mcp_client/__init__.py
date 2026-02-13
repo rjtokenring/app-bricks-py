@@ -53,12 +53,13 @@ class MCPClient:
 
     def __init__(self, clients: list[MCPEndpoint], tool_name_prefix: bool = True, **kwargs):
         """Initialize the MCPClient with a MultiServerMCPClient.
-        
+
         Args:
-            clients (list[MCPEndpoint]): A list of MCP endpoint configurations. Use brick's exposed endpoint classes like HTTPEndpoint or LocalPythonMCPEndpoint to create endpoint configurations.
+            clients (list[MCPEndpoint]): A list of MCP endpoint configurations. Use brick's exposed endpoint classes like
+                HTTPEndpoint or LocalPythonMCPEndpoint to create endpoint configurations.
             tool_name_prefix (bool, optional): Whether to prefix tool names with the client name. Defaults to True.
             **kwargs: Additional keyword arguments to pass to the MultiServerMCPClient.
-        
+
         """
         connections = {}
         for client in clients:
