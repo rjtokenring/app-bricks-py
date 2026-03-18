@@ -107,7 +107,7 @@ def get_brick_configured_model(brick_id: str) -> Optional[str]:
 
     bricks:
     - arduino:llm:
-        model: genie:qwen3-4b
+        model: genie:qwen2.5-3b
 
     Args:
         brick_id (str): The identifier of the brick for which to retrieve the model configuration.
@@ -124,10 +124,9 @@ def get_brick_configured_model(brick_id: str) -> Optional[str]:
     if app_cfg and "bricks" in app_cfg:
         bricks_list = app_cfg["bricks"]
         for brick_entry in bricks_list:
-            if isinstance(brick_entry, dict) and brick_id in brick_entry:
-                brick_config = brick_entry[brick_id]
-                if isinstance(brick_config, dict) and "model" in brick_config:
-                    return brick_config["model"]
+            if brick_id in brick_entry:
+                if "model" in brick_entry[brick_id]:
+                    return brick_entry[brick_id]["model"]
     return None
 
 
