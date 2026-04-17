@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
+from langchain_core.language_models import BaseChatModel
+
 from arduino.app_bricks.cloud_llm import CloudLLM, CloudModelProvider
 from arduino.app_bricks.cloud_llm.cloud_llm import DEFAULT_MEMORY
 from arduino.app_utils import Logger, brick
@@ -32,8 +34,8 @@ class LargeLanguageModel(CloudLLM):
         api_key: str = os.getenv("LOCAL_LLM_API_KEY", "api_key"),
         system_prompt: str = "",
         temperature: Optional[float] = 0.7,
-        max_tokens: int = 256,
-        timeout: int = 30,
+        max_tokens: int = 512,
+        timeout: Optional[int] = None,
         tools: List[Callable[..., Any]] = None,
         model: str = None,
         **kwargs,
@@ -43,7 +45,7 @@ class LargeLanguageModel(CloudLLM):
         Args:
             api_key (str): The API access key for the target LLM service. Defaults to the
                 'LOCAL_LLM_API_KEY' environment variable.
-            model (str): The specific model name or identifier to use (e.g., "genie:qwen2.5-3b").
+            model (str): The specific model name or identifier to use (e.g., "genie:qwen3-4b").
                 If not provided, model will be determined from app configuration or default brick configuration.
             system_prompt (str): A system-level instruction that defines the AI's persona
                 and constraints (e.g., "You are a helpful assistant"). Defaults to empty.
@@ -51,9 +53,9 @@ class LargeLanguageModel(CloudLLM):
                 Higher values make output more random/creative; lower values make it more
                 deterministic. Defaults to 0.7.
             max_tokens (int): The maximum number of tokens to generate in the response.
-                Defaults to 256.
-            timeout (int): The maximum duration in seconds to wait for a response before
-                timing out. Defaults to 30.
+                Defaults to 512.
+            timeout (Optional[int]): The maximum duration in seconds to wait for a response before
+                timing out. Defaults to None.
             tools (List[Callable[..., Any]]): A list of callable tool functions to register. Defaults to None.
             **kwargs: Additional arguments passed to the model constructor
 
@@ -90,12 +92,12 @@ class LargeLanguageModel(CloudLLM):
             if model.startswith(self.GENIE_MODEL):
                 port = 9001
                 host = "genie-models-runner"
-            elif model.startswith(self.LLAMACPP_MODEL):
-                port = 9999
-                host = "llamacpp-models-runner"
-            elif model.startswith(self.OLLAMA_MODEL):
-                port = 11434
-                host = "ollama-models-runner"
+            # elif model.startswith(self.LLAMACPP_MODEL):
+            #     port = 9999
+            #     host = "llamacpp-models-runner"
+            # elif model.startswith(self.OLLAMA_MODEL):
+            #     port = 11434
+            #     host = "ollama-models-runner"
             else:
                 raise ValueError(f"Unsupported local model type: {model}")
 
@@ -164,6 +166,17 @@ class LargeLanguageModel(CloudLLM):
         """
         return super().with_memory(max_messages=max_messages)
 
+    def get_client(self) -> BaseChatModel:
+        """Returns the underlying LangChain model instance.
+
+        This allows for advanced users to access the full capabilities of the model
+        directly, such as calling `generate()` or `stream()` with custom message formats.
+
+        Returns:
+            BaseChatModel: The LangChain chat model instance used internally.
+        """
+        return self._model
+
     def _handle_api_error(self, ilogger: Logger, e: Exception) -> None:
         """Handles OpenAI API errors by logging details and raising RuntimeError.
 
@@ -210,7 +223,15 @@ class LargeLanguageModel(CloudLLM):
             RuntimeError: If the internal chain is not initialized or if the API request fails.
         """
         try:
-            return super()._chat_invoke(message=message, images=images)
+            message = super()._chat_invoke(message=message, images=images)
+            if "<think>" in message and "</think>" in message:
+                splitted_message = message.split("<think>")[1].split("</think>")
+                if len(splitted_message) > 1:
+                    return splitted_message[1]  # Extract actual content
+                else:
+                    return message  # Fallback to full message if tags are not properly closed
+            return message
+
         except (BadRequestError, APIError) as e:
             self._handle_api_error(logger, e)
 
@@ -232,7 +253,21 @@ class LargeLanguageModel(CloudLLM):
             AlreadyGenerating: If a streaming session is already active.
         """
         try:
-            return super()._chat_stream_invoke(message=message, images=images)
+            in_thininkg = False
+            for chunk in super()._chat_stream_invoke(message=message, images=images):
+                if in_thininkg:
+                    if "</think>" in chunk:
+                        in_thininkg = False
+                        chunk = chunk.split("</think>")[-1]  # Take content after </think>
+                        if chunk is not None and chunk.strip() != "":
+                            yield chunk
+                    continue
+
+                if "<think>" in chunk:
+                    in_thininkg = True
+                    continue  # Skip the <think> tag itself
+                else:
+                    yield chunk
         except (BadRequestError, APIError) as e:
             self._handle_api_error(logger, e)
 
