@@ -78,14 +78,29 @@ jobs:
               fi
             done
 
-            # Cascade: add downstream containers for each changed container
+            # Forward cascade: if a base container changed, add its downstream containers
             for CONTAINER in "${CHANGED[@]}"; do
               DOWNSTREAM=$(jq -r '.downstream // [] | .[]' "containers/$CONTAINER/ci.json")
               for DS in $DOWNSTREAM; do
                 if [[ ! " ${CHANGED[*]} " =~ " $DS " ]]; then
-                  echo "Cascading: $DS depends on $CONTAINER"
+                  echo "Cascading downstream: $DS depends on $CONTAINER"
                   CHANGED+=("$DS")
                 fi
+              done
+            done
+
+            # Reverse cascade: if a downstream container changed, add its parent so the
+            # base image is always built fresh before the downstream container
+            for CONTAINER in "${CHANGED[@]}"; do
+              for CI_JSON in containers/*/ci.json; do
+                PARENT=$(basename "$(dirname "$CI_JSON")")
+                DS_LIST=$(jq -r '.downstream // [] | .[]' "$CI_JSON" 2>/dev/null)
+                for DS in $DS_LIST; do
+                  if [[ "$DS" == "$CONTAINER" ]] && [[ ! " ${CHANGED[*]} " =~ " $PARENT " ]]; then
+                    echo "Cascading upstream: $PARENT required by $CONTAINER"
+                    CHANGED+=("$PARENT")
+                  fi
+                done
               done
             done
           fi
@@ -132,9 +147,9 @@ jobs:
           fi
 
   build:
-    needs: [detect-changes]
+    needs: [ detect-changes ]
     if: needs.detect-changes.outputs.containers != '[]'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     env:
       PYTHON_VERSION: "3.13"
       TASKFILE_VERSION: "3.45.4"
@@ -163,11 +178,6 @@ jobs:
           task build-dev
           cp ./dist/arduino*.whl ./containers/python-apps-base/
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: linux/arm64
-
       - name: Setup Docker buildx
         uses: docker/setup-buildx-action@v3
 
@@ -183,8 +193,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           tags: |
-            type=ref,event=branch
-            type=ref,event=branch,suffix=-${{ github.run_number }}
+            type=ref,event=branch,prefix=dev-
+            type=ref,event=branch,prefix=dev-,suffix=-${{ github.run_number }}
             type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
           images: ghcr.io/${{ github.repository_owner }}/app-bricks/${{ matrix.container }}
 
@@ -196,7 +206,6 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
@@ -205,9 +214,9 @@ jobs:
           # BASE_IMAGE_VERSION=latest # currently not used, defaults to value used in Dockerfile
 
   build-downstream:
-    needs: [detect-changes, build]
+    needs: [ detect-changes, build ]
     if: needs.detect-changes.outputs.downstream_containers != '[]'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     env:
       PYTHON_VERSION: "3.13"
       TASKFILE_VERSION: "3.45.4"
@@ -227,7 +236,7 @@ jobs:
             echo "value=${{ inputs.tag }}" >> $GITHUB_OUTPUT
           else
             TAG=$(echo "${{ github.ref_name }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-zA-Z0-9._-]/-/g')
-            echo "value=$TAG" >> $GITHUB_OUTPUT
+            echo "value=dev-$TAG" >> $GITHUB_OUTPUT
           fi
 
       - name: Set up Python
@@ -246,11 +255,6 @@ jobs:
           task build-dev
           cp ./dist/arduino*.whl ./containers/python-apps-base/
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: linux/arm64
-
       - name: Setup Docker buildx
         uses: docker/setup-buildx-action@v3
 
@@ -266,8 +270,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           tags: |
-            type=ref,event=branch
-            type=ref,event=branch,suffix=-${{ github.run_number }}
+            type=ref,event=branch,prefix=dev-
+            type=ref,event=branch,prefix=dev-,suffix=-${{ github.run_number }}
             type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
           images: ghcr.io/${{ github.repository_owner }}/app-bricks/${{ matrix.container }}
 
@@ -279,7 +283,6 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
