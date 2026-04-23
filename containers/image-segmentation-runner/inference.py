@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+#
+# SPDX-License-Identifier: MPL-2.0
+
 import numpy as np
 from ai_edge_litert.interpreter import Interpreter
 from utils.tf import load_qnn_delegate
