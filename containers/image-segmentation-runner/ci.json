@@ -1,0 +1,9 @@
+{
+  "tag_prefix": "image-segmentation",
+  "watch_paths": ["containers/image-segmentation-runner/"],
+  "tag_latest": false,
+  "build_whl": false,
+  "update_compose": true,
+  "build_args": {},
+  "downstream": []
+}
