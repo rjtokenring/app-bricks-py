@@ -21,10 +21,11 @@ from arduino.app_internal.core.module import load_brick_compose_file, resolve_ad
 
 @brick
 class GestureRecognition:
-    def __init__(self, camera: BaseCamera | None = None):
+    def __init__(self, camera: BaseCamera | None = None, confidence: float = 0.5):
         if camera is None:
             camera = Camera(fps=30)
         self._camera = camera
+        self._confidence = confidence
 
         # Callbacks
         self._gesture_callbacks = {}  # {(gesture, hand): callback}
@@ -229,7 +230,8 @@ class GestureRecognition:
         for hand_data in hands_data:
             hand = hand_data.get("hand", "")
             gesture = hand_data.get("gesture", "")
-            if hand in ("left", "right") and gesture:
+            confidence = hand_data.get("confidence", 0.0)
+            if hand in ("left", "right") and gesture and confidence >= self._confidence:
                 self._dispatch_gesture(gesture, hand, metadata)
 
     def _dispatch_enter(self):
