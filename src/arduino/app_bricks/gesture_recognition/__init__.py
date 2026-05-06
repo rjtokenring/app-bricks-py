@@ -21,7 +21,7 @@ from arduino.app_internal.core.module import load_brick_compose_file, resolve_ad
 
 @brick
 class GestureRecognition:
-    def __init__(self, camera: BaseCamera | None = None, confidence: float = 0.5):
+    def __init__(self, camera: BaseCamera | None = None, confidence: float = 0.0):
         if camera is None:
             camera = Camera(fps=30)
         self._camera = camera
