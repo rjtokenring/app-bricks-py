@@ -31,6 +31,15 @@ class HTTPEndpoint(MCPEndpoint):
     """A class to communicate with remote MCP server via HTTP protocol to perform various tasks."""
 
     def __init__(self, name: str, url: str, headers: dict = None):
+        """Initialize the HTTPEndpoint with the given name, URL, and optional headers.
+        Configure url to point to the /mcp endpoint of the remote MCP server.
+        To add authentication, include the necessary headers (e.g., Authorization) in the headers dictionary.
+
+        Args:
+            name (str): A unique name for the MCP endpoint configuration.
+            url (str): The URL of the remote MCP server's /mcp endpoint (e.g., http://localhost:8080/mcp).
+            headers (dict, optional): Optional HTTP headers for authentication or other purposes. Defaults to None.
+        """
         super().__init__(name=name, transport="http", url=url, headers=headers)
 
     def to_dict(self):
@@ -41,6 +50,32 @@ class LocalPythonMCPEndpoint(MCPEndpoint):
     """A class to communicate with a local Python MCP server to perform various tasks."""
 
     def __init__(self, name: str, script_path: str, args: list = None):
+        """Initialize the LocalPythonMCPEndpoint with the given name, script path, and optional arguments.
+        The script specified by script_path should implement an MCP server using the MCPServer class from the langchain_mcp_adapters library.
+
+        Args:
+            name (str): A unique name for the MCP endpoint configuration.
+            script_path (str): The path to the Python script implementing the MCP server.
+            args (list, optional): Additional command-line arguments to pass to the script. Defaults to None.
+
+        !!! python "Example usage"
+            ```python
+            from mcp.server.fastmcp import FastMCP
+
+            mcp = FastMCP("MathServer")
+
+
+            @mcp.tool()
+            def add(a: int, b: int) -> int:
+                '''Add two numbers'''
+                return a + b
+
+
+            if __name__ == "__main__":
+                mcp.run(transport="stdio")
+            ```
+
+        """
         super().__init__(name=name, transport="stdio", command="python", args=[script_path] + (args or []))
 
     def to_dict(self):
