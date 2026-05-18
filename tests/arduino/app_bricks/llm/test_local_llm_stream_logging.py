@@ -35,6 +35,7 @@ def test_local_llm_logs_local_model_name_while_using_openai_compatible_adapter()
         self._model_name = kwargs["model"]
         self._model_loaded = False
         self._history = EmptyHistory()
+        self._retriever = None
 
     with (
         patch.object(CloudLLM, "__init__", fake_cloud_llm_init),

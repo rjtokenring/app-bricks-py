@@ -4,6 +4,7 @@
 
 from langchain_core.language_models import BaseChatModel, LanguageModelInput
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.retrievers import BaseRetriever
 from langchain_core.runnables import Runnable
 
 import time
@@ -194,6 +195,21 @@ class LargeLanguageModel(CloudLLM):
             Self: The current instance, allowing for method chaining.
         """
         return super().with_memory(max_messages=max_messages, persistence=persistence)
+
+    def with_retriever(self, retriever: BaseRetriever) -> Self:
+        """Configures an external retriever for RAG (Retrieval-Augmented Generation).
+
+        When set, each user message will be augmented with relevant documents fetched
+        from the retriever (e.g., ChromaDB, ElasticSearch) before being sent to the model.
+
+        Args:
+            retriever (BaseRetriever): Any LangChain-compatible retriever instance.
+                Obtain one via ``VectorStore.as_retriever()`` (e.g., ``Chroma(...).as_retriever()``).
+
+        Returns:
+            Self: The current instance, allowing for method chaining.
+        """
+        return super().with_retriever(retriever)
 
     def get_client(self) -> BaseChatModel | Runnable[LanguageModelInput, AIMessage]:
         """Returns the underlying LangChain model instance.

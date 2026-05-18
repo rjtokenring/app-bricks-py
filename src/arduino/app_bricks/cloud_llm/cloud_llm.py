@@ -13,6 +13,7 @@ from collections.abc import Iterator, Sequence, Callable
 
 from langchain_core.language_models import BaseChatModel, LanguageModelInput
 from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage, AIMessage, AIMessageChunk, ToolCall, message_chunk_to_message
+from langchain_core.retrievers import BaseRetriever
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool, StructuredTool
 
@@ -223,6 +224,9 @@ class CloudLLM:
         # Memory management
         self.with_memory(DEFAULT_MEMORY)
 
+        # Retriever
+        self._retriever: BaseRetriever | None = None
+
         self._keep_streaming = threading.Event()
 
     def with_memory(
@@ -263,6 +267,22 @@ class CloudLLM:
 
         return self
 
+    def with_retriever(self, retriever: BaseRetriever) -> Self:
+        """Configures an external retriever for RAG (Retrieval-Augmented Generation).
+
+        When set, each user message will be augmented with relevant documents fetched
+        from the retriever (e.g., ChromaDB, ElasticSearch) before being sent to the model.
+
+        Args:
+            retriever (BaseRetriever): Any LangChain-compatible retriever instance.
+                Obtain one via ``VectorStore.as_retriever()`` (e.g., ``Chroma(...).as_retriever()``).
+
+        Returns:
+            Self: The current instance, allowing for method chaining.
+        """
+        self._retriever = retriever
+        return self
+
     def _get_message_with_history(self, user_input: str, images: Sequence[str | bytes] | None = None) -> list[BaseMessage]:
         """Retrieves the current message history for the conversation, including the new user input.
 
@@ -279,6 +299,13 @@ class CloudLLM:
         if self._model_loaded is False:
             logger.info(f"Initializing model {self._model_name}...")
             self._model_loaded = True
+
+        if self._retriever is not None:
+            docs = self._retriever.invoke(user_input)
+            if docs:
+                context = "\n\n".join(d.page_content for d in docs)
+                logger.debug(f"Retriever returned {len(docs)} document(s).")
+                user_input = f"Context:\n{context}\n\nQuestion:\n{user_input}"
 
         messages = self._history.get_messages()
         if images is not None and len(images) > 0:
