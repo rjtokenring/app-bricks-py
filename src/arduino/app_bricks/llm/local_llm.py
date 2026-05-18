@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.retrievers import BaseRetriever
 
 from arduino.app_bricks.cloud_llm import CloudLLM, CloudModelProvider
 from arduino.app_bricks.cloud_llm.cloud_llm import DEFAULT_MEMORY
@@ -167,6 +168,21 @@ class LargeLanguageModel(CloudLLM):
             LargeLanguageModel: The current instance, allowing for method chaining.
         """
         return super().with_memory(max_messages=max_messages)
+
+    def with_retriever(self, retriever: BaseRetriever) -> "LargeLanguageModel":
+        """Configures an external retriever for RAG (Retrieval-Augmented Generation).
+
+        When set, each user message will be augmented with relevant documents fetched
+        from the retriever (e.g., ChromaDB, ElasticSearch) before being sent to the model.
+
+        Args:
+            retriever (BaseRetriever): Any LangChain-compatible retriever instance.
+                Obtain one via ``VectorStore.as_retriever()`` (e.g., ``Chroma(...).as_retriever()``).
+
+        Returns:
+            LargeLanguageModel: The current instance, allowing for method chaining.
+        """
+        return super().with_retriever(retriever)
 
     def get_client(self) -> BaseChatModel:
         """Returns the underlying LangChain model instance.
