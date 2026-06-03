@@ -143,7 +143,7 @@ jobs:
           fi
 
   build:
-    needs: [ setup ]
+    needs: [setup]
     if: needs.setup.outputs.containers != '[]'
     runs-on: ubuntu-24.04-arm
     env:
@@ -160,6 +160,15 @@ jobs:
         with:
           ref: ${{ needs.setup.outputs.branch }}
           fetch-depth: 0
+
+      - name: Read container config
+        id: config
+        run: |
+          CI_JSON="containers/${{ matrix.container }}/ci.json"
+          BUILD_ARGS=$(jq -r '.build_args // {} | to_entries | map("\(.key)=\(.value)") | join("\n")' "$CI_JSON")
+          echo "build_args<<EOF" >> $GITHUB_OUTPUT
+          echo "$BUILD_ARGS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Setup Docker buildx
         uses: docker/setup-buildx-action@v4
@@ -194,6 +203,10 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.url=https://github.com/${{ github.repository }}
 
+      - name: Copy models-list.yaml into build context
+        if: matrix.container == 'models-downloader'
+        run: cp models/models-list.yaml containers/models-downloader/models-list.yaml
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v7
         with:
@@ -207,6 +220,7 @@ jobs:
           cache-to: ${{ steps.cache.outputs.cache_to }}
           provenance: false
           build-args: |
+            ${{ steps.config.outputs.build_args }}
             REGISTRY=${{ env.DEV_REGISTRY_PATH }}
             BASE_IMAGE_VERSION=${{ needs.setup.outputs.image_tag }}
 
@@ -218,7 +232,7 @@ jobs:
           registry: ${{ env.DEV_REGISTRY_PATH }}
 
   build-downstream:
-    needs: [ setup, build ]
+    needs: [setup, build]
     if: needs.setup.outputs.downstream_containers != '[]'
     runs-on: ubuntu-24.04-arm
     env:
@@ -261,6 +275,15 @@ jobs:
               cp ./dist/arduino*.whl ./containers/python-apps-base/
             "
 
+      - name: Read container config
+        id: config
+        run: |
+          CI_JSON="containers/${{ matrix.container }}/ci.json"
+          BUILD_ARGS=$(jq -r '.build_args // {} | to_entries | map("\(.key)=\(.value)") | join("\n")' "$CI_JSON")
+          echo "build_args<<EOF" >> $GITHUB_OUTPUT
+          echo "$BUILD_ARGS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
       - name: Setup Docker buildx
         uses: docker/setup-buildx-action@v4
 
@@ -294,6 +317,10 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.url=https://github.com/${{ github.repository }}
 
+      - name: Copy models-list.yaml into build context
+        if: matrix.container == 'models-downloader'
+        run: cp models/models-list.yaml containers/models-downloader/models-list.yaml
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v7
         with:
@@ -307,6 +334,7 @@ jobs:
           cache-to: ${{ steps.cache.outputs.cache_to }}
           provenance: false
           build-args: |
+            ${{ steps.config.outputs.build_args }}
             REGISTRY=${{ env.DEV_REGISTRY_PATH }}
             BASE_IMAGE_VERSION=${{ needs.setup.outputs.image_tag }}
 
