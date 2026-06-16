@@ -6,7 +6,10 @@ import os
 import re
 import yaml
 import sys
+from dataclasses import dataclass, field
 from typing import List, Dict, Optional
+
+from arduino.app_utils.utils import get_board_name
 
 application_config_file_name: str = "app.yaml"
 config_file_name: str = "brick_config.yaml"
@@ -99,7 +102,115 @@ def get_brick_linked_resource_file(cls, resource_file_name) -> Optional[str]:
         return None
 
 
-def get_brick_configured_model(brick_id: str) -> Optional[str]:
+def get_bricks_static_assets_directory() -> Optional[str]:
+    """Gets the full path to the static assets directory.
+
+    Returns:
+        Optional[str]: The path to the static assets directory if found, otherwise None.
+    """
+    try:
+        directory_path = os.path.dirname(os.path.abspath(__file__))
+        # Go 2 directories above, then into app_bricks/static
+        base_path = os.path.dirname(os.path.dirname(directory_path))
+        requested_path = os.path.join(base_path, "app_bricks", "static")
+        if os.path.exists(requested_path):
+            return requested_path
+        else:
+            return None
+    except AttributeError:
+        # Handle built-in classes or other cases where __file__ is not available
+        return None
+    except ModuleNotFoundError:
+        return None
+
+
+@dataclass
+class ModelBrickConfig:
+    id: str
+    model_configuration: Dict[str, str] = field(default_factory=dict)
+
+    @staticmethod
+    def from_dict(data: dict) -> "ModelBrickConfig":
+        return ModelBrickConfig(
+            id=data.get("id", ""),
+            model_configuration=data.get("model_configuration", {}),
+        )
+
+
+@dataclass
+class ModelDeployment:
+    handler: str = ""
+    platforms: Dict[str, Dict] = field(default_factory=dict)
+    metadata: Dict[str, str] = field(default_factory=dict)
+
+    @staticmethod
+    def from_dict(data: dict) -> "ModelDeployment":
+        platforms = {}
+        for p in data.get("platforms", []):
+            if isinstance(p, dict):
+                for platform_name, platform_config in p.items():
+                    platforms[platform_name] = platform_config if isinstance(platform_config, dict) else {}
+        return ModelDeployment(
+            handler=data.get("handler", ""),
+            platforms=platforms,
+            metadata=data.get("metadata", {}),
+        )
+
+
+@dataclass
+class ModelEntry:
+    model_id: str
+    name: str = ""
+    description: str = ""
+    metadata: Dict[str, str] = field(default_factory=dict)
+    supported_boards: List[str] = field(default_factory=list)
+    deployment: Optional[ModelDeployment] = None
+    bricks: List[ModelBrickConfig] = field(default_factory=list)
+
+    @staticmethod
+    def from_dict(model_id: str, data: dict) -> "ModelEntry":
+        deployment = ModelDeployment.from_dict(data["deployment"]) if "deployment" in data else None
+        bricks = [ModelBrickConfig.from_dict(b) for b in data.get("bricks", [])]
+        return ModelEntry(
+            model_id=model_id,
+            name=data.get("name", ""),
+            description=data.get("description", ""),
+            metadata=data.get("metadata", {}),
+            supported_boards=data.get("supported_boards", []),
+            deployment=deployment,
+            bricks=bricks,
+        )
+
+
+def load_model_list() -> Optional[Dict[str, ModelEntry]]:
+    """Loads complete model list from static assets directory.
+
+    Returns:
+        A dictionary of model_id -> ModelEntry, or None if the file is not found.
+    """
+    static_assets_dir = get_bricks_static_assets_directory()
+    if static_assets_dir:
+        model_list_path = os.path.join(static_assets_dir, "models-list.yaml")
+        if os.path.exists(model_list_path):
+            with open(model_list_path, encoding="utf-8") as f:
+                model_list_content = yaml.safe_load(f)
+            if not model_list_content:
+                return None
+            if isinstance(model_list_content, dict) and "models" in model_list_content:
+                model_list_content = model_list_content["models"]
+            if not isinstance(model_list_content, list):
+                return None
+            models = {}
+            for entry in model_list_content:
+                if isinstance(entry, dict):
+                    for model_id, model_data in entry.items():
+                        if isinstance(model_data, dict):
+                            models[model_id] = ModelEntry.from_dict(model_id, model_data)
+            return models
+    return None
+
+
+def get_brick_configured_model(brick_id: str, brick_config: Dict = None) -> Optional[str]:
     """Helper method to extract the model name from the app configuration for this brick.
     This allows dynamic configuration of the model via the app's config file, overriding defaults.
 
@@ -111,6 +222,8 @@ def get_brick_configured_model(brick_id: str) -> Optional[str]:
 
     Args:
         brick_id (str): The identifier of the brick for which to retrieve the model configuration.
+        brick_config (Dict, optional): The brick configuration dictionary. If provided, it will load the default model from this configuration,
+            if not specified into app.yaml.
     Returns:
         Optional[str]: The model name if found in the app configuration, otherwise None.
     Raises:
@@ -124,9 +237,29 @@ def get_brick_configured_model(brick_id: str) -> Optional[str]:
     if app_cfg and "bricks" in app_cfg:
         bricks_list = app_cfg["bricks"]
         for brick_entry in bricks_list:
-            if brick_id in brick_entry:
-                if "model" in brick_entry[brick_id]:
-                    return brick_entry[brick_id]["model"]
+            if isinstance(brick_entry, dict) and brick_id in brick_entry:
+                brick_config = brick_entry[brick_id]
+                if isinstance(brick_config, dict) and "model" in brick_config:
+                    return brick_config["model"]
+
+    # No model found in app config, check if it's specified in the brick_config.yaml as default for the brick
+    if brick_config is None:
+        return None
+
+    if brick_config and "model_by_boards" in brick_config:
+        board_name = get_board_name()
+        if board_name == "unknown":
+            board_name = "ventunoq"  # Default to ventunoq if board name cannot be determined
+        print(f"Looking for model configuration for board '{board_name}' in brick_config.yaml...")
+        for board_entry in brick_config["model_by_boards"]:
+            if "platform" in board_entry and board_entry["platform"] == board_name:
+                print(f"Found matching board entry for platform '{board_name}': {board_entry}")
+                return board_entry["model"]
+
+    if brick_config and "model" in brick_config:
+        print(f"Found model configuration in brick_config.yaml for brick '{brick_id}': {brick_config['model']}")
+        return brick_config["model"]
+
     return None
 
 
