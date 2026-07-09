@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 
 import signal
+import sys
 import threading
 from collections import deque
 import time
@@ -31,6 +32,7 @@ class AppController:
         self._running_queue = deque()
         self._brick_states: dict[any, list[tuple[threading.Thread, threading.Event]]] = {}
         self._app_lock = threading.Lock()
+        self._running = False
 
     def register(self, brick):
         """Registers a brick for being managed automatically by the AppController.
@@ -93,17 +95,61 @@ class AppController:
 
         If a user_loop callable is provided, it will be executed instead of the default infinite loop.
 
+        When running inside a framework that manages the process lifecycle (e.g. Streamlit),
+        bricks are started but the blocking loop is skipped. The framework is responsible for
+        keeping the process alive; brick daemon threads terminate automatically with the process.
+
         Args:
             user_loop (callable, optional): A user-defined function to run instead of the default infinite loop.
         """
+        # Idempotent: if already running (e.g. Streamlit re-runs the script), just return.
+        if self._running:
+            return
+
+        self._running = True
         self._start_managed_bricks()
         logger.info("App started")
-        self.loop(user_loop)
+
+        if self._is_framework_managed():
+            logger.info("Running in framework-managed mode (process lifecycle handled externally)")
+            return
+
+        exit_code = self.loop(user_loop)
+        self._shutdown()
+
+        if exit_code:
+            sys.exit(exit_code)
+
+    def _shutdown(self):
+        """Performs a clean shutdown of all bricks."""
+        if not self._running:
+            return
         logger.info("App is shutting down")
         self._stop_all_bricks()
+        self._running = False
         print("======== App shutdown completed =====================", flush=True)
 
-    def loop(self, user_loop: callable = None):
+    def _is_framework_managed(self) -> bool:
+        """Detect if running inside a framework that manages the process lifecycle.
+
+        Returns True when the script is being executed in a worker thread by a framework
+        like Streamlit, which owns the main thread and the process lifecycle.
+        """
+        if threading.current_thread() is threading.main_thread():
+            return False
+
+        # Explicitly detect Streamlit's ScriptRunContext (definitive signal)
+        try:
+            from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+            if get_script_run_ctx(suppress_warning=True) is not None:
+                return True
+        except ImportError:
+            pass
+
+        return False
+
+    def loop(self, user_loop: callable = None) -> int:
         """This method keeps the application running, blocking until a KeyboardInterrupt (Ctrl+C) occurs.
 
         If a user_loop callable is provided, it will be executed inside an infinite loop and
@@ -111,15 +157,23 @@ class AppController:
 
         Args:
             user_loop (callable, optional): A user-defined function to run inside an infinite loop.
+
+        Returns:
+            int: The exit code describing why the loop terminated:
+                - 0 for a clean termination
+                - 128 + signal number for termination signals
+                - a code < 128 for other errors
         """
 
-        class SigtermReceived(BaseException):
-            pass
+        class SignalReceived(BaseException):
+            def __init__(self, signum):
+                self.signum = signum
 
-        def handle_sigterm(signum, frame):
-            raise SigtermReceived
+        def handle_signal(signum, frame):
+            raise SignalReceived(signum)
 
-        signal.signal(signal.SIGTERM, handle_sigterm)
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGTERM, handle_signal)
 
         try:
             if user_loop:
@@ -130,10 +184,16 @@ class AppController:
                     time.sleep(10)
         except StopIteration:
             logger.debug("StopIteration received from user loop")
+            return 0
         except KeyboardInterrupt:
             logger.debug("KeyboardInterrupt received")
-        except SigtermReceived:
-            logger.debug("SIGTERM received")
+            return min(128 + signal.SIGINT, 255)
+        except SignalReceived as signal_received:
+            logger.debug(f"Termination signal {signal_received.signum} received")
+            return min(128 + signal_received.signum, 255)
+        except Exception:
+            logger.exception("Unhandled exception in application loop")
+            return 1
 
     def _start_managed_bricks(self):
         with self._app_lock:

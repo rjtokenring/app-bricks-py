@@ -6,6 +6,7 @@ description: |
   trigger actions based on these detections.
 category: video
 requires_container: true
+model: gesture-recognition
 supported_boards: ["ventunoq"]
 required_devices:
   - camera

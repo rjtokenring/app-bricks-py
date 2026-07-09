@@ -17,19 +17,15 @@ Usage:
 import argparse
 import json
 import os
+import stat
 import sys
 
-import yaml
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common.download_marker import read_marker
+from common.models_list import load_models_list, MODELS_LIST_PATH
 
 
-MODELS_LIST_PATH = "/app/models-list.yaml"
 MODELS_BASE_DIR = "/models"
-
-
-def load_models_list(yaml_path):
-    with open(yaml_path, "r") as f:
-        data = yaml.safe_load(f)
-    return data.get("models", [])
 
 
 def get_model_info(model_entry):
@@ -46,6 +42,7 @@ def get_model_info(model_entry):
             name = model_data.get("name", model_id)
             supported_boards = model_data.get("supported_boards", [])
             deployment = model_data.get("deployment")
+            model_size_mb = model_data.get("metadata", {}).get("model_size_mb")
 
             if not deployment:
                 continue
@@ -57,11 +54,11 @@ def get_model_info(model_entry):
                     "id": model_id,
                     "name": name,
                     "handler": deployment.get("handler", ""),
-                    "platform": "",
                     "model_directory": "",
                     "models_repository": "",
                     "model_type": "",
                     "model_name": "",
+                    "model_size_mb": model_size_mb,
                     "pre_loaded": True,
                     "supported_boards": supported_boards,
                 })
@@ -75,18 +72,20 @@ def get_model_info(model_entry):
                     continue
                 for platform_name, platform_config in platform_entry.items():
                     variables = platform_config.get("variables", {})
-                    model_directory = variables.get("model_directory") or build_model_directory(variables) or variables.get("model_name", "")
+                    model_directory = (
+                        variables.get("model_directory") or build_model_directory(variables) or os.path.splitext(variables.get("model_name", ""))[0]
+                    )
                     models_repository = variables.get("models_repository", "")
 
                     results.append({
                         "id": model_id,
                         "name": name,
                         "handler": deployment.get("handler", ""),
-                        "platform": platform_name,
                         "model_directory": model_directory,
                         "models_repository": models_repository,
                         "model_type": variables.get("model_type", ""),
                         "model_name": variables.get("model_name", ""),
+                        "model_size_mb": model_size_mb,
                         "pre_loaded": False,
                         "supported_boards": supported_boards,
                     })
@@ -109,6 +108,9 @@ def get_model_subdir(models_repository):
     # Handle relative paths like "models/genai" or "models/audio-analytics/asr"
     if models_repository.startswith("models/"):
         return models_repository[len("models/") :]
+    # Bare repository name (e.g. "edge-impulse", "genai") => use as-is
+    if models_repository:
+        return models_repository
     return ""
 
 
@@ -126,6 +128,61 @@ def build_model_directory(variables):
     return ""
 
 
+def get_dir_size_mb(path):
+    """Return total disk usage of a path (file or directory) in MB, rounded to 2 decimals."""
+    try:
+        st = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return None
+
+    if stat.S_ISREG(st.st_mode):
+        return round(st.st_size / 1024 / 1024, 2)
+    if not stat.S_ISDIR(st.st_mode):
+        return None
+
+    total = 0
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as it:
+                for entry in it:
+                    try:
+                        # Don't follow symlinks; use cached stat from DirEntry.
+                        entry_stat = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    mode = entry_stat.st_mode
+                    if stat.S_ISDIR(mode):
+                        stack.append(entry.path)
+                    elif stat.S_ISREG(mode):
+                        total += entry_stat.st_size
+        except OSError:
+            continue
+    return round(total / 1024 / 1024, 2)
+
+
+# Cache of os.scandir results keyed by search_dir.
+# Each entry is a list of (name, is_dir) tuples, or None if the dir doesn't exist.
+_SEARCH_DIR_CACHE = {}
+
+
+def _scandir_cached(search_dir):
+    """Return cached [(name, is_dir), ...] for search_dir, or None if missing."""
+    cached = _SEARCH_DIR_CACHE.get(search_dir)
+    if cached is not None or search_dir in _SEARCH_DIR_CACHE:
+        return cached
+    try:
+        with os.scandir(search_dir) as it:
+            entries = [(e.name, e.is_dir(follow_symlinks=False)) for e in it]
+    except (FileNotFoundError, NotADirectoryError):
+        entries = None
+    except OSError:
+        entries = None
+    _SEARCH_DIR_CACHE[search_dir] = entries
+    return entries
+
+
 def check_model_exists(model_info, models_base_dir):
     """Check if a model exists on the filesystem."""
     model_directory = model_info.get("model_directory") or ""
@@ -139,47 +196,130 @@ def check_model_exists(model_info, models_base_dir):
     else:
         search_dir = models_base_dir
 
-    # Exact match first (directory or file)
     full_path = os.path.join(search_dir, model_directory)
-    if os.path.exists(full_path):
-        return True, full_path
+    entries = _scandir_cached(search_dir)
+    if entries is None:
+        return False, full_path
+
+    # Exact match first (directory or file)
+    for name, _is_dir in entries:
+        if name == model_directory:
+            return True, full_path
 
     # Check for directories that start with model_directory (e.g. _proxy suffix)
     # Also normalize hyphens/underscores for fuzzy matching
-    if os.path.isdir(search_dir):
-        normalized = model_directory.replace("-", "_")
-        for entry in os.listdir(search_dir):
-            entry_normalized = entry.replace("-", "_")
-            if (entry.startswith(model_directory) or entry_normalized.startswith(normalized)) and os.path.isdir(os.path.join(search_dir, entry)):
-                return True, os.path.join(search_dir, entry)
+    normalized = model_directory.replace("-", "_")
+    for name, is_dir in entries:
+        if not is_dir:
+            continue
+        if name.startswith(model_directory) or name.replace("-", "_").startswith(normalized):
+            return True, os.path.join(search_dir, name)
 
     return False, full_path
+
+
+def model_is_downloading(model_info, models_base_dir):
+    """Return the parsed ".download" marker dict if present, else None.
+
+    The marker is per-model and lives inside the model directory
+    (<dir>/.download) for AI Hub, HF and Edge Impulse alike. Its presence means
+    a download is in progress or was interrupted before completing.
+    """
+    subdir = get_model_subdir(model_info.get("models_repository", ""))
+    search_dir = os.path.join(models_base_dir, subdir) if subdir else models_base_dir
+    model_directory = model_info.get("model_directory") or ""
+    candidates = []
+    if model_directory:
+        candidates.append(os.path.join(search_dir, model_directory, ".download"))
+    for marker in candidates:
+        data = read_marker(marker)
+        if data is not None:
+            return data
+    return None
 
 
 LLAMACPP_SUBDIR = "llamacpp"
 
 
+def llamacpp_name_from_marker(marker, root):
+    """Derive a model name for an in-progress llamacpp download from its marker.
+
+    If the marker carries a ``model_url`` pointing at a .gguf file, the file
+    stem is used (e.g. ".../gemma-4-E2B_q4_0-it.gguf" -> "gemma-4-E2B_q4_0-it").
+    Otherwise fall back to the model_directory / folder name.
+    """
+    url = marker.get("model_url") or ""
+    if url:
+        base = url.split("?")[0].rstrip("/").rsplit("/", 1)[-1]
+        if base.endswith(".gguf"):
+            return os.path.splitext(base)[0]
+        if base:
+            return base
+    model_directory = marker.get("model_directory") or ""
+    if model_directory:
+        return os.path.basename(model_directory.rstrip("/"))
+    return os.path.basename(root.rstrip(os.sep))
+
+
 def find_llamacpp_models(models_base_dir):
-    """Scan for .gguf files under the llamacpp directory."""
+    """Scan for .gguf models under the llamacpp directory.
+
+    Mirrors the grouping used when generating models.ini: ``*mmproj*.gguf``
+    files are not standalone models but the multimodal projection belonging to
+    the main GGUF in the same directory, so they are not listed separately.
+
+    A directory that only holds a ".download" marker (download in progress, no
+    GGUF on disk yet) is still surfaced, using the marker info for the entry.
+    """
     llamacpp_dir = os.path.join(models_base_dir, LLAMACPP_SUBDIR)
     results = []
     if not os.path.isdir(llamacpp_dir):
         return results
 
     for root, _dirs, files in os.walk(llamacpp_dir):
-        for f in files:
-            if f.endswith(".gguf"):
-                full_path = os.path.join(root, f)
-                model_name = os.path.splitext(f)[0]
-                results.append({
-                    "id": f"llamacpp:{model_name}",
-                    "name": model_name,
-                    "handler": "llamacpp",
-                    "platform": "",
-                    "model_type": "llamacpp",
-                    "path": full_path,
-                    "installed": True,
-                })
+        gguf_files = sorted(f for f in files if f.endswith(".gguf"))
+        mmproj_files = [f for f in gguf_files if "mmproj" in f]
+        marker = read_marker(os.path.join(root, ".download"))
+        downloading = marker is not None
+
+        emitted = False
+        for f in gguf_files:
+            if "mmproj" in f:
+                continue
+            full_path = os.path.join(root, f)
+            model_name = os.path.splitext(f)[0]
+            disk_size_mb = get_dir_size_mb(full_path)
+            # The mmproj file in the same directory is part of this model.
+            if mmproj_files:
+                mmproj_size = get_dir_size_mb(os.path.join(root, mmproj_files[0]))
+                if disk_size_mb is not None and mmproj_size is not None:
+                    disk_size_mb = round(disk_size_mb + mmproj_size, 2)
+            entry = {
+                "id": f"llamacpp:{model_name}",
+                "name": model_name,
+                "handler": "llamacpp",
+                "path": full_path,
+                "installed": not downloading,
+                "downloading": downloading,
+                "disk_size_mb": disk_size_mb,
+            }
+            if mmproj_files:
+                entry["mmproj"] = os.path.join(root, mmproj_files[0])
+            results.append(entry)
+            emitted = True
+
+        # Download in progress but no main GGUF on disk yet: surface the
+        # pending model from the marker so it still shows up in the listing.
+        if marker is not None and not emitted:
+            model_name = llamacpp_name_from_marker(marker, root)
+            results.append({
+                "id": f"llamacpp:{model_name}",
+                "name": model_name,
+                "handler": "llamacpp",
+                "path": root,
+                "installed": False,
+                "downloading": True,
+            })
     return results
 
 
@@ -238,31 +378,60 @@ def main():
     for model_info in all_models:
         if model_info.get("pre_loaded"):
             exists = True
-            path = "pre-loaded"
+            entry = {
+                "id": model_info["id"],
+                "name": model_info["name"],
+                "handler": model_info["handler"],
+                "installed": True,
+            }
+            if model_info.get("model_size_mb") is not None:
+                entry["model_size_mb"] = model_info["model_size_mb"]
         else:
             exists, path = check_model_exists(model_info, args.models_dir)
+            # Per-model ".download" marker present => download in progress/incomplete.
+            downloading = bool(model_is_downloading(model_info, args.models_dir))
+            entry = {
+                "id": model_info["id"],
+                "name": model_info["name"],
+                "handler": model_info["handler"],
+                "installed": exists and not downloading,
+                "downloading": downloading,
+            }
+            if model_info.get("model_size_mb") is not None:
+                entry["model_size_mb"] = model_info["model_size_mb"]
+            if exists:
+                entry["path"] = path
+                entry["disk_size_mb"] = get_dir_size_mb(path)
 
-        if args.installed_only and not exists:
-            continue
-        if args.not_installed_only and exists:
-            continue
+        results.append(entry)
 
-        results.append({
-            "id": model_info["id"],
-            "name": model_info["name"],
-            "handler": model_info["handler"],
-            "platform": model_info["platform"],
-            "model_type": model_info["model_type"],
-            "path": path,
-            "installed": exists,
-        })
+    # Scan for llamacpp .gguf models on the filesystem. These may correspond to
+    # a models-list.yaml entry (same id) whose nested model_directory the YAML
+    # path check couldn't resolve; merge filesystem status into that entry
+    # instead of listing the model twice. Otherwise add it as a new entry.
+    by_id = {entry["id"]: entry for entry in results}
+    for m in find_llamacpp_models(args.models_dir):
+        existing = by_id.get(m["id"])
+        if existing is not None:
+            # Keep the canonical YAML name/handler/model_size_mb; take the
+            # filesystem-derived status and on-disk details.
+            existing["installed"] = m["installed"]
+            existing["downloading"] = m["downloading"]
+            if "path" in m:
+                existing["path"] = m["path"]
+            if m.get("disk_size_mb") is not None:
+                existing["disk_size_mb"] = m["disk_size_mb"]
+            if "mmproj" in m:
+                existing["mmproj"] = m["mmproj"]
+        else:
+            results.append(m)
+            by_id[m["id"]] = m
 
-    # Scan for llamacpp .gguf models on the filesystem
-    llamacpp_models = find_llamacpp_models(args.models_dir)
-    for m in llamacpp_models:
-        if args.not_installed_only:
-            continue
-        results.append(m)
+    # Apply installed/not-installed filters once, after merging.
+    if args.installed_only:
+        results = [r for r in results if r["installed"]]
+    if args.not_installed_only:
+        results = [r for r in results if not r["installed"]]
 
     if args.output_json:
         print(json.dumps({"event": "info", "models": results}, indent=2))
@@ -270,11 +439,17 @@ def main():
         installed_count = sum(1 for r in results if r["installed"])
         total_count = len(results)
         print(f"Models: {installed_count}/{total_count} installed\n")
-        print(f"{'STATUS':<12} {'ID':<45} {'NAME':<40} {'PATH'}")
-        print("-" * 140)
+        print(f"{'STATUS':<12} {'SIZE (MB)':<12} {'ID':<45} {'NAME':<40} {'PATH'}")
+        print("-" * 152)
         for r in results:
-            status = "INSTALLED" if r["installed"] else "NOT FOUND"
-            print(f"{status:<12} {r['id']:<45} {r['name']:<40} {r['path']}")
+            status = "DOWNLOADING" if r.get("downloading") else ("INSTALLED" if r["installed"] else "NOT FOUND")
+            size = (
+                f"{r['disk_size_mb']:.2f}"
+                if r.get("disk_size_mb") is not None
+                else (f"{r['model_size_mb']}" if r.get("model_size_mb") is not None else "-")
+            )
+            path = r.get("path", "")
+            print(f"{status:<12} {size:<12} {r['id']:<45} {r['name']:<40} {path}")
 
 
 if __name__ == "__main__":
