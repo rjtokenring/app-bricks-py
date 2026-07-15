@@ -16,7 +16,7 @@ These tests cover two layers without any network access:
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 
 import arduino.app_bricks.cloud_llm.cloud_llm as cloud_llm_module
 from arduino.app_bricks.cloud_llm import CloudLLM, ContentChunk, ReasoningChunk, tool
@@ -79,6 +79,21 @@ class FakeReasoningModel:
         self.inputs.append(input)
         batch = self._batches.pop(0)
         yield from batch
+
+
+class FakeInvokeModel:
+    """Scriptable stand-in for a chat model supporting non-streaming ``invoke``.
+
+    Each positional argument is the message returned by a single ``invoke`` call.
+    """
+
+    def __init__(self, *responses):
+        self._responses = list(responses)
+        self.inputs: list = []
+
+    def invoke(self, input, config=None):
+        self.inputs.append(input)
+        return self._responses.pop(0)
 
 
 def _reasoning_chunk(text: str) -> AIMessageChunk:
@@ -239,6 +254,69 @@ def test_chat_stream_reasoning_rejects_non_openai_model(make_llm):
         list(llm.chat_stream_reasoning("hi"))
 
 
+def test_chat_without_reasoning_effort_uses_base_model(make_llm):
+    llm = make_llm()
+    llm._model = FakeInvokeModel(AIMessage(content="Hello"))
+
+    out = llm.chat("hi")
+
+    assert out == "Hello"
+    # The default path must not build the reasoning model at all.
+    assert llm._reasoning_model is None
+    assert llm._model.inputs, "base model should have been invoked"
+
+
+def test_chat_with_reasoning_effort_returns_only_answer(make_llm):
+    from arduino.app_bricks.cloud_llm import ReasoningEffort
+
+    llm = make_llm()
+    # Pre-seed the cached reasoning model so the effort cache hit returns our fake
+    # (bypasses provider-specific model construction).
+    llm._reasoning_effort = ReasoningEffort.HIGH
+    llm._reasoning_model = FakeInvokeModel(
+        AIMessage(
+            content=[
+                {"type": "thinking", "thinking": "secret chain-of-thought"},
+                {"type": "text", "text": "Final answer"},
+            ]
+        )
+    )
+
+    out = llm.chat("hi", reasoning_effort=ReasoningEffort.HIGH)
+
+    # Only the final answer text is returned; the thinking block is excluded.
+    assert out == "Final answer"
+    assert llm._reasoning_model.inputs, "reasoning model should have been invoked"
+
+
+def test_chat_with_reasoning_effort_persists_only_answer_to_history(make_llm):
+    llm = make_llm()
+    llm._reasoning_effort = 64
+    llm._reasoning_model = FakeInvokeModel(
+        AIMessage(
+            content=[
+                {"type": "thinking", "thinking": "secret"},
+                {"type": "text", "text": "Answer"},
+            ]
+        )
+    )
+
+    llm.chat("hi", reasoning_effort=64)
+
+    history = [(type(m).__name__, llm._content_to_text(m.content)) for m in llm._history.get_messages()]
+    assert history == [
+        ("HumanMessage", "hi"),
+        ("AIMessage", "Answer"),
+    ]
+
+
+def test_chat_invalid_reasoning_effort_raises_value_error(make_llm):
+    llm = make_llm()
+
+    with pytest.raises(ValueError):
+        llm.chat("hi", reasoning_effort="nonsense")
+
+
 def test_get_reasoning_model_enables_gemini_thoughts(make_llm):
     from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -324,8 +402,39 @@ def test_reasoning_effort_anthropic_level_maps_to_budget(make_llm):
     reasoning_model = llm._get_reasoning_model(ReasoningEffort.HIGH)
 
     assert reasoning_model.thinking == {"type": "enabled", "budget_tokens": EFFORT_TO_BUDGET[ReasoningEffort.HIGH]}
-    # Thinking requires temperature == 1 on Anthropic.
-    assert reasoning_model.temperature == 1
+    # temperature is left unset (None) when not configured on the brick, so the
+    # Anthropic default (1) applies while thinking is active.
+    assert reasoning_model.temperature is None
+
+
+def test_reasoning_effort_anthropic_forwards_configured_temperature(make_llm):
+    from langchain_anthropic import ChatAnthropic
+    from arduino.app_bricks.cloud_llm import ReasoningEffort
+
+    # A temperature explicitly configured on the brick is forwarded to the reasoning
+    # model (legacy enabled-thinking path).
+    llm = make_llm(temperature=0.5)
+    llm._base_model = ChatAnthropic(model="claude-sonnet-4-6", api_key="x")
+    llm._reasoning_model = None
+
+    reasoning_model = llm._get_reasoning_model(ReasoningEffort.HIGH)
+
+    assert reasoning_model.temperature == 0.5
+
+
+def test_reasoning_effort_anthropic_adaptive_forwards_configured_temperature(make_llm):
+    from langchain_anthropic import ChatAnthropic
+    from arduino.app_bricks.cloud_llm import ReasoningEffort
+
+    # Same, on the adaptive-only path (Sonnet 5+).
+    llm = make_llm(temperature=0.3)
+    llm._base_model = ChatAnthropic(model="claude-sonnet-5", api_key="x")
+    llm._reasoning_model = None
+
+    reasoning_model = llm._get_reasoning_model(ReasoningEffort.HIGH)
+
+    assert reasoning_model.thinking == {"type": "adaptive", "display": "summarized"}
+    assert reasoning_model.temperature == 0.3
 
 
 def test_reasoning_effort_anthropic_minimal_level_clamped_to_minimum(make_llm):
@@ -351,7 +460,7 @@ def test_reasoning_effort_anthropic_int_budget_clamped(make_llm):
     llm._reasoning_model = None
     big = llm._get_reasoning_model(4096)
     assert big.thinking == {"type": "enabled", "budget_tokens": 4096}
-    assert big.temperature == 1
+    assert big.temperature is None
 
     # Below the 1024 minimum is clamped up.
     llm._reasoning_model = None
@@ -382,7 +491,7 @@ def test_reasoning_effort_anthropic_negative_uses_adaptive(make_llm):
     reasoning_model = llm._get_reasoning_model(-1)
 
     assert reasoning_model.thinking == {"type": "adaptive"}
-    assert reasoning_model.temperature == 1
+    assert reasoning_model.temperature is None
 
 
 def test_reasoning_effort_anthropic_none_uses_default_budget(make_llm):
@@ -427,7 +536,7 @@ def test_reasoning_effort_anthropic_new_model_uses_adaptive_effort(make_llm):
     # HIGH maps up to Anthropic's "xhigh" so adaptive thinking always reasons (its
     # default "high" skips thinking on simple prompts).
     assert reasoning_model.effort == "xhigh"
-    assert reasoning_model.temperature == 1
+    assert reasoning_model.temperature is None
 
 
 def test_reasoning_effort_anthropic_new_model_maps_minimal_to_low(make_llm):
