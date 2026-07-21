@@ -10,10 +10,12 @@ python3 /generate_models_ini.py /models
 echo "Starting LLama server..."
 export LD_LIBRARY_PATH=/opt/pkg-snapdragon/lib
 # ADSP_LIBRARY_PATH must include BOTH the HTP skel libraries (libggml-htp-v*.so)
-# and the cDSP firmware/shell (fastrpc_shell_*), otherwise the unsigned PD cannot
-# be spawned and htp_iface_open() fails with AEE_EUNABLETOLOAD (0x80000406).
-# Paths are separated by ';'. The device firmware is mounted at /lib/dsp/cdsp.
 export ADSP_LIBRARY_PATH="/opt/pkg-snapdragon/lib;/lib/dsp/cdsp"
+
+# Debug: surface Hexagon backend arch/skel URI and load failures.
+# HEX_VERBOSE/arch lines are INFO/DEBUG level, so raise the log level too.
+export GGML_HEXAGON_VERBOSE=1
+export LLAMA_LOG_LEVEL=debug
 
 # Build --device argument from GGML_HEXAGON_NDEV (default: 1)
 NDEV="${GGML_HEXAGON_NDEV:-1}"
