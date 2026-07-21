@@ -34,6 +34,7 @@ LLAMA_ARGS=(
   -ngl 100
   --no-mmap
   --models-preset /models/models.ini
+  --verbose
 )
 
 if [ "${LLAMA_SERVER_SILENT}" = "1" ]; then
