@@ -17,7 +17,7 @@ RUN apt-get update \
     apt-get install -y --no-install-recommends --no-install-suggests software-properties-common \
     && apt-add-repository -y ppa:ubuntu-qcom-iot/qcom-ppa \
     && apt-get update \
-    && apt-get install -y --no-install-recommends --no-install-suggests libqnn1 qcom-fastrpc1; \
+    && apt-get install -y --no-install-recommends --no-install-suggests libqnn1 qcom-fastrpc1 strace; \
     # Clean up
     apt-get remove -y software-properties-common \
     && apt-get autoremove -y \
