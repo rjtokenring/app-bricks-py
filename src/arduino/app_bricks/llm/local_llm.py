@@ -324,9 +324,6 @@ class LargeLanguageModel(CloudLLM):
             RuntimeError: If the internal chain is not initialized or if the API request fails.
             AlreadyGenerating: If a streaming session is already active.
         """
-        if self._model_name.startswith(self.GENIE_MODEL):
-            raise NotImplementedError("Reasoning streaming is not supported for Genie models. Use a llama.cpp model instead.")
-
         if reasoning_effort is not None and (isinstance(reasoning_effort, bool) or not isinstance(reasoning_effort, int)):
             raise ValueError(
                 "reasoning_effort must be an integer token budget for local llama.cpp models "
