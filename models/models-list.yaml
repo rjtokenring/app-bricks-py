@@ -1431,6 +1431,31 @@ models:
       source: "qualcomm-ai-hub"
       source-model-id: "qwen3_4b_instruct_2507"
       source-model-url: "https://aihub.qualcomm.com/models/qwen3_4b_instruct_2507"
+ - "genie:qwen3_8b":
+    name : "Qwen 3-8B"
+    description: >-
+      The Qwen3-8B is a state-of-the-art multilingual base language model with 8 billion parameters,
+      excelling in language understanding, generation, coding, and mathematics.
+    supported_boards: ["ventunoq"]
+    bricks:
+      - id: "arduino:llm"
+    deployment:
+      handler: "ai-hub-handler"
+      platforms:
+        - ventunoq:
+            variables:
+              model_type: "genie"
+              model_name: "qwen3_8b"
+              models_repository: "genai"
+              model_directory: "qwen3_8b-genie-w4a16-qualcomm_qcs8275"
+              quantization: "w4a16"
+              chipset: "qualcomm-qcs8275"
+              version: "0.58.0"
+    metadata:
+      model_size_mb: 5305
+      source: "qualcomm-ai-hub"
+      source-model-id: "qwen3_8b"
+      source-model-url: "https://aihub.qualcomm.com/models/qwen3_8b"
  - "genie:qwen2_5_vl_7b_instruct":
     name : "Qwen 2.5-VL-7B VLM"
     description: >-
