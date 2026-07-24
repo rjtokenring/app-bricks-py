@@ -304,6 +304,17 @@ class LargeLanguageModel(CloudLLM):
 
         The generation can be interrupted by calling `stop_stream()`.
 
+        Example:
+            ```python
+            from arduino.app_bricks.cloud_llm import ReasoningChunk, ContentChunk
+
+            for chunk in llm.chat_stream_reasoning("Why is the sky blue?"):
+                if isinstance(chunk, ReasoningChunk):
+                    print(f"[reasoning] {chunk.content}", end="", flush=True)
+                elif isinstance(chunk, ContentChunk):
+                    print(f"[answer] {chunk.content}", end="", flush=True)
+            ```
+
         Args:
             message (str): The input text prompt from the user.
             images (List[str | bytes]): Optional list of image file paths or raw bytes to include in the prompt.
