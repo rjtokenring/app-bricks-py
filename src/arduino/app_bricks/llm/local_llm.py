@@ -306,7 +306,7 @@ class LargeLanguageModel(CloudLLM):
 
         Example:
             ```python
-            from arduino.app_bricks.cloud_llm import ReasoningChunk, ContentChunk
+            from arduino.app_bricks.llm import ReasoningChunk, ContentChunk
 
             for chunk in llm.chat_stream_reasoning("Why is the sky blue?"):
                 if isinstance(chunk, ReasoningChunk):

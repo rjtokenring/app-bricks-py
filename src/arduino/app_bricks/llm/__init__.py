@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
+from arduino.app_bricks.cloud_llm import ContentChunk, ReasoningChunk, ReasoningStreamChunk
 from langchain_core.tools import tool
 from .local_llm import (
     LargeLanguageModel,
@@ -14,6 +15,9 @@ from .local_llm import (
 
 __all__ = [
     "LargeLanguageModel",
+    "ContentChunk",
+    "ReasoningChunk",
+    "ReasoningStreamChunk",
     "tool",
     "REASONING_BUDGET_UNRESTRICTED",
     "REASONING_BUDGET_OFF",
