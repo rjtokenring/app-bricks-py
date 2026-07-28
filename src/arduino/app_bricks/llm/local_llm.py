@@ -4,7 +4,7 @@
 
 from langchain_core.language_models import BaseChatModel
 
-from arduino.app_bricks.cloud_llm import CloudLLM, CloudModelProvider, ReasoningStreamChunk
+from arduino.app_bricks.cloud_llm import CloudLLM, CloudModelProvider, ReasoningEffort, ReasoningStreamChunk
 from arduino.app_bricks.cloud_llm.cloud_llm import DEFAULT_MEMORY, ToolLike
 from arduino.app_bricks.cloud_llm.memory import MessagePersistence
 from arduino.app_utils import Logger, brick
@@ -289,7 +289,7 @@ class LargeLanguageModel(CloudLLM):
         self,
         message: str,
         images: List[str | bytes] = None,
-        reasoning_effort: Optional[int] = None,
+        reasoning_effort: Union[ReasoningEffort, str, int, None] = None,
     ) -> Iterator[ReasoningStreamChunk]:
         """Sends a message and yields both reasoning and answer tokens as they are generated.
 
@@ -299,8 +299,8 @@ class LargeLanguageModel(CloudLLM):
         `ContentChunk` (final answer), both exposing a `content` text fragment.
         Branch on the concrete type with `isinstance`.
 
-        This is currently supported only for llama.cpp models. Genie models do not
-        support reasoning streaming and raise a `NotImplementedError`.
+        Supported by both local runners, each with its own reasoning knob (see
+        `reasoning_effort` below).
 
         The generation can be interrupted by calling `stop_stream()`.
 
@@ -318,24 +318,40 @@ class LargeLanguageModel(CloudLLM):
         Args:
             message (str): The input text prompt from the user.
             images (List[str | bytes]): Optional list of image file paths or raw bytes to include in the prompt.
-            reasoning_effort (Optional[int]): An integer token budget controlling how much
-                the model reasons, mapped to llama.cpp's `thinking_budget_tokens` field.
-                Use `REASONING_BUDGET_UNRESTRICTED` (`-1`) for unrestricted reasoning,
-                `REASONING_BUDGET_OFF` (`0`) to disable it, or a positive token budget
-                (see `REASONING_BUDGET_LOW`/`REASONING_BUDGET_MEDIUM`/`REASONING_BUDGET_HIGH`).
-                Discrete effort levels are not supported because llama.cpp ignores them.
-                `None` uses the model default.
+            reasoning_effort (Optional[int | str]): Controls how much the model reasons.
+                The accepted form depends on the local runner, because each honors a
+                different field:
+
+                - llama.cpp models take an integer token budget, mapped to llama.cpp's
+                  `thinking_budget_tokens` field: `REASONING_BUDGET_UNRESTRICTED` (`-1`)
+                  for unrestricted reasoning, `REASONING_BUDGET_OFF` (`0`) to disable it,
+                  or a positive budget (see `REASONING_BUDGET_LOW`/`REASONING_BUDGET_MEDIUM`/
+                  `REASONING_BUDGET_HIGH`). Discrete effort levels are rejected because
+                  llama.cpp ignores them.
+                - Genie models take a discrete effort level ('minimal'/'low'/'medium'/'high'),
+                  mapped to the Responses API `reasoning.effort` field. Integer budgets are
+                  rejected because the Genie runner ignores `thinking_budget_tokens`.
+
+                `None` uses the model default (both runners reason by default).
 
         Yields:
             ReasoningStreamChunk: A `ReasoningChunk` or `ContentChunk` holding a `content` text fragment.
 
         Raises:
-            NotImplementedError: If the configured model is a Genie model.
-            ValueError: If `reasoning_effort` is not an integer token budget or `None`.
+            ValueError: If `reasoning_effort` is not in the form accepted by the configured runner.
             RuntimeError: If the internal chain is not initialized or if the API request fails.
             AlreadyGenerating: If a streaming session is already active.
         """
-        if reasoning_effort is not None and (isinstance(reasoning_effort, bool) or not isinstance(reasoning_effort, int)):
+        is_budget = isinstance(reasoning_effort, int) and not isinstance(reasoning_effort, bool)
+
+        if self._model_name.startswith(self.GENIE_MODEL):
+            if reasoning_effort is not None and is_budget:
+                raise ValueError(
+                    "reasoning_effort must be a discrete effort level for Genie models "
+                    f"(one of: {', '.join(e.value for e in ReasoningEffort)}), or None to use "
+                    "the model default. Integer token budgets are ignored by the Genie runner."
+                )
+        elif reasoning_effort is not None and not is_budget:
             raise ValueError(
                 "reasoning_effort must be an integer token budget for local llama.cpp models "
                 f"(e.g. {REASONING_BUDGET_OFF} to disable, {REASONING_BUDGET_UNRESTRICTED} for unrestricted, "

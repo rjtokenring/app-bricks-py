@@ -10,14 +10,17 @@ from langchain_core.messages import AIMessageChunk, BaseMessage
 from langchain_core.outputs import ChatGenerationChunk
 from langchain_openai import ChatOpenAI
 
-# Standard OpenAI Responses API streaming events that carry reasoning text.
+# OpenAI Responses API streaming events that carry reasoning text.
 # - ``response.reasoning_text.delta`` is emitted by models that expose the raw
 #   chain-of-thought (e.g. gpt-oss and llama.cpp).
 # - ``response.reasoning_summary_text.delta`` is emitted by OpenAI's proprietary
 #   reasoning models, which only expose a summary of the reasoning.
+# - ``response.reasoning.delta`` is the (non-standard) event emitted by the Genie
+#   models runner for its raw chain-of-thought.
 _REASONING_DELTA_EVENTS = (
     "response.reasoning_text.delta",
     "response.reasoning_summary_text.delta",
+    "response.reasoning.delta",
 )
 
 
