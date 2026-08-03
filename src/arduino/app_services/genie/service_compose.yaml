@@ -1,6 +1,6 @@
 services:
   genie-models-runner:
-    image: docker pull artifacts.codelinaro.org/clo-561-iot-solutions-microservices-test/genai-llm-vlm-service-test:1.4.0
+    image: artifacts.codelinaro.org/clo-561-iot-solutions-microservices-test/genai-llm-vlm-service-test:1.4.0
     # Currently, genie-models-runner requires to run as root
     user: 0:0
     restart: on-failure
