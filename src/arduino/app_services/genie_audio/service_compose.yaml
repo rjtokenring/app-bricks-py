@@ -1,6 +1,6 @@
 services:
   audio-analytics-runner:
-    image: artifacts.codelinaro.org/iot-solutions-microservices/audio-analytics:1.0.2
+    image: artifacts.codelinaro.org/iot-solutions-microservices/audio-analytics:1.0.4
     user: 0:0
     devices:
       - /dev/dma_heap/system
@@ -41,14 +41,7 @@ services:
     # Use tmpfs for uploads to ensure proper permissions
     tmpfs:
       - /app/uploads:rw,size=500m,mode=777
-      - /usr/share/qcom/conf.d
-    command: >
-      bash -c "chmod 666 /dev/fastrpc* 2>/dev/null || true;
-               chmod 666 /dev/dma_heap/* 2>/dev/null || true;               
-               chmod -R 777 /var/log/supervisor;
-               chmod 666 /proc/1/fd/1 /proc/1/fd/2 2>/dev/null || true;
-               cp /etc/fastrpc/hexagon-dsp-binaries.yaml /usr/share/qcom/conf.d/;
-               exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf"
+      - /tmp/audio-cache:rw,size=2g,mode=777
     logging:
       driver: "json-file"
       options:
