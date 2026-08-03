@@ -17,6 +17,9 @@ from arduino.app_utils.logger import Logger
 
 logger = Logger("ALSASpeaker")
 
+_pipewire_warned = False
+"""Tracks whether the PipeWire degradation warning was already emitted."""
+
 
 class ALSASpeaker(BaseSpeaker):
     """
@@ -115,12 +118,21 @@ class ALSASpeaker(BaseSpeaker):
         """
         Return only the available USB speakers as full ALSA device paths.
 
+        Discovery goes through PipeWire; when that is unavailable (no session, or
+        no pw-dump binary) it degrades to enumerating playback cards through ALSA
+        alone, so speakers keep working without PipeWire.
+
         Returns:
             list: Available USB speakers as full ALSA device paths.
         """
-        usb_devices = []
         try:
             usb_sinks, _ = list_audio_sinks()
+        except SpeakerOpenError as e:
+            _warn_pipewire_unavailable(e)
+            return _alsa_fallback_devices()
+
+        usb_devices = []
+        try:
             cards = alsaaudio.cards()
             for sink in usb_sinks:
                 props = sink.get("info", {}).get("props", {})
@@ -151,6 +163,11 @@ class ALSASpeaker(BaseSpeaker):
 
         try:
             _, builtin_sinks = list_audio_sinks()
+        except SpeakerOpenError as e:
+            # Jack speakers are addressed by PipeWire node, so there is nothing to
+            # fall back to: without PipeWire they can't be opened anyway.
+            _warn_pipewire_unavailable(e)
+            return []
         except Exception as e:
             logger.error(f"Error listing jack speakers: {e}")
             return []
@@ -516,6 +533,73 @@ def _alsa_path_device_index(alsa_path: str) -> int:
     """
     match = re.match(r"^hw:[^,]+,(\d+)$", alsa_path)
     return int(match.group(1)) if match else 0
+
+
+_NON_SPEAKER_CARD_HINTS = ("hdmi", "loopback", "dummy", "modem")
+
+
+def _alsa_fallback_devices() -> list:
+    """
+    Enumerate playback devices through ALSA alone, used when PipeWire discovery
+    is unavailable.
+
+    USB cards are preferred, matching what the PipeWire-backed enumeration reports;
+    when none is found, any other playback card is offered as a last resort so
+    playback keeps working on boards with a built-in codec. Cards that are clearly
+    not speakers (HDMI, loopback, ...) are left out, since playing into them would
+    silently produce no sound.
+
+    Devices are returned in ascending ALSA card index order as
+    "plughw:CARD=<name>,DEV=<n>", the same form produced by the PipeWire-backed
+    enumeration. Note that PipeWire orders USB sinks by hot-plug order instead, so
+    "usb:1" may point at a different device before and after PipeWire comes up.
+
+    Returns:
+        list: Available speakers as full ALSA device paths.
+    """
+    try:
+        pcms = alsaaudio.pcms(alsaaudio.PCM_PLAYBACK)
+        cards = list(zip(alsaaudio.card_indexes(), alsaaudio.cards()))
+    except Exception as e:
+        logger.error(f"Error listing speakers via ALSA: {e}")
+        return []
+
+    def devices_of(card_name: str) -> list:
+        return [pcm for pcm in pcms if pcm.startswith(f"plughw:CARD={card_name},")]
+
+    usb_devices = [pcm for idx, name in cards if _is_usb_card(idx) for pcm in devices_of(name)]
+    if usb_devices:
+        return usb_devices
+
+    return [pcm for _, name in cards if not _is_non_speaker_card(name) for pcm in devices_of(name)]
+
+
+def _is_usb_card(card_index: int) -> bool:
+    """Tell whether an ALSA card is backed by a USB device, according to sysfs."""
+    device_path = f"/sys/class/sound/card{card_index}/device"
+    try:
+        return os.path.exists(device_path) and "usb" in os.path.realpath(device_path).lower()
+    except OSError:
+        return False
+
+
+def _is_non_speaker_card(card_name: str) -> bool:
+    """Tell whether an ALSA card is unlikely to be a usable speaker, by name."""
+    return any(hint in card_name.lower() for hint in _NON_SPEAKER_CARD_HINTS)
+
+
+def _warn_pipewire_unavailable(error: Exception) -> None:
+    """Log once per process that PipeWire discovery is unavailable, then stay quiet."""
+    global _pipewire_warned
+    if _pipewire_warned:
+        logger.debug(f"PipeWire discovery still unavailable: {error}")
+        return
+    # A race here at worst prints the warning twice: not worth a lock on this path.
+    _pipewire_warned = True
+    logger.warning(
+        f"PipeWire is unavailable ({error}): falling back to ALSA-only speaker discovery. "
+        "Built-in (jack) speakers cannot be discovered without PipeWire."
+    )
 
 
 def _dtype_to_alsa_format_name(dtype: np.dtype, is_packed: bool = False) -> str:

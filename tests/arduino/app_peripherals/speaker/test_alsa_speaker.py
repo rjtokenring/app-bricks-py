@@ -8,6 +8,7 @@ from unittest.mock import patch
 import alsaaudio
 import numpy as np
 
+from arduino.app_peripherals.speaker import alsa_speaker
 from arduino.app_peripherals.speaker.speaker import Speaker
 from arduino.app_peripherals.speaker.alsa_speaker import ALSASpeaker, _alsa_format_name_to_dtype, _dtype_to_alsa_format_name
 from arduino.app_peripherals.speaker.errors import SpeakerConfigError, SpeakerOpenError
@@ -362,6 +363,44 @@ class TestALSASpeakerUsbDiscovery:
         # A path returned by list_devices() round-trips back in unchanged.
         for listed in ALSASpeaker.list_devices():
             assert ALSASpeaker(device=listed).device_stable_ref == listed
+
+
+class TestALSASpeakerPipeWireFallback:
+    """Speakers stay usable on hosts without a working PipeWire session."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_carrier(self, monkeypatch):
+        monkeypatch.delenv("CONFIGURED_CARRIERS", raising=False)
+
+    def test_list_usb_devices_falls_back_to_alsa_cards(self, mock_pw_dump, usb_cards):
+        mock_pw_dump(unavailable=True)
+        usb_cards(0)
+
+        assert ALSASpeaker.list_usb_devices() == ["plughw:CARD=SomeCard,DEV=0"]
+
+    def test_default_device_resolves_without_pipewire(self, mock_pw_dump, usb_cards):
+        # Regression: TextToSpeech() -> Speaker(0) used to crash when pw-dump failed.
+        mock_pw_dump(unavailable=True)
+        usb_cards(0)
+
+        assert ALSASpeaker(device=0).device_stable_ref == "plughw:CARD=SomeCard,DEV=0"
+
+    def test_jack_devices_are_not_exposed(self, mock_pw_dump, usb_cards, monkeypatch):
+        monkeypatch.setenv("CONFIGURED_CARRIERS", "media-carrier")
+        mock_pw_dump(unavailable=True)
+        usb_cards(0)
+
+        assert ALSASpeaker.list_jack_devices() == []
+
+    def test_degradation_is_warned_only_once(self, mock_pw_dump, usb_cards):
+        mock_pw_dump(unavailable=True)
+        usb_cards(0)
+
+        with patch.object(alsa_speaker.logger, "warning") as warning:
+            ALSASpeaker.list_usb_devices()
+            ALSASpeaker.list_usb_devices()
+
+        assert warning.call_count == 1
 
 
 class TestALSASpeakerJackResolution:

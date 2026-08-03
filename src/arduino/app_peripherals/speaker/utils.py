@@ -61,13 +61,15 @@ def _nth_plugged_speaker(idx: int) -> str:
     Raises:
         SpeakerOpenError: If no speaker is plugged at the given index.
     """
-    usb_spkrs, builtin_spkrs = list_audio_sinks()
+    from .alsa_speaker import ALSASpeaker
 
-    usb_count = len(usb_spkrs)
+    # Count from the very same lists the "usb:X"/"jack:X" refs are resolved against,
+    # so the index can't drift from what is actually reachable.
+    usb_count = len(ALSASpeaker.list_usb_devices())
     if idx < usb_count:
         return f"usb:{idx + 1}"
 
-    jack_count = len(builtin_spkrs) if has_media_carrier() else 0
+    jack_count = len(ALSASpeaker.list_jack_devices())  # Already gated on has_media_carrier()
     if idx - usb_count < jack_count:
         return f"jack:{idx - usb_count + 1}"
 

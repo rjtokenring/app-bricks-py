@@ -7,7 +7,8 @@ Shared fixtures for speaker tests.
 
 `mock_pw_dump` (autouse) patches the `pw-dump` invocation used by the device
 discovery. It defaults to two USB Audio/Sink nodes and yields a setter
-so a test can declare its own USB/built-in topology.
+so a test can declare its own USB/built-in topology, or mark PipeWire as
+unavailable to exercise the ALSA-only fallback.
 """
 
 import json
@@ -89,16 +90,43 @@ def build_pw_dump(usb_ids=(), builtin_ids=(), bluetooth_ids=(), hdmi_ids=()):
 
 @pytest.fixture(autouse=True)
 def mock_pw_dump():
-    """Patch pw-dump to a configurable payload (defaults to two USB speakers)."""
-    state = {"objects": build_pw_dump(usb_ids=(50, 60))}
+    """
+    Patch pw-dump to a configurable payload (defaults to two USB speakers).
+
+    Pass `unavailable=True` to the yielded setter to simulate a host without a
+    working PipeWire session, where the pw-dump binary can't be run at all.
+    """
+    state = {"objects": build_pw_dump(usb_ids=(50, 60)), "unavailable": False}
 
     def fake_run(cmd, *args, **kwargs):
+        if state["unavailable"]:
+            raise FileNotFoundError(cmd[0])
         result = MagicMock()
         result.stdout = json.dumps(state["objects"])
         return result
 
-    def configure(**kwargs):
+    def configure(unavailable=False, **kwargs):
+        state["unavailable"] = unavailable
         state["objects"] = build_pw_dump(**kwargs)
 
     with patch("arduino.app_peripherals.speaker.utils.subprocess.run", side_effect=fake_run):
         yield configure
+
+
+@pytest.fixture(autouse=True)
+def reset_pipewire_warning(monkeypatch):
+    """The "PipeWire is unavailable" warning fires once per process: reset it between tests."""
+    monkeypatch.setattr("arduino.app_peripherals.speaker.alsa_speaker._pipewire_warned", False)
+
+
+@pytest.fixture
+def usb_cards(monkeypatch):
+    """Declare which ALSA card indexes sysfs reports as USB-backed."""
+
+    def configure(*indexes):
+        monkeypatch.setattr(
+            "arduino.app_peripherals.speaker.alsa_speaker._is_usb_card",
+            lambda card_index: card_index in indexes,
+        )
+
+    return configure

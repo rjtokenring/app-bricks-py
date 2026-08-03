@@ -8,6 +8,7 @@ from unittest.mock import patch
 import alsaaudio
 import numpy as np
 
+from arduino.app_peripherals.microphone import alsa_microphone
 from arduino.app_peripherals.microphone.microphone import Microphone
 from arduino.app_peripherals.microphone.alsa_microphone import ALSAMicrophone, _alsa_format_name_to_dtype, _dtype_to_alsa_format_name
 from arduino.app_peripherals.microphone.errors import MicrophoneConfigError, MicrophoneOpenError
@@ -342,6 +343,44 @@ class TestALSAMicrophoneUsbDiscovery:
         # A path returned by list_devices() round-trips back in unchanged.
         for listed in ALSAMicrophone.list_devices():
             assert ALSAMicrophone(device=listed).device_stable_ref == listed
+
+
+class TestALSAMicrophonePipeWireFallback:
+    """Microphones stay usable on hosts without a working PipeWire session."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_carrier(self, monkeypatch):
+        monkeypatch.delenv("CONFIGURED_CARRIERS", raising=False)
+
+    def test_list_usb_devices_falls_back_to_alsa_cards(self, mock_pw_dump, usb_cards):
+        mock_pw_dump(unavailable=True)
+        usb_cards(0)
+
+        assert ALSAMicrophone.list_usb_devices() == ["plughw:CARD=SomeCard,DEV=0"]
+
+    def test_default_device_resolves_without_pipewire(self, mock_pw_dump, usb_cards):
+        # Regression: Microphone(0) used to crash when pw-dump failed.
+        mock_pw_dump(unavailable=True)
+        usb_cards(0)
+
+        assert ALSAMicrophone(device=0).device_stable_ref == "plughw:CARD=SomeCard,DEV=0"
+
+    def test_jack_devices_are_not_exposed(self, mock_pw_dump, usb_cards, monkeypatch):
+        monkeypatch.setenv("CONFIGURED_CARRIERS", "media-carrier")
+        mock_pw_dump(unavailable=True)
+        usb_cards(0)
+
+        assert ALSAMicrophone.list_jack_devices() == []
+
+    def test_degradation_is_warned_only_once(self, mock_pw_dump, usb_cards):
+        mock_pw_dump(unavailable=True)
+        usb_cards(0)
+
+        with patch.object(alsa_microphone.logger, "warning") as warning:
+            ALSAMicrophone.list_usb_devices()
+            ALSAMicrophone.list_usb_devices()
+
+        assert warning.call_count == 1
 
 
 class TestALSAMicrophoneJackResolution:

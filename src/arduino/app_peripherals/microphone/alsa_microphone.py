@@ -17,6 +17,9 @@ from arduino.app_utils.logger import Logger
 
 logger = Logger("ALSAMicrophone")
 
+_pipewire_warned = False
+"""Tracks whether the PipeWire degradation warning was already emitted."""
+
 
 class ALSAMicrophone(BaseMicrophone):
     """
@@ -114,12 +117,21 @@ class ALSAMicrophone(BaseMicrophone):
         """
         Return only the available USB microphones as full ALSA device paths.
 
+        Discovery goes through PipeWire; when that is unavailable (no session, or
+        no pw-dump binary) it degrades to enumerating capture cards through ALSA
+        alone, so microphones keep working without PipeWire.
+
         Returns:
             list: Available USB microphones as full ALSA device paths.
         """
-        usb_devices = []
         try:
             usb_sources, _ = list_audio_sources()
+        except MicrophoneOpenError as e:
+            _warn_pipewire_unavailable(e)
+            return _alsa_fallback_devices()
+
+        usb_devices = []
+        try:
             cards = alsaaudio.cards()
             for source in usb_sources:
                 props = source.get("info", {}).get("props", {})
@@ -150,6 +162,11 @@ class ALSAMicrophone(BaseMicrophone):
 
         try:
             _, builtin_sources = list_audio_sources()
+        except MicrophoneOpenError as e:
+            # Jack microphones are addressed by PipeWire node, so there is nothing to
+            # fall back to: without PipeWire they can't be opened anyway.
+            _warn_pipewire_unavailable(e)
+            return []
         except Exception as e:
             logger.error(f"Error listing jack microphones: {e}")
             return []
@@ -520,6 +537,73 @@ def _alsa_path_device_index(alsa_path: str) -> int:
     """
     match = re.match(r"^hw:[^,]+,(\d+)$", alsa_path)
     return int(match.group(1)) if match else 0
+
+
+_NON_MICROPHONE_CARD_HINTS = ("hdmi", "loopback", "dummy", "modem")
+
+
+def _alsa_fallback_devices() -> list:
+    """
+    Enumerate capture devices through ALSA alone, used when PipeWire discovery
+    is unavailable.
+
+    USB cards are preferred, matching what the PipeWire-backed enumeration reports;
+    when none is found, any other capture card is offered as a last resort so
+    recording keeps working on boards with a built-in codec. Cards that are clearly
+    not microphones (HDMI, loopback, ...) are left out, since recording from them
+    would silently produce no audio.
+
+    Devices are returned in ascending ALSA card index order as
+    "plughw:CARD=<name>,DEV=<n>", the same form produced by the PipeWire-backed
+    enumeration. Note that PipeWire orders USB sources by hot-plug order instead, so
+    "usb:1" may point at a different device before and after PipeWire comes up.
+
+    Returns:
+        list: Available microphones as full ALSA device paths.
+    """
+    try:
+        pcms = alsaaudio.pcms(alsaaudio.PCM_CAPTURE)
+        cards = list(zip(alsaaudio.card_indexes(), alsaaudio.cards()))
+    except Exception as e:
+        logger.error(f"Error listing microphones via ALSA: {e}")
+        return []
+
+    def devices_of(card_name: str) -> list:
+        return [pcm for pcm in pcms if pcm.startswith(f"plughw:CARD={card_name},")]
+
+    usb_devices = [pcm for idx, name in cards if _is_usb_card(idx) for pcm in devices_of(name)]
+    if usb_devices:
+        return usb_devices
+
+    return [pcm for _, name in cards if not _is_non_microphone_card(name) for pcm in devices_of(name)]
+
+
+def _is_usb_card(card_index: int) -> bool:
+    """Tell whether an ALSA card is backed by a USB device, according to sysfs."""
+    device_path = f"/sys/class/sound/card{card_index}/device"
+    try:
+        return os.path.exists(device_path) and "usb" in os.path.realpath(device_path).lower()
+    except OSError:
+        return False
+
+
+def _is_non_microphone_card(card_name: str) -> bool:
+    """Tell whether an ALSA card is unlikely to be a usable microphone, by name."""
+    return any(hint in card_name.lower() for hint in _NON_MICROPHONE_CARD_HINTS)
+
+
+def _warn_pipewire_unavailable(error: Exception) -> None:
+    """Log once per process that PipeWire discovery is unavailable, then stay quiet."""
+    global _pipewire_warned
+    if _pipewire_warned:
+        logger.debug(f"PipeWire discovery still unavailable: {error}")
+        return
+    # A race here at worst prints the warning twice: not worth a lock on this path.
+    _pipewire_warned = True
+    logger.warning(
+        f"PipeWire is unavailable ({error}): falling back to ALSA-only microphone discovery. "
+        "Built-in (jack) microphones cannot be discovered without PipeWire."
+    )
 
 
 def _dtype_to_alsa_format_name(dtype: np.dtype, is_packed: bool = False) -> str:

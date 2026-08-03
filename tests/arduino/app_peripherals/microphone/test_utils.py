@@ -188,16 +188,70 @@ class TestListAudioSources:
         assert [s["id"] for s in builtin] == [50]
 
 
-class TestPwDumpFailures:
-    """pw-dump errors surface as MicrophoneOpenError."""
+class TestPipeWireUnavailable:
+    """With pw-dump unusable, microphone discovery degrades to ALSA-only enumeration."""
 
-    def test_missing_binary_raises(self):
-        with patch("arduino.app_peripherals.microphone.utils.subprocess.run", side_effect=FileNotFoundError):
-            with pytest.raises(MicrophoneOpenError):
-                _nth_plugged_microphone(0)
+    def test_low_level_discovery_still_reports_the_failure(self, mock_pw_dump):
+        # list_audio_sources keeps its contract: the fallback lives above it.
+        mock_pw_dump(unavailable=True)
 
-    def test_invalid_json_raises(self):
+        with pytest.raises(MicrophoneOpenError):
+            list_audio_sources()
+
+    def test_usb_cards_are_selected_by_index(self, mock_pw_dump, usb_cards):
+        mock_pw_dump(unavailable=True)
+        usb_cards(0, 1)
+
+        assert _nth_plugged_microphone(0) == "usb:1"
+        assert _nth_plugged_microphone(1) == "usb:2"
+
+    def test_invalid_json_also_falls_back(self, usb_cards):
+        usb_cards(0)
+
         with patch("arduino.app_peripherals.microphone.utils.subprocess.run") as run:
             run.return_value = MagicMock(stdout="not-json")
-            with pytest.raises(MicrophoneOpenError):
-                _nth_plugged_microphone(0)
+            assert _nth_plugged_microphone(0) == "usb:1"
+
+    def test_non_usb_cards_are_offered_as_last_resort(self, mock_pw_dump, usb_cards):
+        # No USB card at all: a built-in codec is better than no microphone.
+        mock_pw_dump(unavailable=True)
+        usb_cards()
+
+        assert _nth_plugged_microphone(0) == "usb:1"
+        assert _claim_first_available_microphone() == "plughw:CARD=SomeCard,DEV=0"
+
+    def test_last_resort_skips_cards_that_are_not_microphones(self, mock_pw_dump, usb_cards):
+        # Recording from an HDMI or loopback card would capture silence.
+        mock_pw_dump(unavailable=True)
+        usb_cards()
+
+        with patch("alsaaudio.cards", return_value=["vc4hdmi0", "Loopback"]):
+            with patch("alsaaudio.card_indexes", return_value=[0, 1]):
+                with patch("alsaaudio.pcms", return_value=["plughw:CARD=vc4hdmi0,DEV=0", "plughw:CARD=Loopback,DEV=0"]):
+                    with pytest.raises(MicrophoneOpenError):
+                        _nth_plugged_microphone(0)
+
+    def test_no_card_at_all_raises(self, mock_pw_dump, usb_cards):
+        mock_pw_dump(unavailable=True)
+        usb_cards()
+
+        with patch("alsaaudio.cards", return_value=[]):
+            with patch("alsaaudio.card_indexes", return_value=[]):
+                with pytest.raises(MicrophoneOpenError):
+                    _nth_plugged_microphone(0)
+
+    def test_claim_skips_already_claimed_fallback_microphones(self, mock_pw_dump, usb_cards):
+        mock_pw_dump(unavailable=True)
+        usb_cards(0, 1)
+
+        assert _claim_first_available_microphone() == "plughw:CARD=SomeCard,DEV=0"
+        assert _claim_first_available_microphone() == "plughw:CARD=AnotherCard,DEV=0"
+
+    def test_jack_is_not_offered_under_media_carrier(self, mock_pw_dump, usb_cards, monkeypatch):
+        # Jack microphones are PipeWire nodes: without PipeWire they can't be opened.
+        monkeypatch.setenv(_CARRIER_ENV, "media-carrier")
+        mock_pw_dump(unavailable=True)
+        usb_cards(0, 1)
+
+        with pytest.raises(MicrophoneOpenError):
+            _nth_plugged_microphone(2)
