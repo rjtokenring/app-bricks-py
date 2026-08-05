@@ -4,6 +4,14 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
+OPENCV_DEBUG=0
+
+# Disable core dumps: inherited by python and any native library it loads.
+# Set ENABLE_CORE_DUMPS=1 to keep them (e.g. to debug a native crash).
+if [ "${ENABLE_CORE_DUMPS:-0}" != "1" ]; then
+  ulimit -c 0 2>/dev/null || true
+fi
+
 if [ -z "$PYTHONUNBUFFERED" ]; then
   export PYTHONUNBUFFERED=1
 fi
@@ -17,6 +25,21 @@ PYTHON_LIBS_DIR="$BASE_DIR/python-libraries"
 INSTALLED_REQUIREMENTS_FILE="$CACHE_DIR/installed_requirements.txt"
 
 export UV_CACHE_DIR="$CACHE_DIR/uv"
+
+# Remove core dumps left in the app directory by a previous run, unless they
+# are explicitly wanted
+if [ "${ENABLE_CORE_DUMPS:-0}" != "1" ]; then
+  find "$BASE_DIR" -maxdepth 1 -type f \
+    \( -name 'core' -o -name 'core.[0-9]*' -o -name '*.core' \) \
+    -print -delete 2>/dev/null || true
+fi
+
+if [ "${OPENCV_DEBUG:-0}" = "1" ]; then
+  export OPENCV_LOG_LEVEL="${OPENCV_LOG_LEVEL:-DEBUG}"
+  export OPENCV_VIDEOIO_DEBUG="${OPENCV_VIDEOIO_DEBUG:-1}"
+  export GST_DEBUG="${GST_DEBUG:-3}"
+  export GST_DEBUG_NO_COLOR="${GST_DEBUG_NO_COLOR:-1}"
+fi
 
 mkdir -p "$CACHE_DIR"
 if [ ! -d "$CACHE_DIR/.venv" ]; then
@@ -50,30 +73,32 @@ fi
 
 if [ -f "$REQUIREMENTS_FILE" ]; then
   INSTALL_DEPS=1
-  REQUIREMENTS_LINES="$(cat $REQUIREMENTS_FILE | grep -c '[^[:space:]]')"
+  REQUIREMENTS_LINES="$(grep -c '[^[:space:]]' "$REQUIREMENTS_FILE")"
   if [ -f "$INSTALLED_REQUIREMENTS_FILE" ]; then
     if cmp -s "$REQUIREMENTS_FILE" "$INSTALLED_REQUIREMENTS_FILE"; then
-        echo "Requirements already installed."
-    else
-        INSTALL_DEPS=0
+      echo "Requirements already installed."
+      INSTALL_DEPS=0
     fi
   fi
   if [ "$INSTALL_DEPS" -gt 0 ]; then
     if [ "$REQUIREMENTS_LINES" -ne 0 ]; then
-      uv pip install -r "$REQUIREMENTS_FILE"
+      if uv pip install -r "$REQUIREMENTS_FILE"; then
+        cp "$REQUIREMENTS_FILE" "$INSTALLED_REQUIREMENTS_FILE"
+      fi
+    else
+      cp "$REQUIREMENTS_FILE" "$INSTALLED_REQUIREMENTS_FILE"
     fi
   fi
   # clean up cache
   uv cache clean
-  cp "$REQUIREMENTS_FILE" "$INSTALLED_REQUIREMENTS_FILE"
 fi
 
 # Install custom brick requirements with caching
 if [ -d "/app/bricks" ]; then
-  for brick_dir in /app/bricks/*/; do
+  for brick_dir in /app/bricks/*; do
     if [ -d "$brick_dir" ]; then
       brick_name=$(basename "$brick_dir")
-      brick_requirements="$brick_dir/requirements.txt"
+      brick_requirements="${brick_dir}/requirements.txt"
       brick_cache_dir="$CACHE_DIR/$brick_name"
       brick_installed_requirements="$brick_cache_dir/installed_requirements.txt"
       
@@ -81,7 +106,7 @@ if [ -d "/app/bricks" ]; then
         mkdir -p "$brick_cache_dir"
         
         INSTALL_BRICK_DEPS=1
-        BRICK_REQUIREMENTS_LINES="$(cat $brick_requirements | grep -c '[^[:space:]]')"
+        BRICK_REQUIREMENTS_LINES="$(grep -c '[^[:space:]]' "$brick_requirements")"
         
         if [ -f "$brick_installed_requirements" ]; then
           if cmp -s "$brick_requirements" "$brick_installed_requirements"; then
@@ -93,12 +118,13 @@ if [ -d "/app/bricks" ]; then
         if [ "$INSTALL_BRICK_DEPS" -gt 0 ]; then
           if [ "$BRICK_REQUIREMENTS_LINES" -ne 0 ]; then
             echo "Installing requirements for brick: $brick_name"
-            uv pip install -r "$brick_requirements"
+            if uv pip install -r "$brick_requirements"; then
+              cp "$brick_requirements" "$brick_installed_requirements"
+            fi
+          else
+            cp "$brick_requirements" "$brick_installed_requirements"
           fi
         fi
-        
-        # Save the cache
-        cp "$brick_requirements" "$brick_installed_requirements"
       fi
     fi
   done
