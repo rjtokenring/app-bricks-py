@@ -37,10 +37,10 @@ To build wheel file suitable for release, use following commands:
 pip install build
 python -m build .
 ```
-To build package as snapshot for latest development build, use following build command:
+To build package as snapshot for latest development build, use following build command (wheel only, skips the sdist for a faster build):
 ```sh
 pip install build
-python -m build --config-setting "build_type=dev" .
+python -m build --wheel --config-setting "build_type=dev" .
 ```
 
 ## Library development steps

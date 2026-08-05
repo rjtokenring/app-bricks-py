@@ -82,15 +82,21 @@ def run_preprocessing(dev_mode: bool = False) -> None:
             sys.path.remove(project_root)
 
 
+def _is_dev_build(config_settings) -> bool:
+    return bool(config_settings) and config_settings.get("build_type") == "dev"
+
+
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
+    # PKG-INFO only exists when building from an unpacked sdist: there the
+    # preprocessing inputs (models/, docs_generator) are pruned by MANIFEST.in
+    # and its outputs are already baked into src/arduino/app_bricks/static.
+    if not os.path.exists("PKG-INFO"):
+        run_preprocessing(_is_dev_build(config_settings))
     return _orig_build_wheel(wheel_directory, config_settings, metadata_directory)
 
 
 def build_sdist(sdist_directory, config_settings=None):
-    dev_mode = False
-    if config_settings and "build_type" in config_settings:
-        dev_mode = config_settings["build_type"] == "dev"
-    run_preprocessing(dev_mode)
+    run_preprocessing(_is_dev_build(config_settings))
     return _orig_build_sdist(sdist_directory, config_settings)
 
 
