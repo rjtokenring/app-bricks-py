@@ -32,6 +32,24 @@ def run_preprocessing(dev_mode: bool = False) -> None:
     os.makedirs(cache_folder_path, exist_ok=True)
 
     try:
+        # Must run before the pre-provision step, which copies docs/ into the cache folder.
+        print("################################### Docs generation #################################################################################")
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+        print(f"Project root: {project_root}")
+        if project_root not in sys.path:
+            print(f"Adding project root to sys.path: {project_root}")
+        sys.path.insert(0, project_root)
+        from docs_generator import runner
+
+        runner.run_docs_generator()
+    except Exception as e:
+        print(f"Error while generating docs: {e}.")
+        raise
+    finally:
+        if project_root in sys.path:
+            sys.path.remove(project_root)
+
+    try:
         print(f"################################## Embed models list ###############################################################################")
         matched_files = glob.glob("models/models-*.yaml")
         if not matched_files:
@@ -63,23 +81,6 @@ def run_preprocessing(dev_mode: bool = False) -> None:
     except Exception as e:
         print(f"Error: {e}.")
         raise
-
-    try:
-        print("################################### Docs generation #################################################################################")
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
-        print(f"Project root: {project_root}")
-        if project_root not in sys.path:
-            print(f"Adding project root to sys.path: {project_root}")
-        sys.path.insert(0, project_root)
-        from docs_generator import runner
-
-        runner.run_docs_generator()
-    except Exception as e:
-        print(f"Error while generating docs: {e}.")
-        raise
-    finally:
-        if project_root in sys.path:
-            sys.path.remove(project_root)
 
 
 def _is_dev_build(config_settings) -> bool:
