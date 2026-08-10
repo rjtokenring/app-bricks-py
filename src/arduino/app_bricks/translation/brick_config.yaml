@@ -1,0 +1,9 @@
+id: arduino:translation
+name: Translation
+description: Translation brick for offline text-to-text machine translation between language pairs
+category: text
+supported_boards: ["ventunoq"]
+requires_services: ["arduino:genie_audio"]
+ai_frameworks_compatibility:
+  - qnn
+model: opus-en-es
