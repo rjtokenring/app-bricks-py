@@ -37,7 +37,7 @@ class TranslationRequestError(TranslationError):
 
 @brick
 class LanguageTranslation:
-    """Language translation brick for offline text-to-text machine translation using the local audio analytics service."""
+    """Language translation brick for offline text-to-text machine translation."""
 
     _APP_SERVICE_NAME = "audio-analytics-runner"
     _API_PORT = 8085
@@ -155,7 +155,7 @@ class LanguageTranslation:
             str: The translated text, or an empty string if `text` is empty or blank.
 
         Raises:
-            ValueError: If `text` is not a string.
+            ValueError: If `text` is not a string or string.
             TranslationUnavailableError: If the translation service cannot be reached.
             TranslationRequestError: If the translation service rejects the request or returns an unusable payload.
         """
@@ -204,31 +204,6 @@ class LanguageTranslation:
         for position, index in enumerate(indexes):
             results[index] = translated[position]
         return results
-
-    def process(self, item):
-        """
-        Translate pipeline input, mirroring the shape of the incoming item.
-
-        Args:
-            item (str | list[str] | dict): A string, a list of strings, or a dictionary with a `"text"` key.
-
-        Returns:
-            str | list[str] | None: The translated text, with the same shape as `item`, or None when the input
-                type is not supported, in which case the item is filtered out of the pipeline.
-
-        Raises:
-            TranslationUnavailableError: If the translation service cannot be reached.
-            TranslationRequestError: If the translation service rejects the request or returns an unusable payload.
-        """
-        if isinstance(item, str):
-            return self.translate(item)
-        if isinstance(item, list):
-            return self.translate_batch(item)
-        if isinstance(item, dict) and "text" in item:
-            return self.process(item["text"])
-
-        logger.warning(f"Unsupported input type for translation: {type(item).__name__}")
-        return None
 
     @staticmethod
     def _normalize_model_name(name: str) -> str:

@@ -365,37 +365,6 @@ def test_stop_does_not_raise_when_close_is_unreachable(monkeypatch):
 
 
 # --------------------------------------------------------------------------------------------------
-# Pipeline hook
-# --------------------------------------------------------------------------------------------------
-
-
-def test_process_translates_string(monkeypatch):
-    translation, _ = make_translation(monkeypatch, post=lambda url, json, **kwargs: _translations("Hola mundo"))
-
-    assert translation.process("Hello world") == "Hola mundo"
-
-
-def test_process_translates_list(monkeypatch):
-    translation, _ = make_translation(monkeypatch, post=lambda url, json, **kwargs: _translations("Hola", "Adiós"))
-
-    assert translation.process(["Hi", "Bye"]) == ["Hola", "Adiós"]
-
-
-def test_process_translates_dict_with_text(monkeypatch):
-    translation, _ = make_translation(monkeypatch, post=lambda url, json, **kwargs: _translations("Hola mundo"))
-
-    assert translation.process({"text": "Hello world"}) == "Hola mundo"
-
-
-def test_process_returns_none_for_unsupported_input(monkeypatch):
-    translation, calls = make_translation(monkeypatch)
-
-    # None filters the item out of the pipeline instead of forwarding it downstream.
-    assert translation.process(42) is None
-    assert posts(calls) == []
-
-
-# --------------------------------------------------------------------------------------------------
 # Concurrency
 # --------------------------------------------------------------------------------------------------
 
