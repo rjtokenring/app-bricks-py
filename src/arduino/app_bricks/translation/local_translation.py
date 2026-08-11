@@ -144,53 +144,33 @@ class LanguageTranslation:
         """Stop the LanguageTranslation brick, releasing the translation session on the translation service."""
         self._close_remote_session()
 
-    def translate(self, text: str) -> str:
+    def translate(self, text: str | list[str]) -> list[str]:
         """
-        Translate a single text into the target language.
+        Translate one or more texts into the target language with a single request.
 
         Args:
-            text (str): The text to translate.
+            text (str | list[str]): The text to translate, either a single string or a list of strings. Empty or
+                blank entries are not sent to the translation service and are returned as empty strings.
 
         Returns:
-            str: The translated text, or an empty string if `text` is empty or blank.
+            list[str]: The translated texts, in the same order and with the same length as the input. A single
+                string yields a one-item list.
 
         Raises:
-            ValueError: If `text` is not a string or string.
+            ValueError: If `text` is not a string or a list of strings.
             TranslationUnavailableError: If the translation service cannot be reached.
             TranslationRequestError: If the translation service rejects the request or returns an unusable payload.
         """
-        if not isinstance(text, str):
-            raise ValueError(f"text must be a string, got {type(text).__name__}.")
-        if not text.strip():
-            return ""
-
-        return self.translate_batch([text])[0]
-
-    def translate_batch(self, texts: list[str]) -> list[str]:
-        """
-        Translate several texts into the target language with a single request.
-
-        Args:
-            texts (list[str]): The texts to translate. Empty or blank entries are not sent to the translation
-                service and are returned as empty strings.
-
-        Returns:
-            list[str]: The translated texts, in the same order and with the same length as `texts`.
-
-        Raises:
-            ValueError: If `texts` is not a list of strings.
-            TranslationUnavailableError: If the translation service cannot be reached.
-            TranslationRequestError: If the translation service rejects the request or returns an unusable payload.
-        """
-        if isinstance(texts, str):
-            raise ValueError("translate_batch() expects a list of strings, use translate() for a single string.")
-        try:
-            items = list(texts)
-        except TypeError:
-            raise ValueError(f"texts must be a list of strings, got {type(texts).__name__}.") from None
-        for item in items:
-            if not isinstance(item, str):
-                raise ValueError(f"All items in texts must be strings, got {type(item).__name__}.")
+        if isinstance(text, str):
+            items = [text]
+        else:
+            try:
+                items = list(text)
+            except TypeError:
+                raise ValueError(f"text must be a string or a list of strings, got {type(text).__name__}.") from None
+            for item in items:
+                if not isinstance(item, str):
+                    raise ValueError(f"All items in text must be strings, got {type(item).__name__}.")
 
         # Blank entries are never sent, but they are re-inserted at their original position so the returned
         # list always matches the input length and order.

@@ -7,8 +7,7 @@ The `LanguageTranslation` brick provides a completely offline text-to-text machi
 - **Offline Operation:** All translations are performed locally, ensuring data privacy and eliminating network dependencies.
 - **Selectable Translation Type:** The translation type *is* the model: each model translates one direction (e.g. `opus-en-es`, `opus-es-en`, `opus-en-zh`, `opus-zh-en`). Select it in the constructor, in `brick_config.yaml`, or override it per-app in `app.yaml`.
 - **Automatic Language Pair Detection:** The source and target languages are derived from the model name, and can be overridden in the constructor.
-- **Batch Translation:** `translate_batch()` translates several texts in a single request, preserving input order.
-- **Pipeline Ready:** `process()` accepts a string, a list of strings, or a dictionary with a `text` key, and returns the translation with the same shape.
+- **Single or Batch Translation:** `translate()` accepts a string or a list of strings, translates them in a single request, and always returns a `list[str]` preserving input order.
 
 ## Prerequisites
 
@@ -29,7 +28,7 @@ Before using the examples shown in the next sections, ensure you have the follow
 
 ## Code Example and Usage
 
-This example shows how to translate a text into the target language of the configured model.
+This example shows how to translate a text into the target language of the configured model. `translate()` always returns a list, one entry per input text.
 
 ```python
 from arduino.app_bricks.translation import LanguageTranslation
@@ -40,7 +39,7 @@ translation = LanguageTranslation()  # defaults to opus-en-es
 
 
 def runner():
-    print(translation.translate("Hello world, Arduino!"))
+    print(translation.translate("Hello world, Arduino!")[0])
 
 
 App.run(user_loop=runner)
@@ -54,7 +53,7 @@ Pass the model to the constructor:
 from arduino.app_bricks.translation import LanguageTranslation
 
 translation = LanguageTranslation(model="opus-zh-en")
-print(translation.translate("你好，世界。"))
+print(translation.translate("你好，世界。")[0])
 ```
 
 Or configure it per-app in `app.yaml`, leaving the code unchanged:
@@ -67,14 +66,14 @@ bricks:
 
 ### Batch Translation
 
-`translate_batch()` sends every text in a single request. The returned list has the same length and order as the input, and empty or blank entries come back as empty strings.
+Passing a list to `translate()` sends every text in a single request. The returned list has the same length and order as the input, and empty or blank entries come back as empty strings.
 
 ```python
 from arduino.app_bricks.translation import LanguageTranslation
 
 translation = LanguageTranslation(model="opus-en-es")
 
-for translated in translation.translate_batch(["Hello world", "How are you?", "Good morning"]):
+for translated in translation.translate(["Hello world", "How are you?", "Good morning"]):
     print(translated)
 ```
 

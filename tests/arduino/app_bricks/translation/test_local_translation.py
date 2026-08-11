@@ -151,14 +151,14 @@ def test_parse_language_pair(name, expected):
 
 
 # --------------------------------------------------------------------------------------------------
-# translate / translate_batch
+# translate
 # --------------------------------------------------------------------------------------------------
 
 
 def test_translate_posts_expected_payload_and_returns_text(monkeypatch):
     translation, calls = make_translation(monkeypatch, post=lambda url, json, **kwargs: _translations("Hola mundo"))
 
-    assert translation.translate("Hello world") == "Hola mundo"
+    assert translation.translate("Hello world") == ["Hola mundo"]
 
     call = posts(calls)[0]
     assert call["url"] == "http://127.0.0.1:8085/audio-analytics/v1/api/translations/translate"
@@ -188,13 +188,13 @@ def test_constructor_parameters_included_in_payload(monkeypatch):
     assert posts(calls)[0]["json"]["parameters"] == {"dummy_param": "dummy_value"}
 
 
-def test_translate_batch_preserves_order_in_a_single_request(monkeypatch):
+def test_translate_preserves_order_in_a_single_request(monkeypatch):
     translation, calls = make_translation(
         monkeypatch,
         post=lambda url, json, **kwargs: _translations("Hola mundo", "¿Cómo estás?", "Buenos días"),
     )
 
-    assert translation.translate_batch(["Hello world", "How are you?", "Good morning"]) == [
+    assert translation.translate(["Hello world", "How are you?", "Good morning"]) == [
         "Hola mundo",
         "¿Cómo estás?",
         "Buenos días",
@@ -203,31 +203,31 @@ def test_translate_batch_preserves_order_in_a_single_request(monkeypatch):
 
 
 @pytest.mark.parametrize("text", ["", "   ", "\n"])
-def test_translate_returns_empty_string_for_blank_input(monkeypatch, text):
+def test_translate_returns_one_empty_string_for_blank_input(monkeypatch, text):
     translation, calls = make_translation(monkeypatch)
 
-    assert translation.translate(text) == ""
+    assert translation.translate(text) == [""]
     assert posts(calls) == []
 
 
-def test_translate_batch_returns_empty_list_for_empty_input(monkeypatch):
+def test_translate_returns_empty_list_for_empty_list_input(monkeypatch):
     translation, calls = make_translation(monkeypatch)
 
-    assert translation.translate_batch([]) == []
+    assert translation.translate([]) == []
     assert posts(calls) == []
 
 
-def test_translate_batch_skips_blank_entries_but_keeps_positions(monkeypatch):
+def test_translate_skips_blank_entries_but_keeps_positions(monkeypatch):
     translation, calls = make_translation(monkeypatch, post=lambda url, json, **kwargs: _translations("Hola", "Adiós"))
 
-    assert translation.translate_batch(["Hi", "  ", "Bye"]) == ["Hola", "", "Adiós"]
+    assert translation.translate(["Hi", "  ", "Bye"]) == ["Hola", "", "Adiós"]
     assert posts(calls)[0]["json"]["text"] == ["Hi", "Bye"]
 
 
-def test_translate_batch_returns_empty_strings_when_all_entries_blank(monkeypatch):
+def test_translate_returns_empty_strings_when_all_entries_blank(monkeypatch):
     translation, calls = make_translation(monkeypatch)
 
-    assert translation.translate_batch(["", "  "]) == ["", ""]
+    assert translation.translate(["", "  "]) == ["", ""]
     assert posts(calls) == []
 
 
@@ -269,14 +269,14 @@ def test_translate_raises_on_result_count_mismatch(monkeypatch):
     translation, _ = make_translation(monkeypatch, post=lambda url, json, **kwargs: _translations("Hola"))
 
     with pytest.raises(TranslationRequestError, match="1 results for 2 inputs"):
-        translation.translate_batch(["Hello world", "Good morning"])
+        translation.translate(["Hello world", "Good morning"])
 
 
 @pytest.mark.parametrize("entry", [{"translated_text": "Hola mundo"}, {"text": "Hola mundo"}, {"translation": "Hola mundo"}, "Hola mundo"])
 def test_translate_accepts_alternative_entry_shapes(monkeypatch, entry):
     translation, _ = make_translation(monkeypatch, post=lambda url, json, **kwargs: FakeResponse(json_data={"translations": [entry]}))
 
-    assert translation.translate("Hello world") == "Hola mundo"
+    assert translation.translate("Hello world") == ["Hola mundo"]
 
 
 def test_translate_raises_on_unexpected_entry_shape(monkeypatch):
@@ -296,22 +296,15 @@ def test_translate_raises_on_invalid_json_response(monkeypatch):
 def test_translate_rejects_non_string_input(monkeypatch):
     translation, _ = make_translation(monkeypatch)
 
-    with pytest.raises(ValueError, match="text must be a string"):
+    with pytest.raises(ValueError, match="text must be a string or a list of strings"):
         translation.translate(42)
 
 
-def test_translate_batch_rejects_a_bare_string(monkeypatch):
+def test_translate_rejects_non_string_items(monkeypatch):
     translation, _ = make_translation(monkeypatch)
 
-    with pytest.raises(ValueError, match="expects a list of strings"):
-        translation.translate_batch("Hello world")
-
-
-def test_translate_batch_rejects_non_string_items(monkeypatch):
-    translation, _ = make_translation(monkeypatch)
-
-    with pytest.raises(ValueError, match="All items in texts must be strings"):
-        translation.translate_batch(["Hello world", 1])
+    with pytest.raises(ValueError, match="All items in text must be strings"):
+        translation.translate(["Hello world", 1])
 
 
 # --------------------------------------------------------------------------------------------------
@@ -391,7 +384,7 @@ def test_concurrent_translations_are_serialized(monkeypatch):
 
     translation, _ = make_translation(monkeypatch, post=post)
 
-    results: list[str] = []
+    results: list[list[str]] = []
     errors: list[Exception] = []
 
     def run():
@@ -410,7 +403,7 @@ def test_concurrent_translations_are_serialized(monkeypatch):
 
     # Requests queue on the lock: both callers succeed, and neither gets a "busy" error.
     assert errors == []
-    assert results == ["Hola mundo", "Hola mundo"]
+    assert results == [["Hola mundo"], ["Hola mundo"]]
     assert not overlapped
 
 
