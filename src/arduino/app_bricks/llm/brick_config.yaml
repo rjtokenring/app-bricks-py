@@ -20,7 +20,7 @@ ai_frameworks_compatibility:
 variables:
   - name: X_LLAMA_ARG_CTX_SIZE
     description: LLama.cpp context size
-    default_value: 16382
+    default_value: 16384
   - name: X_LLAMA_ARG_REASONING
     description: LLama.cpp reasoning mode (on|off)
     default_value: off  
