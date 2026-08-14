@@ -44,9 +44,6 @@ class LanguageTranslation:
 
     _APP_SERVICE_NAME = "audio-analytics-runner"
     _API_PORT = 8085
-    # Closing the remote session happens on shutdown and is best-effort, so it never waits for the
-    # full request timeout.
-    _CLOSE_TIMEOUT_SECONDS = 10
 
     def __init__(
         self,
@@ -147,8 +144,12 @@ class LanguageTranslation:
         self._warmup()
 
     def stop(self):
-        """Stop the LanguageTranslation brick, releasing the translation session on the translation service."""
-        self._close_remote_session()
+        """Stop the LanguageTranslation brick.
+
+        Each translation is a self-contained request, so there is no session to release on the
+        translation service and nothing to clean up here.
+        """
+        return
 
     def translate(self, text: str | list[str]) -> list[str]:
         """
@@ -378,11 +379,3 @@ class LanguageTranslation:
             return
         elapsed_ms = (time.perf_counter() - started_at) * 1000
         logger.debug(f"Translation warmup completed in {elapsed_ms:.2f} ms")
-
-    def _close_remote_session(self) -> None:
-        try:
-            response = requests.post(f"{self.api_base_url}/translations/close", timeout=self._CLOSE_TIMEOUT_SECONDS)
-            if response.status_code >= 400:
-                logger.warning(f"Failed to close remote translation session: status_code={response.status_code}")
-        except Exception as e:
-            logger.warning(f"Failed to close remote translation session: {e}")
