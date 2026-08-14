@@ -44,7 +44,9 @@ class LanguageTranslation:
 
     _APP_SERVICE_NAME = "audio-analytics-runner"
     _API_PORT = 8085
-    _CONTROL_TIMEOUT_SECONDS = 10
+    # Closing the remote session happens on shutdown and is best-effort, so it never waits for the
+    # full request timeout.
+    _CLOSE_TIMEOUT_SECONDS = 10
 
     def __init__(
         self,
@@ -66,7 +68,8 @@ class LanguageTranslation:
                 the model name.
             parameters (dict, optional): Extra model parameters forwarded verbatim to the translation service on
                 every request. Keys unknown to the service are ignored.
-            timeout (int): Maximum time in seconds to wait for a translation response. Default: 60.
+            timeout (int): Maximum time in seconds to wait for a translation service response, both for the model
+                listing performed here and for every translation request. Default: 60.
 
         Raises:
             RuntimeError: If the service address cannot be resolved, or if no model is configured.
@@ -249,8 +252,9 @@ class LanguageTranslation:
             TranslationUnavailableError: If the model list cannot be fetched.
             TranslationModelNotAvailableError: If the model is not offered by the translation service.
         """
+        logger.info(f"Listing available translation models, looking for '{model_name}'...")
         try:
-            response = requests.get(f"{self.api_base_url}/translations/models", timeout=self._CONTROL_TIMEOUT_SECONDS)
+            response = requests.get(f"{self.api_base_url}/translations/models", timeout=self._timeout)
         except Exception as e:
             raise TranslationUnavailableError(f"Failed to fetch translation models: {e}.", hint=_SERVICE_HINT) from None
 
@@ -377,7 +381,7 @@ class LanguageTranslation:
 
     def _close_remote_session(self) -> None:
         try:
-            response = requests.post(f"{self.api_base_url}/translations/close", timeout=self._CONTROL_TIMEOUT_SECONDS)
+            response = requests.post(f"{self.api_base_url}/translations/close", timeout=self._CLOSE_TIMEOUT_SECONDS)
             if response.status_code >= 400:
                 logger.warning(f"Failed to close remote translation session: status_code={response.status_code}")
         except Exception as e:

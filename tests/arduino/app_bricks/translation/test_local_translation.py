@@ -118,6 +118,24 @@ def test_constructor_raises_on_models_listing_error_status(monkeypatch):
         LanguageTranslation()
 
 
+@pytest.mark.parametrize("timeout, expected", [(None, 60), (5, 5)])
+def test_models_listing_uses_the_configured_timeout(monkeypatch, timeout, expected):
+    # The listing is the first call to the service and can be as slow as a translation,
+    # so it must honour the constructor timeout instead of a shorter fixed one.
+    listing_calls: list[dict] = []
+
+    def fake_get(url, **kwargs):
+        listing_calls.append(kwargs)
+        return FakeResponse(json_data=[{"name": RUNNER_MODEL}])
+
+    monkeypatch.setattr("arduino.app_bricks.translation.local_translation.requests.get", fake_get)
+
+    translation = LanguageTranslation() if timeout is None else LanguageTranslation(timeout=timeout)
+    App.unregister(translation)
+
+    assert listing_calls[0]["timeout"] == expected
+
+
 def test_explicit_model_wins_over_app_config_and_brick_default(monkeypatch):
     monkeypatch.setattr("arduino.app_bricks.translation.local_translation.get_brick_configured_model", lambda _id: "opus-zh-en")
 
