@@ -196,6 +196,27 @@ class LanguageTranslation:
         return name.replace("-", "").replace("_", "").lower()
 
     @staticmethod
+    def _language_code(value) -> str | None:
+        """Extract a language code from a model entry field.
+
+        The service reports languages either as a bare code (`"en"`) or as an object
+        (`{"code": "en", "name": "English"}`), while translation requests only accept the bare code.
+
+        Args:
+            value: The `source_language`/`target_language` value reported by the service.
+
+        Returns:
+            str | None: The language code, or `None` when the value does not carry one.
+        """
+        if isinstance(value, str):
+            return value or None
+        if isinstance(value, dict):
+            code = value.get("code")
+            if isinstance(code, str) and code:
+                return code
+        return None
+
+    @staticmethod
     def _parse_language_pair(name: str) -> tuple[str | None, str | None]:
         """Derive the language pair from a `<family>-<source>-<target>` model name, e.g. `opus-en-es` or `opus_zh_en`.
 
@@ -258,8 +279,8 @@ class LanguageTranslation:
             if self._normalize_model_name(entry_name) != wanted:
                 continue
 
-            source = entry.get("source_language") if isinstance(entry, dict) else None
-            target = entry.get("target_language") if isinstance(entry, dict) else None
+            source = self._language_code(entry.get("source_language")) if isinstance(entry, dict) else None
+            target = self._language_code(entry.get("target_language")) if isinstance(entry, dict) else None
             if not source or not target:
                 source, target = self._parse_language_pair(entry_name)
             return entry_name, source, target
@@ -330,10 +351,16 @@ class LanguageTranslation:
     def _error_message(response, fallback: str) -> str:
         try:
             error_data = response.json()
-            if isinstance(error_data, dict) and "error" in error_data:
-                return error_data["error"].get("message", fallback)
         except Exception:
-            pass
+            return f"{fallback} (status_code={response.status_code})"
+
+        if isinstance(error_data, dict):
+            # Service errors come as {"error": {"message": ...}}, while request validation errors
+            # rejected by the API schema come as {"message": ...}.
+            error = error_data.get("error")
+            message = error.get("message") if isinstance(error, dict) else error_data.get("message")
+            if isinstance(message, str) and message:
+                return message
         return f"{fallback} (status_code={response.status_code})"
 
     def _warmup(self) -> None:

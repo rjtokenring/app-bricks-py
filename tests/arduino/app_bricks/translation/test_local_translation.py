@@ -55,6 +55,33 @@ def test_resolve_model_prefers_entry_language_metadata(monkeypatch):
     assert translation.target_language == "spa"
 
 
+def test_resolve_model_unwraps_language_objects(monkeypatch):
+    # The real service reports languages as objects, but /translations/translate rejects
+    # anything but a bare code with a 400.
+    models = [
+        {
+            "name": RUNNER_MODEL,
+            "source_language": {"code": "en", "name": "English"},
+            "target_language": {"code": "es", "name": "Spanish"},
+        }
+    ]
+    translation, calls = make_translation(monkeypatch, models=models)
+
+    assert (translation.source_language, translation.target_language) == ("en", "es")
+
+    translation.translate("Hello world")
+    payload = posts(calls)[0]["json"]
+    assert payload["source_language"] == "en"
+    assert payload["target_language"] == "es"
+
+
+def test_resolve_model_falls_back_to_model_name_when_language_objects_lack_a_code(monkeypatch):
+    models = [{"name": RUNNER_MODEL, "source_language": {"name": "English"}, "target_language": {}}]
+    translation, _ = make_translation(monkeypatch, models=models)
+
+    assert (translation.source_language, translation.target_language) == ("en", "es")
+
+
 def test_resolve_model_accepts_entry_id_key(monkeypatch):
     translation, _ = make_translation(monkeypatch, models=[{"id": RUNNER_MODEL}])
 
@@ -242,6 +269,18 @@ def test_translate_raises_on_error_status(monkeypatch):
         translation.translate("Hello world")
 
 
+def test_translate_reports_request_validation_message(monkeypatch):
+    # Schema validation errors are rejected by the API with a top-level "message" instead of "error".
+    body = {
+        "message": "request.body.source_language should be string",
+        "errors": [{"path": ".body.source_language", "message": "should be string"}],
+    }
+    translation, _ = make_translation(monkeypatch, post=lambda url, json, **kwargs: FakeResponse(status_code=400, json_data=body))
+
+    with pytest.raises(TranslationRequestError, match="request.body.source_language should be string"):
+        translation.translate("Hello world")
+
+
 def test_translate_raises_on_error_status_without_error_body(monkeypatch):
     translation, _ = make_translation(monkeypatch, post=lambda url, json, **kwargs: FakeResponse(status_code=503, json_data={}))
 
@@ -338,7 +377,7 @@ def test_model_not_available_error_hints_at_deploying_or_selecting_a_model(monke
     with pytest.raises(TranslationModelNotAvailableError) as excinfo:
         LanguageTranslation()
 
-    assert "Deploy the model" in excinfo.value.hint
+    assert "Download the model" in excinfo.value.hint
 
 
 def test_translate_unreachable_error_hints_at_the_audio_service(monkeypatch):
