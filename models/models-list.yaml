@@ -2042,7 +2042,7 @@ models:
       - id: "arduino:video_object_detection"
         model_configuration:
           "EI_V_OBJ_DETECTION_MODEL": "/var/lib/arduino-app-cli/models/edge-impulse/yolo-x-small-qnn/yolo-x-small-qnn.eim"
- - opus_mt_en_es:
+ - opus-en-es:
     name : "OpusMT-En-Es"
     description: >-
       OpusMT English to Spanish neural machine translation model based on MarianMT transformer architecture.
@@ -2066,7 +2066,7 @@ models:
       source: "qualcomm-ai-hub"
       source-model-id: "opus_mt_en_es"
       source-model-url: "https://aihub.qualcomm.com/models/opus_mt_en_es"
- - opus_mt_es_en:
+ - opus-es-en:
     name : "OpusMT-Es-En"
     description: >-
       OpusMT Spanish to English neural machine translation model based on MarianMT transformer architecture.
@@ -2090,7 +2090,7 @@ models:
       source: "qualcomm-ai-hub"
       source-model-id: "opus_mt_es_en"
       source-model-url: "https://aihub.qualcomm.com/models/opus_mt_es_en"
- - opus_mt_en_zh:
+ - opus-en-zh:
     name : "OpusMT-En-Zh"
     description: >-
       OpusMT English to Chinese neural machine translation model based on MarianMT transformer architecture.
@@ -2114,7 +2114,7 @@ models:
       source: "qualcomm-ai-hub"
       source-model-id: "opus_mt_en_zh"
       source-model-url: "https://aihub.qualcomm.com/models/opus_mt_en_zh"
- - opus_mt_zh_en:
+ - opus-zh-en:
     name : "OpusMT-Zh-En"
     description: >-
       OpusMT Chinese to English neural machine translation model based on MarianMT transformer architecture.
