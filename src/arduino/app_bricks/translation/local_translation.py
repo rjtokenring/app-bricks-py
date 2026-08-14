@@ -9,7 +9,7 @@ import time
 import requests
 
 from arduino.app_internal.core import resolve_address, get_brick_config, get_brick_configured_model
-from arduino.app_utils import brick, Logger
+from arduino.app_utils import brick, AppError, Logger
 
 logger = Logger("LanguageTranslation")
 
@@ -18,8 +18,11 @@ _LANGUAGE_CODE_RE = re.compile(r"^[a-z]{2}$")
 
 _WARMUP_TEXT = "ok"
 
+_SERVICE_HINT = "Check that the 'arduino:genie_audio' service is running and reachable or restart the app."
+_PAYLOAD_HINT = "The translation service returned an unexpected payload."
 
-class TranslationError(Exception):
+
+class TranslationError(AppError):
     """Base class for translation errors."""
 
 
@@ -228,15 +231,15 @@ class LanguageTranslation:
         try:
             response = requests.get(f"{self.api_base_url}/translations/models", timeout=self._CONTROL_TIMEOUT_SECONDS)
         except Exception as e:
-            raise TranslationUnavailableError(f"Failed to fetch translation models: {e}.") from None
+            raise TranslationUnavailableError(f"Failed to fetch translation models: {e}.", hint=_SERVICE_HINT) from None
 
         if response.status_code != 200:
-            raise TranslationUnavailableError(self._error_message(response, "Failed to fetch translation models."))
+            raise TranslationUnavailableError(self._error_message(response, "Failed to fetch translation models."), hint=_SERVICE_HINT)
 
         try:
             entries = response.json() or []
         except Exception as e:
-            raise TranslationUnavailableError(f"Invalid translation models response: {e}.") from None
+            raise TranslationUnavailableError(f"Invalid translation models response: {e}.", hint=_SERVICE_HINT) from None
 
         wanted = self._normalize_model_name(model_name)
         available: list[str] = []
@@ -262,7 +265,8 @@ class LanguageTranslation:
             return entry_name, source, target
 
         raise TranslationModelNotAvailableError(
-            f"Translation model '{model_name}' is not available on the runner. Available models: {', '.join(available) or 'none'}."
+            f"Translation model '{model_name}' is not available on the runner. Available models: {', '.join(available) or 'none'}.",
+            hint="Download the model on the device or select a model already available on the device.",
         )
 
     def _translate(self, texts: list[str]) -> list[str]:
@@ -281,23 +285,26 @@ class LanguageTranslation:
             try:
                 response = requests.post(url, json=payload, timeout=self._timeout)
             except Exception as e:
-                raise TranslationUnavailableError(f"Failed to reach the translation service: {e}.") from None
+                raise TranslationUnavailableError(f"Failed to reach the translation service: {e}.", hint=_SERVICE_HINT) from None
 
         if response.status_code != 200:
-            raise TranslationRequestError(self._error_message(response, "Failed to translate text."))
+            raise TranslationRequestError(
+                self._error_message(response, "Failed to translate text."),
+                hint=f"Check that the text and the model parameters are valid for model '{self._model}'.",
+            )
 
         try:
             data = response.json()
         except Exception as e:
-            raise TranslationRequestError(f"Invalid translation response: {e}.") from None
+            raise TranslationRequestError(f"Invalid translation response: {e}.", hint=_SERVICE_HINT) from None
 
         translations = data.get("translations") if isinstance(data, dict) else None
         if not isinstance(translations, list):
-            raise TranslationRequestError("No 'translations' returned from the translation API.")
+            raise TranslationRequestError("No 'translations' returned from the translation API.", hint=_PAYLOAD_HINT)
         # The response carries no identifiers, so results are correlated by position: a count mismatch means
         # we cannot tell which translation belongs to which input.
         if len(translations) != len(texts):
-            raise TranslationRequestError(f"Translation API returned {len(translations)} results for {len(texts)} inputs.")
+            raise TranslationRequestError(f"Translation API returned {len(translations)} results for {len(texts)} inputs.", hint=_PAYLOAD_HINT)
 
         results = [self._extract_translated_text(entry) for entry in translations]
 
@@ -317,7 +324,7 @@ class LanguageTranslation:
                 if isinstance(value, str):
                     return value
 
-        raise TranslationRequestError(f"Unexpected translation entry in response: {entry!r}")
+        raise TranslationRequestError(f"Unexpected translation entry in response: {entry!r}", hint=_PAYLOAD_HINT)
 
     @staticmethod
     def _error_message(response, fallback: str) -> str:

@@ -82,4 +82,4 @@ for translated in translation.translate(["Hello world", "How are you?", "Good mo
 - `TranslationUnavailableError`: raised when the translation service cannot be reached, either while listing the available models at construction or while translating. Fix by checking that the `arduino:genie_audio` service is running.
 - `TranslationModelNotAvailableError`: raised at construction if the configured model is not offered by the translation service. The message lists the available models. Fix by deploying the model or selecting one of the available ones.
 - `TranslationRequestError`: raised when the translation service rejects a request or returns an unusable payload.
-- `TranslationError`: base class for all of the above.
+- `TranslationError`: base class for all of the above, deriving from `AppError`. When one of these reaches the top level uncaught, the app prints the message and a hint on how to fix the problem, followed by the traceback.

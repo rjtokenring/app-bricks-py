@@ -9,11 +9,12 @@ from conftest import CONFIGURED_MODEL, RUNNER_MODEL, FakeResponse, make_translat
 
 from arduino.app_bricks.translation import (
     LanguageTranslation,
+    TranslationError,
     TranslationModelNotAvailableError,
     TranslationRequestError,
     TranslationUnavailableError,
 )
-from arduino.app_utils import App
+from arduino.app_utils import App, AppError
 
 
 def _translations(*texts):
@@ -305,6 +306,72 @@ def test_translate_rejects_non_string_items(monkeypatch):
 
     with pytest.raises(ValueError, match="All items in text must be strings"):
         translation.translate(["Hello world", 1])
+
+
+# --------------------------------------------------------------------------------------------------
+# Error reporting
+# --------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "error_class",
+    [TranslationError, TranslationUnavailableError, TranslationModelNotAvailableError, TranslationRequestError],
+)
+def test_translation_errors_are_app_errors(error_class):
+    # AppError subclasses are reported by the app excepthook with their message and hint,
+    # instead of a bare traceback.
+    assert issubclass(error_class, AppError)
+
+
+def test_unreachable_service_error_hints_at_the_audio_service(monkeypatch):
+    _patch_models(monkeypatch, raises=OSError("connection refused"))
+
+    with pytest.raises(TranslationUnavailableError) as excinfo:
+        LanguageTranslation()
+
+    assert "arduino:genie_audio" in excinfo.value.hint
+
+
+def test_model_not_available_error_hints_at_deploying_or_selecting_a_model(monkeypatch):
+    _patch_models(monkeypatch, response=FakeResponse(json_data=[{"name": "opus_zh_en"}]))
+
+    with pytest.raises(TranslationModelNotAvailableError) as excinfo:
+        LanguageTranslation()
+
+    assert "Deploy the model" in excinfo.value.hint
+
+
+def test_translate_unreachable_error_hints_at_the_audio_service(monkeypatch):
+    def post(url, json, **kwargs):
+        raise OSError("connection reset")
+
+    translation, _ = make_translation(monkeypatch, post=post)
+
+    with pytest.raises(TranslationUnavailableError) as excinfo:
+        translation.translate("Hello world")
+
+    assert "arduino:genie_audio" in excinfo.value.hint
+
+
+def test_unusable_payload_error_carries_a_hint(monkeypatch):
+    translation, _ = make_translation(monkeypatch, post=lambda url, json, **kwargs: FakeResponse(json_data={}))
+
+    with pytest.raises(TranslationRequestError) as excinfo:
+        translation.translate("Hello world")
+
+    assert "unexpected payload" in excinfo.value.hint
+
+
+def test_rejected_request_error_hint_mentions_the_model(monkeypatch):
+    translation, _ = make_translation(
+        monkeypatch,
+        post=lambda url, json, **kwargs: FakeResponse(status_code=400, json_data={"error": {"message": "bad model"}}),
+    )
+
+    with pytest.raises(TranslationRequestError) as excinfo:
+        translation.translate("Hello world")
+
+    assert RUNNER_MODEL in excinfo.value.hint
 
 
 # --------------------------------------------------------------------------------------------------
