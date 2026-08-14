@@ -456,29 +456,16 @@ def test_start_does_not_raise_when_warmup_fails(monkeypatch):
     translation.start()  # best-effort: a failed warmup must not break App.run()
 
 
-def test_stop_closes_remote_session(monkeypatch):
+def test_stop_does_not_call_the_service(monkeypatch):
     translation, calls = make_translation(monkeypatch)
+    translation.start()
+    calls.clear()
 
     translation.stop()
 
-    call = posts(calls)[0]
-    assert call["url"] == "http://127.0.0.1:8085/audio-analytics/v1/api/translations/close"
-    assert call["json"] is None
-
-
-def test_stop_does_not_raise_when_close_fails(monkeypatch):
-    translation, _ = make_translation(monkeypatch, post=lambda url, json, **kwargs: FakeResponse(status_code=500))
-
-    translation.stop()
-
-
-def test_stop_does_not_raise_when_close_is_unreachable(monkeypatch):
-    def post(url, json, **kwargs):
-        raise OSError("connection refused")
-
-    translation, _ = make_translation(monkeypatch, post=post)
-
-    translation.stop()
+    # The service exposes no session-close endpoint: every translation is a self-contained request,
+    # so shutdown must stay silent instead of hitting a route that answers 404.
+    assert calls == []
 
 
 # --------------------------------------------------------------------------------------------------
