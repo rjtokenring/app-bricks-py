@@ -76,7 +76,7 @@ jobs:
             -v "${{ github.workspace }}:/${{ github.workspace }}" \
             -w "${{ github.workspace }}" \
             -e SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
-            -e PUBLIC_IMAGE_REGISTRY_BASE="${{ env.DEV_REGISTRY_PATH }}/" \
+            -e PUBLIC_IMAGE_REGISTRY_BASE="${{ env.DEV_REGISTRY_PATH }}" \
             -e DEV_TAG_VERSION="${{ inputs.image_tag }}" \
             debian:trixie bash -c "
               set -e
@@ -134,7 +134,7 @@ jobs:
             org.opencontainers.image.url=https://github.com/${{ github.repository }}
 
       - name: Copy models-list.yaml into build context
-        if: matrix.container == 'models-downloader'
+        if: contains(fromJSON('["models-downloader", "llamacpp-runner", "llamacpp-npu-runner"]'), matrix.container)
         run: cp models/models-list.yaml ${{ steps.dir.outputs.path }}/models-list.yaml
 
       - name: Build and push Docker image
