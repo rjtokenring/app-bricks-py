@@ -40,6 +40,7 @@ translation = LanguageTranslation()  # defaults to opus-en-es
 
 def runner():
     print(translation.translate("Hello world, Arduino!")[0])
+    raise StopIteration
 
 App.run(user_loop=runner)
 ```
