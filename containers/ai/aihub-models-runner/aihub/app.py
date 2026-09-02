@@ -34,7 +34,7 @@ class AIHubApp:
 
     def __init__(
         self,
-        inference_cb: Callable[[np.ndarray], tuple[np.ndarray, dict]],
+        inference_cb: Callable[[np.ndarray], tuple[np.ndarray | None, dict]],
         input_type: str = "gstreamer",
         output_types: list[str] = ["mjpeg"],
         config_cb: Callable[[dict], None] | None = None,
@@ -45,7 +45,9 @@ class AIHubApp:
 
         Args:
             inference_cb: User callback for frame processing. Receives RGB frame,
-                returns processed RGB frame and metadata.
+                returns processed RGB frame and metadata. Metadata-only runners
+                (e.g. OCR) may return None as the frame: sinks then emit the
+                metadata without a video feed.
             input_type: Input source type ("gstreamer" or "websocket").
             output_types: List of output sink types (accepted values are "mjpeg",
                 "websocket"). Defaults to ["mjpeg"].

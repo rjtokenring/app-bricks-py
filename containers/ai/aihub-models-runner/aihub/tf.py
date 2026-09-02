@@ -2,9 +2,12 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
-from ai_edge_litert.interpreter import Delegate, load_delegate
+"""LiteRT delegate loading shared by the AI runner containers."""
+
 import ctypes
 from ctypes.util import find_library
+
+from ai_edge_litert.interpreter import Delegate, load_delegate
 
 
 def load_qnn_delegate(delegate_lib_path: str = "libQnnTFLiteDelegate.so", delegate_options: dict | None = None) -> list[Delegate] | None:
@@ -25,13 +28,13 @@ def load_qnn_delegate(delegate_lib_path: str = "libQnnTFLiteDelegate.so", delega
 
 
 def _has_library(name: str) -> bool:
-    # Step 1 — Try to locate a platform-specific filename
+    # Step 1 - Try to locate a platform-specific filename
     lib = find_library(name)
     if lib is None:
-        # Might already be a full filename/path — try loading directly
+        # Might already be a full filename/path - try loading directly
         lib = name
 
-    # Step 2 — Try loading it
+    # Step 2 - Try loading it
     try:
         ctypes.CDLL(lib)
         return True

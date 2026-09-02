@@ -67,12 +67,13 @@ class WebSocketOutput(OutputSink):
         if self._server:
             self._server.close()
 
-    def send_frame(self, frame: np.ndarray, metadata: dict) -> None:
+    def send_frame(self, frame: np.ndarray | None, metadata: dict) -> None:
         """
         Send a frame to all connected WebSocket clients.
 
         Args:
-            frame: RGB np.ndarray frame.
+            frame: RGB np.ndarray frame, or None for metadata-only runners
+                (the message then carries the metadata and a null frame).
             metadata: dict containing metadata about the frame.
         """
         if not self._clients or not self._loop:
@@ -144,9 +145,13 @@ class WebSocketOutput(OutputSink):
             with self._clients_lock:
                 self._clients.discard(client)
 
-    def _encode_frame(self, frame: np.ndarray, metadata: dict) -> str | None:
+    def _encode_frame(self, frame: np.ndarray | None, metadata: dict) -> str | None:
         """Encode frame to JSON message."""
         import cv2
+
+        # Metadata-only runners produce no image: send the metadata alone.
+        if frame is None:
+            return json.dumps({"frame": None, "metadata": metadata})
 
         height, width = frame.shape[:2]
 

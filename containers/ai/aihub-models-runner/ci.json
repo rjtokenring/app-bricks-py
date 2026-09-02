@@ -11,6 +11,7 @@
   },
   "downstream": [
     "gesture-recognition-runner",
+    "ocr-runner",
     "pose-estimation-runner"
   ]
 }

@@ -64,12 +64,14 @@ class OutputSink(ABC):
         pass
 
     @abstractmethod
-    def send_frame(self, frame: np.ndarray, metadata: dict) -> None:
+    def send_frame(self, frame: np.ndarray | None, metadata: dict) -> None:
         """
         Send a processed frame to this output.
 
         Args:
-            frame: RGB np.ndarray to output.
+            frame: RGB np.ndarray to output. None for metadata-only runners:
+                sinks with a metadata channel must still deliver the metadata,
+                video-only sinks must skip the frame without erroring.
             metadata: Dictionary containing additional information about the frame.
         """
         pass

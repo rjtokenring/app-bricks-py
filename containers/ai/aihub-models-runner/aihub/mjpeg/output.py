@@ -64,14 +64,18 @@ class MJPEGOutput(OutputSink):
         """Stop the MJPEG server."""
         self._running = False
 
-    def send_frame(self, frame: np.ndarray, metadata: dict) -> None:
+    def send_frame(self, frame: np.ndarray | None, metadata: dict) -> None:
         """
         Send a frame to the MJPEG server.
 
         Args:
-            frame: RGB np.ndarray frame.
+            frame: RGB np.ndarray frame, or None for metadata-only runners.
             metadata: dict containing metadata about the frame (ignored for MJPEG output).
         """
+        # Metadata-only runners produce no image: nothing to stream.
+        if frame is None:
+            return
+
         # Convert RGB to BGR for OpenCV encoding
         bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 

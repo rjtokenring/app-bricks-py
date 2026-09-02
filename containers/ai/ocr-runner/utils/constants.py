@@ -61,8 +61,3 @@ CHARACTERS = NUMBER + SYMBOL + EN_CHAR
 # in LANG_CHAR is zeroed out of the logits before decoding. For English the two sets
 # are identical, so nothing is filtered.
 LANG_CHAR = CHARACTERS
-
-# --- Drawing ----------------------------------------------------------------
-
-BOX_COLOR = (0, 255, 0)
-BOX_THICKNESS = 2

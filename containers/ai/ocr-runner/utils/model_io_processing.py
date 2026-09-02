@@ -15,19 +15,7 @@ from __future__ import annotations
 import numpy as np
 from ai_edge_litert.interpreter import Delegate, Interpreter
 
-
-def dequantize(tensor: np.ndarray, zero_points: np.ndarray, scales: np.ndarray) -> np.ndarray:
-    """Map an integer LiteRT tensor back to float using its quantization parameters."""
-    if scales is None or len(scales) == 0:
-        return tensor.astype(np.float32)
-    return (tensor.astype(np.float32) - np.asarray(zero_points, dtype=np.float32)) * np.asarray(scales, dtype=np.float32)
-
-
-def quantize(array: np.ndarray, zero_points: np.ndarray, scales: np.ndarray, dtype: np.dtype) -> np.ndarray:
-    """Map a float array onto an integer LiteRT tensor using its quantization parameters."""
-    info = np.iinfo(dtype)
-    quantized = np.round(array / np.asarray(scales, dtype=np.float32)) + np.asarray(zero_points, dtype=np.float32)
-    return np.clip(quantized, info.min, info.max).astype(dtype)
+from aihub.model_io_processing import dequantize, quantize
 
 
 def _detect_layout(shape: tuple[int, ...]) -> str:

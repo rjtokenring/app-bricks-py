@@ -2,55 +2,13 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
-"""Annotation drawing and metadata assembly."""
+"""OCR result metadata assembly."""
 
 from __future__ import annotations
 
-import cv2
 import numpy as np
 
 from utils.bbox_processing import box_4corners, box_xx_yy
-from utils.constants import BOX_COLOR, BOX_THICKNESS
-
-
-def draw_box_from_xyxy(
-    frame: np.ndarray,
-    top_left: tuple[int, int],
-    bottom_right: tuple[int, int],
-    color: tuple[int, int, int] = BOX_COLOR,
-    size: int = BOX_THICKNESS,
-) -> None:
-    """Draw an axis-aligned rectangle on `frame`, in place."""
-    cv2.rectangle(frame, tuple(int(v) for v in top_left), tuple(int(v) for v in bottom_right), color, size)
-
-
-def draw_box_from_corners(
-    frame: np.ndarray,
-    corners: np.ndarray,
-    color: tuple[int, int, int] = BOX_COLOR,
-    size: int = BOX_THICKNESS,
-) -> None:
-    """Draw an arbitrary quadrilateral on `frame`, in place."""
-    cv2.polylines(frame, [np.asarray(corners, dtype=np.int32).reshape(-1, 1, 2)], True, color, size)
-
-
-def draw_detections(frame: np.ndarray, detections: list[dict]) -> None:
-    """
-    Draw the boxes from a metadata `detections` list onto `frame`, in place.
-
-    Parameters
-    ----------
-    frame
-        [H, W, 3] RGB image, annotated in place.
-    detections
-        The 'detections' list produced by `build_metadata`.
-    """
-    for detection in detections:
-        if detection["type"] == "horizontal":
-            x1, y1, x2, y2 = detection["bounding_box_xyxy"]
-            draw_box_from_xyxy(frame, (x1, y1), (x2, y2))
-        else:
-            draw_box_from_corners(frame, np.asarray(detection["corners"], dtype=np.int32))
 
 
 def build_metadata(
@@ -82,32 +40,28 @@ def build_metadata(
 
     for box, text, confidence in results_horizontal:
         x_min, x_max, y_min, y_max = (int(v) for v in box)
-        detections.append(
-            {
-                "text": text,
-                "confidence": float(confidence),
-                "bounding_box_xyxy": [x_min, y_min, x_max, y_max],
-                "corners": [[x_min, y_min], [x_max, y_min], [x_max, y_max], [x_min, y_max]],
-                "type": "horizontal",
-            }
-        )
+        detections.append({
+            "text": text,
+            "confidence": float(confidence),
+            "bounding_box_xyxy": [x_min, y_min, x_max, y_max],
+            "corners": [[x_min, y_min], [x_max, y_min], [x_max, y_max], [x_min, y_max]],
+            "type": "horizontal",
+        })
 
     for corners, text, confidence in results_free:
         points = np.asarray(corners, dtype=np.int32).reshape(4, 2)
-        detections.append(
-            {
-                "text": text,
-                "confidence": float(confidence),
-                "bounding_box_xyxy": [
-                    int(points[:, 0].min()),
-                    int(points[:, 1].min()),
-                    int(points[:, 0].max()),
-                    int(points[:, 1].max()),
-                ],
-                "corners": points.tolist(),
-                "type": "free",
-            }
-        )
+        detections.append({
+            "text": text,
+            "confidence": float(confidence),
+            "bounding_box_xyxy": [
+                int(points[:, 0].min()),
+                int(points[:, 1].min()),
+                int(points[:, 0].max()),
+                int(points[:, 1].max()),
+            ],
+            "corners": points.tolist(),
+            "type": "free",
+        })
 
     detections = sort_reading_order(detections)
 

@@ -13,6 +13,9 @@ import os
 import cv2
 import numpy as np
 
+from aihub.image_processing import denormalize_coordinates, resize_pad
+from aihub.tf import load_qnn_delegate
+
 from utils.bbox_processing import box_4corners, box_xx_yy, diff, get_det_boxes, group_text_box
 from utils.constants import (
     CHARACTERS,
@@ -23,11 +26,10 @@ from utils.constants import (
     RECOGNIZER_ARGS,
     RECOGNIZER_MODEL_PATH,
 )
-from utils.draw import build_metadata
-from utils.image_processing import adjust_contrast, denormalize_coordinates, four_point_transform, resize_pad
+from utils.image_processing import adjust_contrast, four_point_transform
+from utils.metadata import build_metadata
 from utils.model_io_processing import LiteRTModel
 from utils.post_processing import CTCLabelConverter
-from utils.tf import load_qnn_delegate
 
 # Load models
 detector = LiteRTModel(
@@ -137,9 +139,7 @@ def detector_postprocess(
     min_size = DETECTOR_ARGS["min_size"]
     if min_size:
         horizontal_list = [i for i in horizontal_list if max(i[1] - i[0], i[3] - i[2]) > min_size]
-        free_list = [
-            i for i in free_list if max(diff([c[0] for c in i]), diff([c[1] for c in i])) > min_size
-        ]
+        free_list = [i for i in free_list if max(diff([c[0] for c in i]), diff([c[1] for c in i])) > min_size]
 
     return horizontal_list, free_list
 
@@ -285,14 +285,10 @@ def recognizer_get_text(
 
     # Re-read anything the recognizer was unsure about, with the contrast pushed up.
     contrast_ths = RECOGNIZER_ARGS["contrast_ths"]
-    low_confidence_indices = [
-        i for i, (_, confidence) in enumerate(predictions) if contrast_ths is not None and confidence < contrast_ths
-    ]
+    low_confidence_indices = [i for i, (_, confidence) in enumerate(predictions) if contrast_ths is not None and confidence < contrast_ths]
     if low_confidence_indices:
         contrast = 1 / contrast_ths if contrast_ths else 1
-        high_contrast_predictions = recognizer_inference(
-            [adjust_contrast(cutout_frames[i], contrast) for i in low_confidence_indices]
-        )
+        high_contrast_predictions = recognizer_inference([adjust_contrast(cutout_frames[i], contrast) for i in low_confidence_indices])
     else:
         high_contrast_predictions = []
 
@@ -310,6 +306,7 @@ def recognizer_get_text(
 
         # The recognizer can hallucinate these tokens when the cutout ends in
         # substantial empty space (padding is always added to the right).
+        # TODO: verify other allucinations like '. Do specific tests for this.
         text = text.strip()
         if text and text[-1] in ("]", "|"):
             text = text[:-1].strip()
@@ -333,9 +330,8 @@ def inference_callback(rgb_frame: np.ndarray) -> tuple[np.ndarray | None, dict]:
 
     Returns:
         tuple[np.ndarray | None, dict]: contains (None, metadata). The frame slot is
-        always None - this pipeline produces text, not an annotated image. Callers that
-        want the boxes drawn can pass metadata['detections'] to utils.draw.draw_detections.
-        metadata contains:
+        always None - this pipeline produces text, not an annotated image, so the
+        output sinks emit the metadata without a video feed. metadata contains:
             - 'text': str, all detected strings joined by newlines, in reading order
             - 'detections': list of dicts, each containing:
                 - 'text': str

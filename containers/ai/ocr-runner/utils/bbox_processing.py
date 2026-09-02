@@ -70,9 +70,7 @@ def get_det_boxes(
     _, link_score = cv2.threshold(linkmap, link_threshold, 1, 0)
 
     text_score_comb = np.clip(text_score + link_score, 0, 1)
-    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-        text_score_comb.astype(np.uint8), connectivity=4
-    )
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(text_score_comb.astype(np.uint8), connectivity=4)
 
     det: list[np.ndarray] = []
     for k in range(1, n_labels):
