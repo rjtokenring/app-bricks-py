@@ -36,9 +36,11 @@ detector = LiteRTModel(
     os.environ.get("EASYOCR_DETECTOR_MODEL", DETECTOR_MODEL_PATH),
     delegates=load_qnn_delegate(),
 )
+# The recognizer runs on CPU: the exported CRNN graph contains a dynamic-sized
+# tensor, which the QNN/HTP delegate (static shapes only) rejects at load time.
+# Move it back to the NPU once the model is re-exported with static shapes.
 recognizer = LiteRTModel(
     os.environ.get("EASYOCR_RECOGNIZER_MODEL", RECOGNIZER_MODEL_PATH),
-    delegates=load_qnn_delegate(),
 )
 
 converter = CTCLabelConverter(CHARACTERS, LANG_CHAR)
