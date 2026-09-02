@@ -48,11 +48,44 @@ class CTCLabelConverter:
         # zeroed out of the probability matrix before decoding.
         lang_char = character if lang_char is None else lang_char
         ignore_char = "".join(set(character) - set(lang_char))
-        self.ignore_char_idx = [self.dict[char] for char in ignore_char]
+        self._lang_ignore_char_idx = [self.dict[char] for char in ignore_char]
+        self.ignore_char_idx = list(self._lang_ignore_char_idx)
 
     @property
     def num_classes(self) -> int:
         return len(self.character)
+
+    def set_allowlist(self, allowlist: str | None) -> None:
+        """
+        Restrict decoding to the characters in `allowlist`.
+
+        Every other character is zeroed out of the probability matrix before decoding,
+        on top of the language filtering configured at construction time. Passing None
+        or an empty string restores the language-only filtering.
+
+        The ignore list is swapped atomically, so it is safe to call while another
+        thread is decoding.
+
+        Parameters
+        ----------
+        allowlist
+            The characters to keep, e.g. "0123456789". Characters the model cannot
+            emit are ignored with a warning.
+        """
+        if not allowlist:
+            self.ignore_char_idx = list(self._lang_ignore_char_idx)
+            return
+
+        allowed = set(allowlist)
+        unknown = allowed - set(self.dict)
+        if unknown:
+            print(f"Warning: allowlist characters not in the model character set are ignored: {''.join(sorted(unknown))!r}")
+        if not (allowed & set(self.dict)):
+            print("Warning: allowlist has no character in common with the model character set; keeping the previous filtering.")
+            return
+
+        lang_ignored = set(self._lang_ignore_char_idx)
+        self.ignore_char_idx = [i for char, i in self.dict.items() if char not in allowed or i in lang_ignored]
 
     def filter_probabilities(self, preds: np.ndarray) -> np.ndarray:
         """

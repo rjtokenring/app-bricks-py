@@ -1,0 +1,24 @@
+services:
+  ocr:
+    image: ${DOCKER_REGISTRY_BASE:-ghcr.io/arduino/}app-bricks/ocr-runner:0.1.0
+    # No video feed: the pipeline produces text metadata only, so the MJPEG output
+    # (and its port) is not enabled at all.
+    entrypoint: [ "/qairt-entrypoint.sh", "python", "main.py", "--input", "websocket", "--output", "websocket" ]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+    devices:
+      - /dev/dma_heap/system
+      - /dev/fastrpc-cdsp
+    volumes:
+      # Mount hexagon firmware
+      - /sys/firmware/devicetree/base/model:/run/device-model
+      # Read-only: /qairt-entrypoint.sh merges it into /usr/share/qcom in the container layer
+      - ${HOST_DSP_INSTALLATION_PATH:-/usr/share/qcom}:/run/host-qcom:ro
+    healthcheck:
+      test: [ "CMD-SHELL", "nc -zv ocr 5001 || exit 1" ]
+      interval: 1s
+      timeout: 2s
+      retries: 30

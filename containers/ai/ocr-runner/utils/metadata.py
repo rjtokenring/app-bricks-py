@@ -33,7 +33,8 @@ def build_metadata(
             - 'text': str
             - 'confidence': float
             - 'bounding_box_xyxy': list [x1, y1, x2, y2] in frame coordinates
-            - 'corners': list of 4 [x, y] pairs in frame coordinates
+            - 'polygon': list of 4 [x, y] vertices in frame coordinates, ordered
+              top-left, top-right, bottom-right, bottom-left
             - 'type': str ('horizontal' or 'free')
     """
     detections: list[dict] = []
@@ -44,7 +45,7 @@ def build_metadata(
             "text": text,
             "confidence": float(confidence),
             "bounding_box_xyxy": [x_min, y_min, x_max, y_max],
-            "corners": [[x_min, y_min], [x_max, y_min], [x_max, y_max], [x_min, y_max]],
+            "polygon": [[x_min, y_min], [x_max, y_min], [x_max, y_max], [x_min, y_max]],
             "type": "horizontal",
         })
 
@@ -59,7 +60,7 @@ def build_metadata(
                 int(points[:, 0].max()),
                 int(points[:, 1].max()),
             ],
-            "corners": points.tolist(),
+            "polygon": points.tolist(),
             "type": "free",
         })
 

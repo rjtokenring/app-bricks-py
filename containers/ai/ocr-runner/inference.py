@@ -43,6 +43,21 @@ recognizer = LiteRTModel(
 
 converter = CTCLabelConverter(CHARACTERS, LANG_CHAR)
 
+
+def apply_config(config: dict) -> None:
+    """Apply a client configuration payload; unknown keys are ignored.
+
+    Supported settings:
+        allowlist (str): Restrict recognition to these characters (e.g. "0123456789").
+            An empty string removes the restriction.
+    """
+    if "allowlist" in config:
+        value = config.get("allowlist")
+        allowlist = str(value) if value else None
+        converter.set_allowlist(allowlist)
+        print(f"config: allowlist set to {allowlist!r}", flush=True)
+
+
 _recognizer_classes = int(recognizer.output_details[0]["shape"][-1])
 if _recognizer_classes != converter.num_classes:
     print(
@@ -337,7 +352,8 @@ def inference_callback(rgb_frame: np.ndarray) -> tuple[np.ndarray | None, dict]:
                 - 'text': str
                 - 'confidence': float
                 - 'bounding_box_xyxy': list [x1, y1, x2, y2] in frame coordinates
-                - 'corners': list of 4 [x, y] pairs in frame coordinates
+                - 'polygon': list of 4 [x, y] vertices in frame coordinates, ordered
+                  top-left, top-right, bottom-right, bottom-left
                 - 'type': str ('horizontal' or 'free')
     """
     grey_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2GRAY)
