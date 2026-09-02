@@ -9,6 +9,7 @@ reimplemented with numpy/OpenCV only - no torch, no easyocr package at runtime.
 """
 
 import os
+import time
 
 import cv2
 import numpy as np
@@ -31,6 +32,15 @@ from utils.metadata import build_metadata
 from utils.model_io_processing import LiteRTModel
 from utils.post_processing import CTCLabelConverter
 
+# Stage-by-stage timing prints, disable with EASYOCR_DEBUG=0.
+DEBUG_TIMING = os.environ.get("EASYOCR_DEBUG", "1") != "0"
+
+
+def _debug(message: str) -> None:
+    if DEBUG_TIMING:
+        print(f"[ocr-debug] {message}", flush=True)
+
+
 # Load models
 detector = LiteRTModel(
     os.environ.get("EASYOCR_DETECTOR_MODEL", DETECTOR_MODEL_PATH),
@@ -39,6 +49,8 @@ detector = LiteRTModel(
 # The recognizer runs on CPU: the exported CRNN graph contains a dynamic-sized
 # tensor, which the QNN/HTP delegate (static shapes only) rejects at load time.
 # Move it back to the NPU once the model is re-exported with static shapes.
+# Note: keep it single-threaded - multi-threading (num_threads=4 on an 8-core
+# machine) was measured almost 2x SLOWER than 1 thread on this quantized graph.
 recognizer = LiteRTModel(
     os.environ.get("EASYOCR_RECOGNIZER_MODEL", RECOGNIZER_MODEL_PATH),
 )
@@ -265,9 +277,19 @@ def recognizer_inference(cutout_frames: list[np.ndarray]) -> list[tuple[str, flo
     if not cutout_frames:
         return []
 
+    t_start = time.perf_counter()
     preds = np.concatenate([recognizer(frame)[0] for frame in cutout_frames], axis=0)
+    t_invoke = time.perf_counter()
     preds_prob = converter.filter_probabilities(preds)
-    return converter.decode_greedy(preds_prob)
+    predictions = converter.decode_greedy(preds_prob)
+    t_decode = time.perf_counter()
+
+    invoke_ms = (t_invoke - t_start) * 1000
+    _debug(
+        f"recognizer: {len(cutout_frames)} frames in {invoke_ms:.0f} ms "
+        f"({invoke_ms / len(cutout_frames):.0f} ms/frame), decode {(t_decode - t_invoke) * 1000:.0f} ms"
+    )
+    return predictions
 
 
 def recognizer_get_text(
@@ -297,13 +319,16 @@ def recognizer_get_text(
     result_free : list[tuple[box_4corners, str, float]]
         (box, text, confidence) per slanted detection.
     """
+    t_start = time.perf_counter()
     boxes, cutout_frames = get_cutouts(img_grey, horizontal_boxes, free_boxes)
+    _debug(f"cutouts: {len(cutout_frames)} prepared in {(time.perf_counter() - t_start) * 1000:.0f} ms")
     predictions = recognizer_inference(cutout_frames)
 
     # Re-read anything the recognizer was unsure about, with the contrast pushed up.
     contrast_ths = RECOGNIZER_ARGS["contrast_ths"]
     low_confidence_indices = [i for i, (_, confidence) in enumerate(predictions) if contrast_ths is not None and confidence < contrast_ths]
     if low_confidence_indices:
+        _debug(f"low-confidence retry: re-reading {len(low_confidence_indices)}/{len(predictions)} cutouts with boosted contrast")
         contrast = 1 / contrast_ths if contrast_ths else 1
         high_contrast_predictions = recognizer_inference([adjust_contrast(cutout_frames[i], contrast) for i in low_confidence_indices])
     else:
@@ -358,19 +383,35 @@ def inference_callback(rgb_frame: np.ndarray) -> tuple[np.ndarray | None, dict]:
                   top-left, top-right, bottom-right, bottom-left
                 - 'type': str ('horizontal' or 'free')
     """
+    t_start = time.perf_counter()
     grey_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2GRAY)
 
     # Run detector
     detector_input, scale, pad = detector_preprocess(rgb_frame)
+    t_preprocess = time.perf_counter()
     detector_output = detector(detector_input)[0]
+    t_invoke = time.perf_counter()
 
     # The exported graph may hand back the score maps channel-first.
     if detector_output.shape[-1] != 2 and detector_output.shape[1] == 2:
         detector_output = detector_output.transpose(0, 2, 3, 1)
 
     horizontal_boxes, free_boxes = detector_postprocess(detector_output[0], scale, pad)
+    t_postprocess = time.perf_counter()
+    _debug(
+        f"detector: preprocess {(t_preprocess - t_start) * 1000:.0f} ms, "
+        f"invoke {(t_invoke - t_preprocess) * 1000:.0f} ms, "
+        f"postprocess {(t_postprocess - t_invoke) * 1000:.0f} ms "
+        f"-> {len(horizontal_boxes)} horizontal + {len(free_boxes)} free boxes"
+    )
 
     # Run recognizer
     result_horizontal, result_free = recognizer_get_text(grey_frame, horizontal_boxes, free_boxes)
+
+    t_end = time.perf_counter()
+    _debug(
+        f"frame total {(t_end - t_start) * 1000:.0f} ms "
+        f"(detector {(t_postprocess - t_start) * 1000:.0f} ms, recognizer {(t_end - t_postprocess) * 1000:.0f} ms)"
+    )
 
     return None, build_metadata(result_horizontal, result_free)
