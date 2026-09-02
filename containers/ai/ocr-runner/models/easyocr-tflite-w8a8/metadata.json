@@ -1,0 +1,89 @@
+{
+    "model_id": "easyocr",
+    "model_name": "EasyOCR",
+    "runtime": "tflite",
+    "precision": "w8a8",
+    "tool_versions": {
+        "qairt": "2.45.0.260326154327"
+    },
+    "model_files": {
+        "detector.tflite": {
+            "inputs": {
+                "image": {
+                    "shape": [
+                        1,
+                        608,
+                        800,
+                        3
+                    ],
+                    "dtype": "uint8",
+                    "quantization_parameters": {
+                        "scale": 0.003921568859368563,
+                        "zero_point": 0
+                    },
+                    "io_type": "image",
+                    "image_metadata": {},
+                    "value_range": [
+                        0.0,
+                        1.0
+                    ]
+                }
+            },
+            "outputs": {
+                "results": {
+                    "shape": [
+                        1,
+                        304,
+                        400,
+                        2
+                    ],
+                    "dtype": "uint8",
+                    "quantization_parameters": {
+                        "scale": 0.004232470877468586,
+                        "zero_point": 12
+                    }
+                }
+            }
+        },
+        "recognizer.tflite": {
+            "inputs": {
+                "image": {
+                    "shape": [
+                        1,
+                        64,
+                        800,
+                        1
+                    ],
+                    "dtype": "uint8",
+                    "quantization_parameters": {
+                        "scale": 0.003920610062777996,
+                        "zero_point": 0
+                    },
+                    "io_type": "image",
+                    "image_metadata": {
+                        "color_format": "grayscale"
+                    },
+                    "value_range": [
+                        0.0,
+                        1.0
+                    ]
+                }
+            },
+            "outputs": {
+                "output_preds": {
+                    "shape": [
+                        1,
+                        199,
+                        97
+                    ],
+                    "dtype": "uint8",
+                    "quantization_parameters": {
+                        "scale": 0.2553488612174988,
+                        "zero_point": 127
+                    }
+                }
+            }
+        }
+    },
+    "use_case": "Image To Text"
+}
