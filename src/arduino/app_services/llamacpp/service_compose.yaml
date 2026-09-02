@@ -1,6 +1,6 @@
 services:
   llamacpp-models-runner:
-    image: ${DOCKER_REGISTRY_BASE:-ghcr.io/arduino/}app-bricks/llamacpp-npu-runner:0.12.1
+    image: ${DOCKER_REGISTRY_BASE:-ghcr.io/arduino/}app-bricks/llamacpp-npu-runner:0.13.0rc1
     logging:
       driver: "json-file"
       options:
@@ -39,7 +39,7 @@ services:
         soft: 65536
         hard: 65536
     oom_score_adj: -500
-    mem_limit: 10g
+    mem_limit: 12g
     memswap_limit: 10g
     shm_size: 2g
     devices:

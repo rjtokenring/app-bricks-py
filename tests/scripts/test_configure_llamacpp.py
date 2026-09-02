@@ -2,10 +2,17 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
-"""Unit tests for the Hexagon session sizing of the llama.cpp NPU runner."""
+"""Unit tests for the llama.cpp runners' configure-llamacpp.py scripts.
+
+Covers the Hexagon session sizing of the NPU runner, and — for both runners, whose
+scripts deliberately duplicate the code — the served model names, which are derived
+from the ".arduino_metadata.yaml" download records rather than from a catalog baked
+into the images.
+"""
 
 from __future__ import annotations
 
+import configparser
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,12 +20,20 @@ from types import SimpleNamespace
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "containers" / "ai" / "llamacpp-npu-runner" / "scripts" / "configure-llamacpp.py"
+NPU_SCRIPT = REPO_ROOT / "containers" / "ai" / "llamacpp-npu-runner" / "scripts" / "configure-llamacpp.py"
+CPU_SCRIPT = REPO_ROOT / "containers" / "ai" / "llamacpp-runner" / "scripts" / "configure-llamacpp.py"
 
-# The script is not importable by name (it lives outside a package and has a dash in it).
-_spec = importlib.util.spec_from_file_location("configure_llamacpp", SCRIPT)
-configure_llamacpp = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(configure_llamacpp)
+
+def _load_script(script: Path, name: str):
+    # The scripts are not importable by name (they live outside a package and have a dash).
+    spec = importlib.util.spec_from_file_location(name, script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+configure_llamacpp = _load_script(NPU_SCRIPT, "configure_llamacpp")
+configure_llamacpp_cpu = _load_script(CPU_SCRIPT, "configure_llamacpp_cpu")
 
 model_ndev = configure_llamacpp.model_ndev
 detect_hexagon_ndev = configure_llamacpp.detect_hexagon_ndev
@@ -62,16 +77,23 @@ def test_e4b_pinned_to_two_sessions(name, gguf_gb, ctx_size):
     "name, gguf_gb, ctx_size, expected",
     [
         # Default profile: sized by GGUF size, the pins do not leak onto other models.
+        # The 4B bucket takes 3 sessions: at 16k the KV cache of Qwen3-4B-Instruct-2507
+        # is a 1 GiB buffer per session on 2 sessions, which fastrpc refuses to map even
+        # with free RAM (measured on a 21q: fails on 2, runs on 3).
         ("Qwen3.5-0.8B-Q4_0", 0.51, 16384, 1),
-        ("Qwen3.5-4B-Q4_0", 2.78, 16384, 2),
+        ("Qwen3-4B-Instruct-2507-Q4_0", 2.38, 16384, 3),
+        ("Qwen3.5-4B-Q4_0", 2.78, 16384, 3),
         ("gemma-4-12b-it-Q4_0", 6.98, 16384, 4),
-        # Small-context profile: reproduces the measurements in the table.
+        # Small-context profile: the 1-session measurements hold; Qwen3-8B was re-measured
+        # on the September 2025 build (fails on 2 sessions, runs on 3); anything bigger is
+        # unmeasured on that build and takes all 4 sessions.
         ("Qwen3.5-0.8B-Q4_0", 0.51, 4096, 1),
         ("Qwen3-4B-2507-Q4_0", 2.38, 4096, 1),
         ("Qwen3.5-4B-Q4_0", 2.78, 4096, 1),
-        ("Qwen3-8B-Q4_0", 4.79, 4096, 2),
-        ("Qwen3.5-9B-Q4_0", 5.74, 4096, 2),
-        ("gemma-4-12b-it-Q4_0", 6.98, 4096, 3),
+        ("Qwen3-8B-Q4_0", 4.79, 4096, 3),
+        ("granite-4.2-8b-Q4_0", 5.06, 4096, 4),
+        ("Qwen3.5-9B-Q4_0", 5.74, 4096, 4),
+        ("gemma-4-12b-it-Q4_0", 6.98, 4096, 4),
     ],
 )
 def test_unpinned_models_are_sized_by_gguf_size(name, gguf_gb, ctx_size, expected):
@@ -96,10 +118,11 @@ def _install_models(monkeypatch, sizes_gb: dict[str, float]) -> dict[str, dict]:
 
 
 def test_detect_hexagon_ndev_does_not_trigger_the_context_cap(monkeypatch, capsys):
-    """The set of models from the ventunoq board needs 2 sessions, not 4.
+    """The set of models from the ventunoq board needs 3 sessions, not 4.
 
-    Four sessions is what makes run-model-router.sh cap the context to 4k, so pinning E4B to
-    two sessions has to keep the whole set below that threshold at the default context.
+    Four sessions is what makes run-model-router.sh cap the context to 4k, so the 4B bucket
+    (3 sessions, for the 16k KV cache) and the E4B pin have to keep the whole set below
+    that threshold at the default context.
     """
     models = _install_models(
         monkeypatch,
@@ -111,7 +134,7 @@ def test_detect_hexagon_ndev_does_not_trigger_the_context_cap(monkeypatch, capsy
         },
     )
 
-    assert detect_hexagon_ndev(models, 16384) == 2
+    assert detect_hexagon_ndev(models, 16384) == 3
 
     diagnostics = capsys.readouterr().err
     assert "gemma-4-E2B_q4_0-it: 3.35 GB, pinned to 1 session" in diagnostics
@@ -148,6 +171,29 @@ def test_the_ventunoq_model_set_keeps_the_full_context(monkeypatch):
     assert detect_ctx_size(models, 16384) == 16384
 
 
+def test_qwen3_8b_gets_three_sessions_at_the_capped_context(monkeypatch, capsys):
+    """Regression for the 21q board set: Qwen3-8B caps the context to 4k, and at 4k it
+    fails to load on 2 sessions on the September 2025 build but runs on 3 (measured),
+    so the whole set has to come up with 3."""
+    models = _install_models(
+        monkeypatch,
+        {
+            "Qwen3-0.6B-Q3_K_S": 0.32,
+            "Qwen3-0.6B-Q4_0": 0.38,
+            "Qwen3.5-4B-Q4_0-pure": 2.38,
+            "Qwen_Qwen3-8B-Q4_0": 4.79,
+            "Qwen_Qwen3.5-4B-Q4_0": 2.78,
+            "gemma-3-1b-it-Q4_0": 0.72,
+            "gemma-4-E2B_q4_0-it": 3.35,
+            "gemma-4-E4B_q4_0-it": 5.15,
+        },
+    )
+
+    assert detect_ctx_size(models, 16384) == 4096
+    assert detect_hexagon_ndev(models, 4096) == 3
+    assert "Qwen_Qwen3-8B-Q4_0: 4.79 GB, requires 3 sessions" in capsys.readouterr().err
+
+
 def test_a_big_non_exempt_model_still_caps_the_context(monkeypatch, capsys):
     """The context is server-wide: a big model caps it even next to the exempt gemmas."""
     models = _install_models(monkeypatch, {"gemma-4-E4B_q4_0-it": 5.15, "gemma-4-12b-it-Q4_0": 6.98})
@@ -179,3 +225,113 @@ def test_detect_hexagon_ndev_ignores_unreadable_models(monkeypatch, capsys):
 
     assert detect_hexagon_ndev(models, 4096) == 2
     assert "missing-model: cannot read size" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# Served model names, from the ".arduino_metadata.yaml" download records
+#
+# Both runner scripts carry the same (duplicated) naming code, so every test runs
+# against both: a divergence between the two images is itself a bug.
+# --------------------------------------------------------------------------- #
+@pytest.fixture(params=["npu-runner", "cpu-runner"])
+def runner(request):
+    return {"npu-runner": configure_llamacpp, "cpu-runner": configure_llamacpp_cpu}[request.param]
+
+
+def _gguf(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\0")
+    return path
+
+
+def _write_records(directory: Path, *records):
+    """A ".arduino_metadata.yaml" the way the models-downloader writes it."""
+    lines = ["models:"]
+    for origin, files in records:
+        lines.append(f"- model_origin: {origin}")
+        lines.append(f"  files: [{', '.join(files)}]")
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / ".arduino_metadata.yaml").write_text("\n".join(lines) + "\n")
+
+
+def test_a_file_without_a_record_keeps_its_stem(runner, tmp_path):
+    """The fallback: no ".arduino_metadata.yaml" means an out-of-the-box model."""
+    gguf = _gguf(tmp_path / "google" / "gemma-4-E2B-it-qat-q4_0-gguf" / "gemma-4-E2B_q4_0-it.gguf")
+    assert runner.gguf_model_name(gguf, tmp_path) == "gemma-4-E2B_q4_0-it"
+
+
+def test_a_curated_download_keeps_its_stem(runner, tmp_path):
+    repo = tmp_path / "google" / "gemma-4-E2B-it-qat-q4_0-gguf"
+    gguf = _gguf(repo / "gemma-4-E2B_q4_0-it.gguf")
+    _write_records(repo, ("built_in", ["gemma-4-E2B_q4_0-it.gguf"]))
+    assert runner.gguf_model_name(gguf, tmp_path) == "gemma-4-E2B_q4_0-it"
+
+
+def test_a_user_download_is_named_by_its_path(runner, tmp_path):
+    """Ad-hoc downloads carry the repository in the name, so two same-named files
+    from different owners never collide (mirrors the models-downloader listing id)."""
+    repo = tmp_path / "unsloth" / "Qwen3-0.6B-GGUF"
+    gguf = _gguf(repo / "Qwen3-0.6B-Q4_0.gguf")
+    _write_records(repo, ("user", ["Qwen3-0.6B-Q4_0.gguf"]))
+    assert runner.gguf_model_name(gguf, tmp_path) == "unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_0"
+
+
+def test_the_record_is_found_above_a_nested_quantization_folder(runner, tmp_path):
+    """Some repositories nest their files per quantization; the record stays at the
+    repository directory and lists the nested relative path."""
+    repo = tmp_path / "org" / "repo-GGUF"
+    gguf = _gguf(repo / "Q4_0" / "model.gguf")
+    _write_records(repo, ("user", ["Q4_0/model.gguf"]))
+    assert runner.gguf_model_name(gguf, tmp_path) == "org/repo-GGUF/Q4_0/model"
+
+
+def test_each_quantization_answers_to_its_own_record(runner, tmp_path):
+    """A curated and an ad-hoc quantization share the repository directory."""
+    repo = tmp_path / "unsloth" / "Qwen3-0.6B-GGUF"
+    q4 = _gguf(repo / "Qwen3-0.6B-Q4_0.gguf")
+    q8 = _gguf(repo / "Qwen3-0.6B-Q8_0.gguf")
+    _write_records(
+        repo,
+        ("built_in", ["Qwen3-0.6B-Q4_0.gguf"]),
+        ("user", ["Qwen3-0.6B-Q8_0.gguf"]),
+    )
+    assert runner.gguf_model_name(q4, tmp_path) == "Qwen3-0.6B-Q4_0"
+    assert runner.gguf_model_name(q8, tmp_path) == "unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0"
+
+
+def test_an_unclaimed_sibling_counts_as_out_of_the_box(runner, tmp_path):
+    """A GGUF no record names (installed by something that recorded nothing) falls
+    back to the out-of-the-box naming, never to a sibling's record."""
+    repo = tmp_path / "unsloth" / "Qwen3-0.6B-GGUF"
+    q8 = _gguf(repo / "Qwen3-0.6B-Q8_0.gguf")
+    _write_records(repo, ("user", ["Qwen3-0.6B-Q4_0.gguf"]))
+    assert runner.gguf_model_name(q8, tmp_path) == "Qwen3-0.6B-Q8_0"
+
+
+def test_unreadable_metadata_degrades_to_out_of_the_box(runner, tmp_path):
+    repo = tmp_path / "unsloth" / "Qwen3-0.6B-GGUF"
+    gguf = _gguf(repo / "Qwen3-0.6B-Q4_0.gguf")
+    repo.joinpath(".arduino_metadata.yaml").write_text("a: b: c\n")
+    assert runner.gguf_model_name(gguf, tmp_path) == "Qwen3-0.6B-Q4_0"
+
+
+def test_models_ini_serves_each_model_under_its_derived_name(runner, tmp_path, capsys):
+    """End to end: one curated and one ad-hoc install become two sections, and the
+    mmproj companion in the ad-hoc repository is attached to its model."""
+    curated = tmp_path / "google" / "gemma-4-E2B-it-qat-q4_0-gguf"
+    _gguf(curated / "gemma-4-E2B_q4_0-it.gguf")
+    _write_records(curated, ("built_in", ["gemma-4-E2B_q4_0-it.gguf"]))
+    adhoc = tmp_path / "unsloth" / "gemma-4-E4B-it-GGUF"
+    _gguf(adhoc / "gemma-4-E4B-it-Q4_0.gguf")
+    _gguf(adhoc / "mmproj-BF16.gguf")
+    _write_records(adhoc, ("user", ["gemma-4-E4B-it-Q4_0.gguf", "mmproj-BF16.gguf"]))
+
+    runner.generate_models_ini(tmp_path)
+
+    config = configparser.ConfigParser()
+    config.read(tmp_path / "models.ini")
+    assert sorted(config.sections()) == [
+        "gemma-4-E2B_q4_0-it",
+        "unsloth/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_0",
+    ]
+    assert config["unsloth/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_0"]["mmproj"].endswith("mmproj-BF16.gguf")
