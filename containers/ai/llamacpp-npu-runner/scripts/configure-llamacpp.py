@@ -204,7 +204,7 @@ def read_gguf(path: Path):
             if type_id not in types:
                 # Sizing a tensor of an unknown type as zero bytes would under-count the
                 # model and start the server with too few sessions to load it. Refusing
-                # the header instead falls back to sizing by file size, see model_sizing().
+                # the header instead falls back to sizing by file size, see model_sizings().
                 raise ValueError(f"unknown ggml tensor type {type_id} for tensor {name!r}")
             type_name, block, block_bytes = types[type_id]
             tensors.append(Tensor(name, type_name, math.prod(dimensions) // block * block_bytes))
@@ -281,20 +281,39 @@ def kv_element_bytes(which: str) -> float:
     return KV_TYPE_BYTES.get(kv_type(which), KV_TYPE_BYTES["f32"])
 
 
-# The shape llama-server runs at, from service_compose.yaml: the slot count is left to
-# llama-server, which auto-sizes it to 4, and the micro-batch comes from LLAMA_ARG_UBATCH.
-# Both decide how many cells a sliding-window KV cache holds, see KvLayer.cells().
-N_SEQ_MAX = 4
-N_UBATCH = 256
+# The shape llama-server runs at, which decides how many cells a sliding-window KV cache
+# holds (see KvLayer.cells()). Both are read from the environment the server will see, with
+# llama-server's own defaults behind them: LLAMA_ARG_N_PARALLEL unset means the slot count
+# is auto-sized, which comes to 4, and service_compose.yaml sets LLAMA_ARG_UBATCH.
+DEFAULT_N_SEQ_MAX = 4
+DEFAULT_N_UBATCH = 256
 
-# The Hexagon backend holds every quantization but the K-quants, which it cannot repack
-# with the runner's default GGML_HEXAGON_KQUANT_STORAGE: those stay on the CPU.
+
+def env_int(name: str, default: int) -> int:
+    """A positive integer from the environment, or *default* when unset or not one."""
+    try:
+        value = int(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def n_seq_max() -> int:
+    return env_int("LLAMA_ARG_N_PARALLEL", DEFAULT_N_SEQ_MAX)
+
+
+def n_ubatch() -> int:
+    return env_int("LLAMA_ARG_UBATCH", DEFAULT_N_UBATCH)
+
+
+# The Hexagon backend holds every quantization but the K-quants, which it does not repack:
+# those stay on the CPU.
 K_QUANT_SUFFIX = "_K"
 
 # A hybrid model (Qwen3.5, LFM2) keeps a recurrent state per sequence on the NPU next to
 # the KV cache of its attention layers. Its size follows the architecture rather than the
-# context and measured between 1 and 201 MiB across the models measured, so it is covered by a flat
-# allowance instead of being derived from the ssm.* metadata.
+# context, and measured between 1 and 201 MiB, so it is covered by a flat allowance instead
+# of being derived from the ssm.* metadata.
 RECURRENT_STATE_ALLOWANCE = 256 * MIB
 
 
@@ -314,7 +333,7 @@ class KvLayer(NamedTuple):
         """
         if self.window <= 0:
             return ctx_size
-        return min(ctx_size, N_SEQ_MAX * self.window + N_UBATCH)
+        return min(ctx_size, n_seq_max() * self.window + n_ubatch())
 
     def bytes(self, ctx_size: int) -> int:
         return self.bytes_per_cell * self.cells(ctx_size)
@@ -354,12 +373,17 @@ class ModelShape(NamedTuple):
                 return count
         return MAX_SESSIONS
 
+    def fits(self, ctx_size: int) -> bool:
+        """Whether the model fits the budget on any number of sessions at all."""
+        return self.session_bytes(ctx_size, MAX_SESSIONS) <= SESSION_BUDGET
+
     def describe(self, ctx_size: int) -> str:
         """How this model was sized, for the diagnostics."""
+        per_session = self.session_bytes(ctx_size, self.sessions_needed(ctx_size)) / MIB
         return (
             f"{self.npu_weight_bytes / MIB:.0f} MiB on the NPU"
             f" + {self.kv_cache_bytes(ctx_size) / MIB:.0f} MiB of {kv_cache_description()} KV cache"
-            f" -> {self.session_bytes(ctx_size, self.sessions_needed(ctx_size)) / MIB:.0f} MiB per session"
+            f" -> {per_session:.0f} MiB per session" + ("" if self.fits(ctx_size) else f", over budget even on {sessions(MAX_SESSIONS)}")
         )
 
 
@@ -379,13 +403,23 @@ FALLBACK_SESSIONS_BY_GGUF_GB = ((3.5, 4), (1.5, 3))
 FALLBACK_SESSIONS_BY_GGUF_GB_SMALL_CTX = ((5.0, 4), (3.5, 3))
 FALLBACK_SMALL_CTX_SIZE = 4096
 
+# The models the tables get wrong and the sessions they were pinned to, matched as a
+# substring of the model name so that every quantization is covered. The matformer gemmas
+# put a third of their bytes on the NPU, so sizing them by file over-allocates; at these
+# counts they also never trigger the context cap, which is what the tables would do.
+FALLBACK_PINS = (("gemma-4-E2B", 1), ("gemma-4-E4B", 2))
+
 
 class FileSizeSizing(NamedTuple):
-    """Sizing for a model that could only be measured by the size of its file."""
+    """Sizing for a model that could only be measured by its name and the size of its file."""
 
+    name: str
     gguf_bytes: int
 
     def sessions_needed(self, ctx_size: int) -> int:
+        for pinned, count in FALLBACK_PINS:
+            if pinned in self.name:
+                return count
         table = FALLBACK_SESSIONS_BY_GGUF_GB_SMALL_CTX if 0 < ctx_size <= FALLBACK_SMALL_CTX_SIZE else FALLBACK_SESSIONS_BY_GGUF_GB
         for threshold, count in table:
             if self.gguf_bytes / GB > threshold:
@@ -393,7 +427,8 @@ class FileSizeSizing(NamedTuple):
         return 1
 
     def describe(self, ctx_size: int) -> str:
-        return f"{self.gguf_bytes / GB:.2f} GB on disk, sized by file size"
+        pinned = any(name in self.name for name, _ in FALLBACK_PINS)
+        return f"{self.gguf_bytes / GB:.2f} GB on disk, {'pinned by name' if pinned else 'sized by file size'}"
 
 
 def npu_weight_bytes(tensors) -> int:
@@ -550,7 +585,7 @@ def model_sizings(models):
         except Exception as e:
             reason = f"{type(e).__name__}: {e}"
         try:
-            fallback = FileSizeSizing(path.stat().st_size)
+            fallback = FileSizeSizing(name, path.stat().st_size)
         except OSError as e:
             print(f"  {name}: cannot read it at all ({e}), ignoring it", file=sys.stderr)
             continue

@@ -135,8 +135,7 @@ def attention_model(
 
 
 def test_the_npu_holds_every_quantization_but_the_k_quants(tmp_path):
-    """K-quants stay on the CPU: the Hexagon backend cannot repack them with the
-    runner's default GGML_HEXAGON_KQUANT_STORAGE."""
+    """K-quants stay on the CPU: the Hexagon backend does not repack them."""
     gguf = write_gguf(
         tmp_path / "m.gguf",
         {"general.architecture": "llama", "llama.block_count": 1},
@@ -217,7 +216,7 @@ def test_a_windowed_layer_stops_growing_at_its_window(tmp_path):
     gguf = attention_model(tmp_path / "m.gguf", layers=8, kv_heads=1, head_size=256, window=512)
 
     shape = read_model_shape(gguf)
-    cells = configure_llamacpp.N_SEQ_MAX * 512 + configure_llamacpp.N_UBATCH
+    cells = configure_llamacpp.DEFAULT_N_SEQ_MAX * 512 + configure_llamacpp.DEFAULT_N_UBATCH
 
     assert shape.kv_cache_bytes(16384) == 8 * 1 * 512 * 2 * cells
     assert shape.kv_cache_bytes(16384) == shape.kv_cache_bytes(8192)
@@ -368,31 +367,50 @@ def test_a_model_that_cannot_be_read_is_sized_by_its_file_size(tmp_path, capsys)
     """The fallback tier: the sizing the runner used before it read headers. Skipping the
     model would be the one unsafe outcome, since the server would then come up with too
     few sessions to load it."""
-    big = tmp_path / "big.gguf"
-    big.write_bytes(b"GGUF" + bytes(64))  # a plausible magic and nothing else
-    with open(big, "r+b") as f:
-        f.truncate(int(4.8 * 10**9))
+    small = tmp_path / "small.gguf"
+    small.write_bytes(b"GGUF" + bytes(64))  # a plausible magic and nothing else
     models = configure_llamacpp.find_models(tmp_path)
 
-    assert detect_hexagon_sessions(models, 4096) == 3
+    assert detect_hexagon_sessions(models, 4096) == 1
 
     diagnostics = capsys.readouterr().err
     assert "cannot size it from its GGUF header" in diagnostics
     assert "falling back to its file size" in diagnostics
-    assert "4.80 GB on disk, sized by file size" in diagnostics
+    assert "0.00 GB on disk, sized by file size" in diagnostics
+    # ... and a big one lands on the tables (sized without a file: see the next test)
+    assert configure_llamacpp.FileSizeSizing("big", int(4.8 * 10**9)).sessions_needed(4096) == 3
 
 
 def test_the_file_size_fallback_reproduces_the_tables_it_came_from():
     """The thresholds the runner shipped before headers were read, unchanged."""
-    sizing = configure_llamacpp.FileSizeSizing
 
-    assert sizing(int(0.5 * 10**9)).sessions_needed(16384) == 1
-    assert sizing(int(2.4 * 10**9)).sessions_needed(16384) == 3
-    assert sizing(int(4.8 * 10**9)).sessions_needed(16384) == 4
+    def sizing(gigabytes):
+        return configure_llamacpp.FileSizeSizing("some-model", int(gigabytes * 10**9))
+
+    assert sizing(0.5).sessions_needed(16384) == 1
+    assert sizing(2.4).sessions_needed(16384) == 3
+    assert sizing(4.8).sessions_needed(16384) == 4
     # the small-context table is more generous, as it was
-    assert sizing(int(2.4 * 10**9)).sessions_needed(4096) == 1
-    assert sizing(int(4.8 * 10**9)).sessions_needed(4096) == 3
-    assert sizing(int(5.5 * 10**9)).sessions_needed(4096) == 4
+    assert sizing(2.4).sessions_needed(4096) == 1
+    assert sizing(4.8).sessions_needed(4096) == 3
+    assert sizing(5.5).sessions_needed(4096) == 4
+
+
+def test_the_file_size_fallback_keeps_the_gemma_pins(tmp_path, capsys):
+    """The tables over-allocate the matformer gemmas by a factor of three, so the sizing
+    they shipped with pinned those by name; an unreadable gemma must land there too rather
+    than on the table, which would cap the whole server's context for it."""
+    sizing = configure_llamacpp.FileSizeSizing
+    for name, gigabytes, pinned in (("gemma-4-E2B_q4_0-it", 3.35, 1), ("gemma-4-E4B_q4_0-it", 5.15, 2), ("gemma-4-E4B-Q8_0", 10.5, 2)):
+        for ctx_size in CTX_SIZES:
+            assert sizing(name, int(gigabytes * 10**9)).sessions_needed(ctx_size) == pinned, name
+    # through the runner's own path, on a file whose header cannot be read
+    (tmp_path / "gemma-4-E4B_q4_0-it.gguf").write_bytes(b"GGUF" + bytes(64))
+    models = configure_llamacpp.find_models(tmp_path)
+
+    assert detect_hexagon_sessions(models, 16384) == 2
+    assert detect_ctx_size(models, 16384) == 16384
+    assert "pinned by name" in capsys.readouterr().err
 
 
 def test_a_missing_file_is_ignored_rather_than_guessed(tmp_path, capsys):
@@ -456,6 +474,23 @@ def test_an_unrecognised_cache_type_is_sized_as_the_largest(tmp_path, monkeypatc
     monkeypatch.setenv("LLAMA_ARG_CACHE_TYPE_V", "something-new")
 
     assert read_model_shape(gguf).kv_cache_bytes(4096) == 512 * MIB * 2
+
+
+def test_the_windowed_cache_follows_the_configured_batch_and_slots(tmp_path, monkeypatch):
+    """A sliding-window cache holds n_seq_max * window + n_ubatch cells, and both come
+    from the environment the server will see: a bigger micro-batch or more slots means a
+    bigger cache, and sizing for the defaults would under-count it."""
+    gguf = attention_model(tmp_path / "m.gguf", layers=8, kv_heads=1, head_size=256, window=512)
+    per_cell = 8 * 1 * 512 * 2
+
+    monkeypatch.setenv("LLAMA_ARG_UBATCH", "1024")
+    monkeypatch.setenv("LLAMA_ARG_N_PARALLEL", "8")
+    assert read_model_shape(gguf).kv_cache_bytes(16384) == per_cell * (8 * 512 + 1024)
+
+    # Unset, or not a positive number, means llama-server's own defaults.
+    monkeypatch.setenv("LLAMA_ARG_UBATCH", "auto")
+    monkeypatch.delenv("LLAMA_ARG_N_PARALLEL")
+    assert read_model_shape(gguf).kv_cache_bytes(16384) == per_cell * (4 * 512 + 256)
 
 
 def test_a_q8_0_cache_buys_back_a_session_on_a_kv_heavy_model(tmp_path):
