@@ -12,8 +12,9 @@ and `easyocr/config.py` (JaidedAI/EasyOCR).
 
 # w8a8, the quantized export the Hexagon NPU runs natively. ai-hub also publishes a float
 # variant, deliberately not used here: same size on disk, ~2x slower on the CPU, and on the
-# HTP it only runs as emulated fp16. The .onnx/.data pairs are fetched and hash-checked by
-# tools/download_models.py; metadata.json (quantization parameters) is tracked in git.
+# HTP it only runs as emulated fp16. Each graph is a .onnx plus its external .data weights,
+# with the boundary quantization parameters in metadata.json; the compiled HTP context
+# binaries (<model>.qnn_ctx.onnx, from tools/compile_htp_context.py) sit next to them.
 MODEL_DIR = "models/easyocr-onnx-w8a8"
 DETECTOR_MODEL_PATH = f"{MODEL_DIR}/detector.onnx"
 RECOGNIZER_MODEL_PATH = f"{MODEL_DIR}/recognizer.onnx"

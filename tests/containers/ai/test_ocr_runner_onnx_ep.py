@@ -8,7 +8,7 @@ DSP library path selection and the quantized I/O wrapper.
 onnxruntime is not a test dependency, so the modules are loaded standalone by file path
 with a stub `onnxruntime` (and, where needed, `onnxruntime_qnn`) module in sys.modules.
 Only the pure-Python paths are exercised: everything that opens a real session is out of
-scope here and is what tools/check_ep.py measures on the board.
+scope here and is what tools/compile_htp_context.py measures on the board.
 """
 
 from __future__ import annotations

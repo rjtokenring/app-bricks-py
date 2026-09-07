@@ -82,7 +82,7 @@ _debug(
     + (
         " (measured)"
         if detector.placement or recognizer.placement
-        else " (attached, not verified; run tools/check_ep.py or set EASYOCR_QNN_VERIFY=1)"
+        else " (attached, not verified; run tools/compile_htp_context.py or set EASYOCR_QNN_VERIFY=1)"
     )
 )
 

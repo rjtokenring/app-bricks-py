@@ -9,16 +9,14 @@ FROM ${REGISTRY}app-bricks/aihub-models-runner:${BASE_IMAGE_VERSION}
 
 ARG DEBIAN_FRONTEND=noninteractive
 
+# Code, ONNX models and - once compiled on the board with tools/compile_htp_context.py -
+# the HTP context binaries next to them.
 COPY . .
 
 # requirements.txt is a hash-locked set for linux aarch64 / CPython 3.13 (see
 # requirements.in): --require-hashes refuses anything not listed there, so the
-# onnxruntime / onnxruntime-qnn (QAIRT) pair the models' HTP context binaries were
-# compiled against cannot drift under a rebuild.
-#
-# The ONNX models are not tracked in git (98 MB); download_models.py fetches the
-# ai-hub release zip and verifies it against the pinned hash and models/.../SHA256SUMS.
+# onnxruntime / onnxruntime-qnn (QAIRT) pair the HTP context binaries were compiled
+# against cannot drift under a rebuild.
 RUN python -m pip install --no-cache-dir --require-hashes -r requirements.txt \
-    && python tools/download_models.py \
     && python -m compileall /opt/venv \
     && rm requirements.txt requirements.in
