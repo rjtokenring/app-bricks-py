@@ -4,7 +4,14 @@
 
 """Unit tests for ``common/gguf_naming.py``."""
 
-from common.gguf_naming import catalog_gguf_declarations, declared_gguf_files, gguf_model_name
+import os
+
+import pytest
+
+from common.gguf_naming import GGUF_SUFFIX, catalog_gguf_declarations, declared_gguf_files, gguf_model_name
+from common.models_list import load_models_list
+
+REAL_MODELS_LIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "models", "models-list.yaml"))
 
 GEMMA_URL = "https://huggingface.co/google/gemma-gguf/blob/abc123/gemma-Q4_0.gguf"
 
@@ -106,3 +113,24 @@ def test_catalog_gguf_declarations_reads_a_models_list(tmp_path):
         '              model_directory: "google/gemma-gguf"\n'
     )
     assert catalog_gguf_declarations(str(yaml_path)) == [("google/gemma-gguf", "gemma-Q4_0.gguf", "llamacpp:gemma-Q4_0")]
+
+
+@pytest.mark.skipif(not os.path.isfile(REAL_MODELS_LIST), reason="models/models-list.yaml not available")
+def test_every_curated_llamacpp_entry_is_named_after_its_gguf_file():
+    """Every curated llamacpp entry id must be ``llamacpp:<gguf stem>``.
+
+    A curated download is served by llama-server under the models.ini section named
+    after its file stem (``gguf_model_name``), while the LLM/VLM brick asks for the
+    part of the entry id after "llamacpp:". An entry whose id no longer matches the
+    file its model_url pins — an id left behind when the URL was repointed at another
+    repository — installs fine and then answers to nothing at runtime.
+    """
+    declarations = declared_gguf_files(load_models_list(REAL_MODELS_LIST))
+    checked = 0
+    for _directory, filename, model_id in declarations:
+        if filename is None:  # a compact key pinning only a quantization names no file
+            continue
+        stem = filename[: -len(GGUF_SUFFIX)]
+        assert model_id == f"llamacpp:{stem}", f"{model_id} pins {filename}: id must be llamacpp:{stem}"
+        checked += 1
+    assert checked > 0
