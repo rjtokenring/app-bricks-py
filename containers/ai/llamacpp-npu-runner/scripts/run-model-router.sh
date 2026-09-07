@@ -11,37 +11,42 @@ echo "Starting LLama server..."
 export LD_LIBRARY_PATH=/opt/pkg-snapdragon/lib
 export ADSP_LIBRARY_PATH=/opt/pkg-snapdragon/lib
 
-# Number of Hexagon sessions required by the installed models, estimated from the size of
-# their GGUF files: more than 1 means at least one model too big for a single session. The
-# KV cache lives on the DSP domains together with the weights, so the sizing depends on the
-# context: at 4k and below the models are measured to need fewer sessions.
-DETECTED_NDEV="$(python3 /configure-llamacpp.py /models --print-ndev --ctx "${LLAMA_ARG_CTX_SIZE:-0}")"
+# The KV cache lives on the DSP domains together with the weights, so a model big enough to
+# need several sessions leaves no room for a large context: configure-llamacpp.py caps the
+# context for those, exempting the models it knows hold it. A context that is unset or not a
+# number is left to llama-server, and passed as 0 so that nothing is capped.
+REQUESTED_CTX_SIZE="${LLAMA_ARG_CTX_SIZE:-0}"
+[[ "${REQUESTED_CTX_SIZE}" =~ ^[0-9]+$ ]] || REQUESTED_CTX_SIZE=0
+
+EFFECTIVE_CTX_SIZE="$(python3 /configure-llamacpp.py /models --print-ctx --ctx "${REQUESTED_CTX_SIZE}")"
+EFFECTIVE_CTX_SIZE="${EFFECTIVE_CTX_SIZE:-${REQUESTED_CTX_SIZE}}"
+if [ "${EFFECTIVE_CTX_SIZE}" != "${REQUESTED_CTX_SIZE}" ]; then
+  echo "Big model installed: forcing LLAMA_ARG_CTX_SIZE=${EFFECTIVE_CTX_SIZE} (was ${REQUESTED_CTX_SIZE})"
+  export LLAMA_ARG_CTX_SIZE="${EFFECTIVE_CTX_SIZE}"
+fi
+
+# Number of Hexagon sessions required by the installed models, sized for the context the
+# server will actually run at: more than 1 means at least one model too big for a session.
+DETECTED_NDEV="$(python3 /configure-llamacpp.py /models --print-ndev --ctx "${EFFECTIVE_CTX_SIZE}")"
 DETECTED_NDEV="${DETECTED_NDEV:-1}"
 
-# Big models leave little room for the KV cache on the NPU: cap their context size. Four
-# sessions means a GGUF larger than 3.5 GB, which is where the cap starts to be needed.
-BIG_MODEL_MIN_NDEV=4
-BIG_MODEL_MAX_CTX_SIZE=4096
-if [ "${DETECTED_NDEV}" -ge "${BIG_MODEL_MIN_NDEV}" ] && [[ "${LLAMA_ARG_CTX_SIZE}" =~ ^[0-9]+$ ]] && [ "${LLAMA_ARG_CTX_SIZE}" -gt "${BIG_MODEL_MAX_CTX_SIZE}" ]; then
-  echo "Big model installed (${DETECTED_NDEV} sessions): forcing LLAMA_ARG_CTX_SIZE=${BIG_MODEL_MAX_CTX_SIZE} (was ${LLAMA_ARG_CTX_SIZE})"
-  export LLAMA_ARG_CTX_SIZE="${BIG_MODEL_MAX_CTX_SIZE}"
-
-  # The capped context needs a smaller KV cache, which leaves room for more weights on each
-  # session: size them again for the context the server will actually run at.
-  DETECTED_NDEV="$(python3 /configure-llamacpp.py /models --print-ndev --ctx "${LLAMA_ARG_CTX_SIZE}")"
-  DETECTED_NDEV="${DETECTED_NDEV:-1}"
-fi
-
-# Build --device argument from GGML_HEXAGON_NDEV, falling back to the value detected
-# from the installed models (default: 1)
-if [ -n "${GGML_HEXAGON_NDEV}" ]; then
+# Build --device argument from GGML_HEXAGON_DEVICES (which accepts a session count, like
+# the GGML_HEXAGON_NDEV it replaced — still honored for older app configs), falling back
+# to the value detected from the installed models (default: 1)
+if [ -n "${GGML_HEXAGON_DEVICES}" ]; then
+  NDEV="${GGML_HEXAGON_DEVICES}"
+  echo "Using externally configured GGML_HEXAGON_DEVICES=${NDEV}"
+elif [ -n "${GGML_HEXAGON_NDEV}" ]; then
   NDEV="${GGML_HEXAGON_NDEV}"
-  echo "Using externally configured GGML_HEXAGON_NDEV=${NDEV}"
+  echo "Using externally configured GGML_HEXAGON_NDEV=${NDEV} (deprecated: set GGML_HEXAGON_DEVICES instead)"
 else
   NDEV="${DETECTED_NDEV}"
-  export GGML_HEXAGON_NDEV="${NDEV}"
-  echo "GGML_HEXAGON_NDEV not set: auto-detected ${NDEV} session(s) from installed models"
+  echo "GGML_HEXAGON_DEVICES not set: auto-detected ${NDEV} session(s) from installed models"
 fi
+export GGML_HEXAGON_DEVICES="${NDEV}"
+# Already translated into GGML_HEXAGON_DEVICES: don't let llama-server see the
+# deprecated variable, it would warn on every spawned instance.
+unset GGML_HEXAGON_NDEV
 
 echo "Configuring ${NDEV} session(s)..."
 DEVICE_LIST=""

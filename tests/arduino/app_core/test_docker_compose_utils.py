@@ -49,7 +49,7 @@ def test_get_compose_file_dbstorage_tsstore():
     """Test getting the Docker Compose file for _InfluxDBHandler."""
     module_cfg = get_brick_config_file(_InfluxDBHandler)
     assert module_cfg is not None
-    with open(module_cfg, "r") as file:
+    with open(module_cfg) as file:
         content = file.read()
         cfg = yaml.safe_load(content)
         assert cfg["id"] == "arduino:dbstorage_tsstore"
@@ -74,7 +74,7 @@ def test_release_devlatest_ai():
     """Test updating the release version in a Docker Compose file for AI container with dev-latest."""
     compose_file_path = "tests/arduino/app_core/brick_compose_ai.yaml"
     release_version = "dev-latest"
-    with open(compose_file_path, "r") as file:
+    with open(compose_file_path) as file:
         content = file.read()
         assert "1.5.22" in content
     new_path = _update_compose_release_version(
@@ -83,7 +83,7 @@ def test_release_devlatest_ai():
         append_suffix=True,
         only_ai_containers=True,
     )
-    with open(new_path, "r") as file:
+    with open(new_path) as file:
         content = file.read()
         assert ":dev-latest" in content
     import os
@@ -96,13 +96,13 @@ def test_release_upgrade_version():
     compose_file_path = "tests/arduino/app_core/brick_compose_appslab.yaml"
     release_version = "0.2.4"
     registry = "arduino.io/"
-    with open(compose_file_path, "r") as file:
+    with open(compose_file_path) as file:
         content = file.read()
         assert "${APPSLAB_VERSION:-dev-latest}" in content
     new_path = _update_compose_release_version(
         compose_file_path=compose_file_path, release_version=release_version, append_suffix=True, registry=registry
     )
-    with open(new_path, "r") as file:
+    with open(new_path) as file:
         content = file.read()
         print(f"Updated compose file: {content}")
         assert ":0.2.4" in content
@@ -116,7 +116,7 @@ def test_release_upgrade_ai():
     """Test updating the release version in a Docker Compose file for AI container with new version."""
     compose_file_path = "tests/arduino/app_core/brick_compose_ai.yaml"
     release_version = "2.0.0"
-    with open(compose_file_path, "r") as file:
+    with open(compose_file_path) as file:
         content = file.read()
         assert "1.5.22" in content
     new_path = _update_compose_release_version(
@@ -125,7 +125,7 @@ def test_release_upgrade_ai():
         append_suffix=True,
         only_ai_containers=True,
     )
-    with open(new_path, "r") as file:
+    with open(new_path) as file:
         content = file.read()
         assert ":2.0.0" in content
     import os
@@ -138,13 +138,13 @@ def test_release_upgrade_to_dev_latest():
     compose_file_path = "tests/arduino/app_core/brick_compose_applab_released.yaml"
     release_version = "dev-latest"
     registry = "ghcr.io/arduino/"
-    with open(compose_file_path, "r") as file:
+    with open(compose_file_path) as file:
         content = file.read()
         assert "${APPSLAB_VERSION:-dev-latest}" in content
     new_path = _update_compose_release_version(
         compose_file_path=compose_file_path, release_version=release_version, append_suffix=True, registry=registry
     )
-    with open(new_path, "r") as file:
+    with open(new_path) as file:
         content = file.read()
         print(f"Updated compose file: {content}")
         assert ":dev-latest" in content
@@ -158,7 +158,7 @@ def test_release_branch_tag_to_semver_ai():
     """Test updating from a branch-name tag (e.g. dev-next) to a semver in an AI compose file."""
     compose_file_path = "tests/arduino/app_core/brick_compose_ai_branch.yaml"
     release_version = "2.1.0"
-    with open(compose_file_path, "r") as file:
+    with open(compose_file_path) as file:
         content = file.read()
         assert "ei-models-runner:dev-next" in content
     new_path = _update_compose_release_version(
@@ -167,7 +167,7 @@ def test_release_branch_tag_to_semver_ai():
         append_suffix=True,
         only_ai_containers=True,
     )
-    with open(new_path, "r") as file:
+    with open(new_path) as file:
         content = file.read()
         assert "ei-models-runner:2.1.0" in content
         assert "dev-next" not in content
@@ -180,7 +180,7 @@ def test_release_branch_tag_to_branch_tag_ai():
     """Test updating from one branch-name tag (e.g. dev-next) to another (e.g. dev-latest) in an AI compose file."""
     compose_file_path = "tests/arduino/app_core/brick_compose_ai_branch.yaml"
     release_version = "dev-latest"
-    with open(compose_file_path, "r") as file:
+    with open(compose_file_path) as file:
         content = file.read()
         assert "ei-models-runner:dev-next" in content
     new_path = _update_compose_release_version(
@@ -189,7 +189,7 @@ def test_release_branch_tag_to_branch_tag_ai():
         append_suffix=True,
         only_ai_containers=True,
     )
-    with open(new_path, "r") as file:
+    with open(new_path) as file:
         content = file.read()
         assert "ei-models-runner:dev-latest" in content
         assert "dev-next" not in content
@@ -202,7 +202,7 @@ def test_release_rc_semver_to_semver_ai():
     """Test that an rc semver tag (e.g. 0.10.0rc1) is fully replaced, leaving no rc suffix behind."""
     compose_file_path = "tests/arduino/app_core/brick_compose_ai_rc.yaml"
     release_version = "1.0.0"
-    with open(compose_file_path, "r") as file:
+    with open(compose_file_path) as file:
         content = file.read()
         assert "ei-models-runner:0.10.0rc1" in content
     new_path = _update_compose_release_version(
@@ -211,7 +211,7 @@ def test_release_rc_semver_to_semver_ai():
         append_suffix=True,
         only_ai_containers=True,
     )
-    with open(new_path, "r") as file:
+    with open(new_path) as file:
         content = file.read()
         assert "ei-models-runner:1.0.0" in content
         assert "rc1" not in content
@@ -224,7 +224,7 @@ def test_release_no_runner_skipped():
     """Test that a compose file without any -runner image is left untouched when only_ai_containers=True."""
     compose_file_path = "tests/arduino/app_core/brick_compose_test_data.yaml"
     release_version = "3.0.0"
-    with open(compose_file_path, "r") as file:
+    with open(compose_file_path) as file:
         original_content = file.read()
         assert "-runner" not in original_content
     new_path = _update_compose_release_version(
@@ -278,7 +278,7 @@ def _write(path, content):
 
 
 def _read(path):
-    with open(path, "r") as f:
+    with open(path) as f:
         return f.read()
 
 
@@ -369,6 +369,23 @@ def test_by_platform_with_registry_override(tmp_path):
         content = _read(tmp_path / name)
         assert ":1.2.3" in content
         assert "${DOCKER_REGISTRY_BASE:-arduino.io/}" in content
+
+
+def test_registry_override_normalizes_trailing_slashes(tmp_path):
+    """Registry is written with exactly one trailing slash, whether the caller
+    passes none, one, or a duplicated one (dev builds passed 'ghcr.io/owner//')."""
+    for registry in ["ghcr.io/owner", "ghcr.io/owner/", "ghcr.io/owner//"]:
+        _write(tmp_path / "brick_compose.yaml", BRICK_COMPOSE_CONTENT)
+
+        _update_compose_release_version(
+            compose_file_path=str(tmp_path / "brick_compose.yaml"),
+            release_version="1.2.3",
+            registry=registry,
+        )
+
+        content = _read(tmp_path / "brick_compose.yaml")
+        assert "${DOCKER_REGISTRY_BASE:-ghcr.io/owner/}" in content
+        assert "owner//" not in content
 
 
 def test_by_platform_ignores_non_compose_yaml_files(tmp_path):

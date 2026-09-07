@@ -26,14 +26,16 @@ from huggingface_hub.errors import (
 )
 
 from common.download_marker import MARKER_NAME, read_marker
-from common.model_metadata import METADATA_NAME
+from common.model_metadata import METADATA_NAME, metadata_records, read_metadata
 from hugging_face import hf_downloader
 from hugging_face.hf_downloader import (
     JsonProgress,
     delete_matched_files,
     discard_incomplete_download,
     download_matched_files,
+    downloaded_size_mb,
     fallback_model_id,
+    generate_models_ini,
     gguf_pattern,
     has_model_content,
     interrupted_patterns,
@@ -635,36 +637,265 @@ def test_public_repo_files_returns_the_repo_listing(monkeypatch):
 # --------------------------------------------------------------------------- #
 # fallback_model_id
 # --------------------------------------------------------------------------- #
-def test_fallback_model_id_from_the_downloaded_gguf():
-    assert fallback_model_id("", ["/models/llamacpp/TheBloke/Mistral-GGUF/mistral.Q4_0.gguf"]) == "llamacpp:mistral.Q4_0"
+def _place_gguf(models_dir, rel_path):
+    """Create an empty GGUF at models_dir/rel_path and return its absolute path."""
+    path = models_dir / rel_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\0")
+    return str(path)
 
 
-def test_fallback_model_id_uses_the_key_model_type_as_namespace():
-    assert fallback_model_id("llamacpp", ["/models/llamacpp/org/repo/m-Q8_0.gguf"]) == "llamacpp:m-Q8_0"
+def test_fallback_model_id_is_the_path_qualified_name(tmp_path):
+    """An ad-hoc download is named by its repository-qualified path, from birth.
+
+    Stable for the whole life of the install, and never shared with a same-named
+    file from another repository.
+    """
+    gguf = _place_gguf(tmp_path, "TheBloke/Mistral-GGUF/mistral.Q4_0.gguf")
+    assert fallback_model_id("", [gguf], str(tmp_path)) == "llamacpp:TheBloke/Mistral-GGUF/mistral.Q4_0"
 
 
-def test_fallback_model_id_ignores_mmproj():
+def test_fallback_model_id_uses_the_key_model_type_as_namespace(tmp_path):
+    gguf = _place_gguf(tmp_path, "org/repo/m-Q8_0.gguf")
+    assert fallback_model_id("llamacpp", [gguf], str(tmp_path)) == "llamacpp:org/repo/m-Q8_0"
+
+
+def test_fallback_model_id_ignores_mmproj(tmp_path):
     """The mmproj belongs to the main GGUF and must never name the model."""
-    files = ["/models/llamacpp/org/repo/mmproj-BF16.gguf", "/models/llamacpp/org/repo/model-Q4_0.gguf"]
-    assert fallback_model_id("", files) == "llamacpp:model-Q4_0"
+    files = [
+        _place_gguf(tmp_path, "org/repo/mmproj-BF16.gguf"),
+        _place_gguf(tmp_path, "org/repo/model-Q4_0.gguf"),
+    ]
+    assert fallback_model_id("", files, str(tmp_path)) == "llamacpp:org/repo/model-Q4_0"
 
 
-def test_fallback_model_id_without_any_gguf():
-    assert fallback_model_id("", []) is None
-    assert fallback_model_id("", ["/models/llamacpp/org/repo/mmproj-BF16.gguf"]) is None
+def test_fallback_model_id_without_any_gguf(tmp_path):
+    assert fallback_model_id("", [], str(tmp_path)) is None
+    mmproj = _place_gguf(tmp_path, "org/repo/mmproj-BF16.gguf")
+    assert fallback_model_id("", [mmproj], str(tmp_path)) is None
+
+
+def test_fallback_model_id_ignores_the_catalog(tmp_path, monkeypatch):
+    """The fallback names the user-configured record being written, and a
+    user-configured model is named by its path even at a location the catalog
+    declares: the record, not the location, decides the name everywhere."""
+    monkeypatch.setattr(hf_downloader, "catalog_gguf_declarations", lambda *a, **k: [("org/repo", "model-Q4_0.gguf", "llamacpp:model-Q4_0")])
+    gguf = _place_gguf(tmp_path, "org/repo/model-Q4_0.gguf")
+    assert fallback_model_id("", [gguf], str(tmp_path)) == "llamacpp:org/repo/model-Q4_0"
+
+
+def _record_install(models_dir, repo, origin, files, model_id="llamacpp:whatever"):
+    """The ".arduino_metadata.yaml" record a download of *files* leaves in *repo*."""
+    hf_downloader.write_metadata(
+        str(Path(models_dir) / repo),
+        "hf-handler",
+        env={},
+        models_list_path="",
+        identity={"model_id": model_id, "model_origin": origin},
+        files=files,
+    )
 
 
 def test_fallback_model_id_matches_what_the_listing_derives(tmp_path):
-    """The record and the listing must agree on what to call an ad-hoc download."""
+    """The record and the listing must agree on what to call an ad-hoc download.
+
+    Including when two repositories publish the same file name: the downloader sees
+    the llamacpp directory as its models root, the listing sees its parent.
+    """
     import list_models
 
-    gguf = tmp_path / "llamacpp" / "TheBloke" / "Mistral-GGUF" / "mistral.Q4_0.gguf"
-    gguf.parent.mkdir(parents=True)
-    gguf.write_bytes(b"\0")
+    models_dir = tmp_path / "llamacpp"
+    first = _place_gguf(models_dir, "TheBloke/Mistral-GGUF/mistral.Q4_0.gguf")
+    _record_install(models_dir, "TheBloke/Mistral-GGUF", "user", ["mistral.Q4_0.gguf"])
 
     listed = list_models.find_llamacpp_models(str(tmp_path))
     assert len(listed) == 1
-    assert fallback_model_id("", [str(gguf)]) == listed[0]["id"]
+    assert fallback_model_id("", [first], str(models_dir)) == listed[0]["id"]
+
+    second = _place_gguf(models_dir, "bartowski/Mistral-GGUF/mistral.Q4_0.gguf")
+    _record_install(models_dir, "bartowski/Mistral-GGUF", "user", ["mistral.Q4_0.gguf"])
+    listed = {entry["path"]: entry["id"] for entry in list_models.find_llamacpp_models(str(tmp_path))}
+    assert fallback_model_id("", [first], str(models_dir)) == listed[first]
+    assert fallback_model_id("", [second], str(models_dir)) == listed[second]
+
+
+# --------------------------------------------------------------------------- #
+# generate_models_ini
+# --------------------------------------------------------------------------- #
+def _read_models_ini(models_dir):
+    import configparser
+
+    config = configparser.ConfigParser()
+    config.read(models_dir / "models.ini")
+    return config
+
+
+def test_models_ini_names_curated_files_by_stem_and_ad_hoc_files_by_path(tmp_path, capsys):
+    """Curated installs serve under the stem their fixed id uses; ad-hoc under their
+    path — both read from the download record, no catalog involved."""
+    _place_gguf(tmp_path, "moondream/moondream2-gguf/moondream2-f16.gguf")
+    _place_gguf(tmp_path, "moondream/moondream2-gguf/moondream2-mmproj-f16.gguf")
+    _place_gguf(tmp_path, "unsloth/Qwen3-GGUF/Qwen3-Q4_0.gguf")
+    _record_install(tmp_path, "moondream/moondream2-gguf", "built_in", ["moondream2-f16.gguf", "moondream2-mmproj-f16.gguf"])
+    _record_install(tmp_path, "unsloth/Qwen3-GGUF", "user", ["Qwen3-Q4_0.gguf"])
+
+    generate_models_ini(tmp_path)
+
+    config = _read_models_ini(tmp_path)
+    assert sorted(config.sections()) == ["moondream2-f16", "unsloth/Qwen3-GGUF/Qwen3-Q4_0"]
+    assert config["moondream2-f16"]["model"].endswith("moondream2-f16.gguf")
+    assert config["moondream2-f16"]["mmproj"].endswith("moondream2-mmproj-f16.gguf")
+
+
+def test_models_ini_names_a_recordless_file_by_its_stem(tmp_path, capsys):
+    """The fallback: a GGUF with no download record is an out-of-the-box model."""
+    _place_gguf(tmp_path, "google/gemma-4-E2B-it-qat-q4_0-gguf/gemma-4-E2B_q4_0-it.gguf")
+
+    generate_models_ini(tmp_path)
+
+    assert _read_models_ini(tmp_path).sections() == ["gemma-4-E2B_q4_0-it"]
+
+
+def test_models_ini_keeps_a_section_per_repository_for_a_shared_file_name(tmp_path, capsys):
+    """Two repositories publishing the same file name: neither may shadow the other."""
+    _place_gguf(tmp_path, "unsloth/SmolLM2-GGUF/SmolLM2-Q4_K_M.gguf")
+    _place_gguf(tmp_path, "bartowski/SmolLM2-GGUF/SmolLM2-Q4_K_M.gguf")
+    _record_install(tmp_path, "unsloth/SmolLM2-GGUF", "user", ["SmolLM2-Q4_K_M.gguf"])
+    _record_install(tmp_path, "bartowski/SmolLM2-GGUF", "user", ["SmolLM2-Q4_K_M.gguf"])
+
+    generate_models_ini(tmp_path)
+
+    config = _read_models_ini(tmp_path)
+    assert sorted(config.sections()) == [
+        "bartowski/SmolLM2-GGUF/SmolLM2-Q4_K_M",
+        "unsloth/SmolLM2-GGUF/SmolLM2-Q4_K_M",
+    ]
+    for section in config.sections():
+        assert config[section]["model"].endswith(f"{section}.gguf")
+
+
+def test_models_ini_keeps_the_curated_stem_next_to_a_same_named_impostor(tmp_path, capsys):
+    """A file named like a curated model, from another repository, never answers to its name."""
+    _place_gguf(tmp_path, "google/gemma-gguf/gemma-Q4_0.gguf")
+    _place_gguf(tmp_path, "bartowski/gemma-clone-GGUF/gemma-Q4_0.gguf")
+    _record_install(tmp_path, "google/gemma-gguf", "built_in", ["gemma-Q4_0.gguf"], model_id="llamacpp:gemma-Q4_0")
+    _record_install(tmp_path, "bartowski/gemma-clone-GGUF", "user", ["gemma-Q4_0.gguf"])
+
+    generate_models_ini(tmp_path)
+
+    config = _read_models_ini(tmp_path)
+    assert sorted(config.sections()) == ["bartowski/gemma-clone-GGUF/gemma-Q4_0", "gemma-Q4_0"]
+    # The curated name serves the curated file, whatever else is installed.
+    assert config["gemma-Q4_0"]["model"].endswith("google/gemma-gguf/gemma-Q4_0.gguf")
+
+
+def test_models_ini_ad_hoc_names_are_stable_across_regenerations(tmp_path, capsys):
+    """models.ini is regenerated on every download and delete; ad-hoc names never move."""
+    _place_gguf(tmp_path, "unsloth/SmolLM2-GGUF/SmolLM2-Q4_K_M.gguf")
+    duplicate = tmp_path / "bartowski/SmolLM2-GGUF/SmolLM2-Q4_K_M.gguf"
+    _place_gguf(tmp_path, "bartowski/SmolLM2-GGUF/SmolLM2-Q4_K_M.gguf")
+    _record_install(tmp_path, "unsloth/SmolLM2-GGUF", "user", ["SmolLM2-Q4_K_M.gguf"])
+    _record_install(tmp_path, "bartowski/SmolLM2-GGUF", "user", ["SmolLM2-Q4_K_M.gguf"])
+
+    generate_models_ini(tmp_path)
+    duplicate.unlink()
+    generate_models_ini(tmp_path)
+
+    assert _read_models_ini(tmp_path).sections() == ["unsloth/SmolLM2-GGUF/SmolLM2-Q4_K_M"]
+
+
+# --------------------------------------------------------------------------- #
+# backfill_ootb_records: recordless models get a record from the catalog
+# --------------------------------------------------------------------------- #
+BACKFILL_MODELS_LIST = """\
+models:
+ - "llamacpp:gemma-4-E2B_q4_0-it":
+    name: "Gemma 4 E2B"
+    deployment:
+      handler: "hf-handler"
+      platforms:
+        - ventunoq:
+            variables:
+              model_url: "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/blob/ventunosha/gemma-4-E2B_q4_0-it.gguf"
+              models_repository: "llamacpp"
+              model_directory: "google/gemma-4-E2B-it-qat-q4_0-gguf"
+        - unoq:
+            variables:
+              model_url: "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/blob/unosha/gemma-4-E2B_q4_0-it.gguf"
+              models_repository: "llamacpp"
+              model_directory: "google/gemma-4-E2B-it-qat-q4_0-gguf"
+"""
+
+
+def _backfill_models_list(tmp_path) -> str:
+    path = tmp_path / "models-list.yaml"
+    path.write_text(BACKFILL_MODELS_LIST)
+    return str(path)
+
+
+def test_backfill_records_an_ootb_model_from_the_catalog(tmp_path, monkeypatch, capsys):
+    """A recordless GGUF at a declared location — flashed with the OS, not downloaded —
+    gets a built_in record naming its entry, with the board platform's variables as
+    inputs, so it reads as an install of the current catalog."""
+    monkeypatch.setenv("BOARD_NAME", "unoq")
+    models_dir = tmp_path / "models"
+    _place_gguf(models_dir, "google/gemma-4-E2B-it-qat-q4_0-gguf/gemma-4-E2B_q4_0-it.gguf")
+    _place_gguf(models_dir, "google/gemma-4-E2B-it-qat-q4_0-gguf/mmproj-F16.gguf")
+
+    hf_downloader.backfill_ootb_records(models_dir, _backfill_models_list(tmp_path))
+
+    records = metadata_records(read_metadata(str(models_dir / "google" / "gemma-4-E2B-it-qat-q4_0-gguf")))
+    assert len(records) == 1
+    record = records[0]
+    assert record["model_id"] == "llamacpp:gemma-4-E2B_q4_0-it"
+    assert record["model_origin"] == "built_in"
+    assert record["handler"] == "hf-handler"
+    assert record["files"] == ["gemma-4-E2B_q4_0-it.gguf", "mmproj-F16.gguf"]
+    # The unoq platform's variables, so the outdated check compares this board's.
+    assert "unosha" in record["inputs"]["model_url"]
+    assert any(e["description"].startswith("Recorded out-of-the-box model") for e in read_events(capsys))
+
+
+def test_backfill_leaves_recorded_and_undeclared_files_alone(tmp_path, monkeypatch):
+    """A backfill never rewrites history, and an undeclared recordless file stays
+    out of the box: there is nothing known to record about it."""
+    models_dir = tmp_path / "models"
+    # Already recorded (an ad-hoc download that happens to sit at the declared spot).
+    _place_gguf(models_dir, "google/gemma-4-E2B-it-qat-q4_0-gguf/gemma-4-E2B_q4_0-it.gguf")
+    _record_install(models_dir, "google/gemma-4-E2B-it-qat-q4_0-gguf", "user", ["gemma-4-E2B_q4_0-it.gguf"])
+    # Not declared by any entry.
+    stray_repo = models_dir / "TheBloke" / "Mistral-GGUF"
+    _place_gguf(models_dir, "TheBloke/Mistral-GGUF/mistral.Q4_0.gguf")
+
+    hf_downloader.backfill_ootb_records(models_dir, _backfill_models_list(tmp_path))
+
+    records = metadata_records(read_metadata(str(models_dir / "google" / "gemma-4-E2B-it-qat-q4_0-gguf")))
+    assert [r["model_origin"] for r in records] == ["user"]
+    assert not (stray_repo / METADATA_NAME).exists()
+
+
+def test_backfill_is_a_noop_without_a_catalog(tmp_path):
+    models_dir = tmp_path / "models"
+    _place_gguf(models_dir, "google/gemma-4-E2B-it-qat-q4_0-gguf/gemma-4-E2B_q4_0-it.gguf")
+
+    hf_downloader.backfill_ootb_records(models_dir, str(tmp_path / "missing.yaml"))
+
+    assert not (models_dir / "google" / "gemma-4-E2B-it-qat-q4_0-gguf" / METADATA_NAME).exists()
+
+
+def test_generate_models_ini_backfills_the_scan(tmp_path, capsys):
+    """End to end: the scan that regenerates models.ini records the OOTB model and
+    serves it under its curated stem."""
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    _place_gguf(models_dir, "google/gemma-4-E2B-it-qat-q4_0-gguf/gemma-4-E2B_q4_0-it.gguf")
+
+    generate_models_ini(models_dir, _backfill_models_list(tmp_path))
+
+    assert _read_models_ini(models_dir).sections() == ["gemma-4-E2B_q4_0-it"]
+    record = metadata_records(read_metadata(str(models_dir / "google" / "gemma-4-E2B-it-qat-q4_0-gguf")))[0]
+    assert record["model_id"] == "llamacpp:gemma-4-E2B_q4_0-it"
+    assert record["model_origin"] == "built_in"
 
 
 # --------------------------------------------------------------------------- #
@@ -1031,3 +1262,143 @@ def test_check_answers_for_the_requested_quantization_only(tmp_path, monkeypatch
     with pytest.raises(SystemExit):
         _run_main(monkeypatch, "--check", "--model-url", "unsloth/Qwen3-0.6B-GGUF:Q3_K_S", "--output-dir", str(models_dir))
     assert read_events(capsys)[-1] == {"event": "error", "description": "Model does not exist: *Q3_K_S*.gguf", "downloading": False}
+
+
+# --------------------------------------------------------------------------- #
+# main(): the metadata record is required for an installed model
+# --------------------------------------------------------------------------- #
+def test_download_writes_the_metadata_record(tmp_path, monkeypatch, stub_download):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+
+    _run_main(monkeypatch, "--model-url", "unsloth/Qwen3-0.6B-GGUF:Q4_0", "--output-dir", str(models_dir))
+
+    repo = models_dir / "unsloth" / "Qwen3-0.6B-GGUF"
+    assert (repo / METADATA_NAME).is_file()
+    assert not (repo / MARKER_NAME).exists()
+
+
+def test_download_fails_when_the_record_cannot_be_written(tmp_path, monkeypatch, stub_download, capsys):
+    """The host deletes an ad-hoc model by the recorded inputs, so a download whose
+    record cannot be written must fail and be retried, never leave an unmanageable
+    install. The kept ".download" marker is what makes the next run discard and retry.
+    """
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    monkeypatch.setattr(hf_downloader, "write_metadata", lambda *args, **kwargs: None)
+
+    with pytest.raises(SystemExit) as exc:
+        _run_main(monkeypatch, "--model-url", "unsloth/Qwen3-0.6B-GGUF:Q4_0", "--output-dir", str(models_dir))
+
+    assert exc.value.code == 1
+    assert read_events(capsys)[-1]["event"] == "error"
+    assert (models_dir / "unsloth" / "Qwen3-0.6B-GGUF" / MARKER_NAME).is_file()
+
+
+def test_each_quantization_keeps_its_own_metadata_record(tmp_path, monkeypatch, stub_download):
+    """Two quantizations of one repository: the second record joins the first
+    instead of overwriting it, each naming the files its download fetched."""
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+
+    _run_main(monkeypatch, "--model-url", "unsloth/Qwen3-0.6B-GGUF:Q4_0", "--output-dir", str(models_dir))
+    _run_main(monkeypatch, "--model-url", "unsloth/Qwen3-0.6B-GGUF:Q3_K_S", "--output-dir", str(models_dir))
+
+    data = read_metadata(str(models_dir / "unsloth" / "Qwen3-0.6B-GGUF"))
+    # The records are the whole file: no top-level record that could misread as
+    # "the" model of a directory holding two.
+    assert list(data) == ["models"]
+    records = metadata_records(data)
+    assert [r["files"] for r in records] == [["Q4_0.gguf"], ["Q3_K_S.gguf"]]
+    assert [r["model_id"] for r in records] == [
+        "llamacpp:unsloth/Qwen3-0.6B-GGUF/Q4_0",
+        "llamacpp:unsloth/Qwen3-0.6B-GGUF/Q3_K_S",
+    ]
+
+
+def test_delete_drops_only_the_deleted_quantizations_record(tmp_path, monkeypatch, stub_download):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    repo = models_dir / "unsloth" / "Qwen3-0.6B-GGUF"
+    _run_main(monkeypatch, "--model-url", "unsloth/Qwen3-0.6B-GGUF:Q4_0", "--output-dir", str(models_dir))
+    _run_main(monkeypatch, "--model-url", "unsloth/Qwen3-0.6B-GGUF:Q3_K_S", "--output-dir", str(models_dir))
+
+    _run_main(monkeypatch, "--delete", "--model-url", "unsloth/Qwen3-0.6B-GGUF:Q4_0", "--output-dir", str(models_dir))
+
+    assert not (repo / "Q4_0.gguf").exists()
+    assert (repo / "Q3_K_S.gguf").is_file()
+    data = read_metadata(str(repo))
+    records = metadata_records(data)
+    assert [r["files"] for r in records] == [["Q3_K_S.gguf"]]
+    assert [r["model_id"] for r in records] == ["llamacpp:unsloth/Qwen3-0.6B-GGUF/Q3_K_S"]
+
+
+# --------------------------------------------------------------------------- #
+# downloaded_size_mb
+# --------------------------------------------------------------------------- #
+def test_downloaded_size_mb_sums_the_files_like_the_listing(tmp_path):
+    main = tmp_path / "model-Q4_0.gguf"
+    main.write_bytes(b"\0" * (2 * 1024 * 1024))
+    mmproj = tmp_path / "mmproj-BF16.gguf"
+    mmproj.write_bytes(b"\0" * (1024 * 1024))
+
+    assert downloaded_size_mb([str(main), str(mmproj)]) == 3.0
+
+
+def test_downloaded_size_mb_without_files_or_with_unreadable_ones(tmp_path):
+    assert downloaded_size_mb([]) is None
+    assert downloaded_size_mb([str(tmp_path / "gone.gguf")]) is None
+
+
+# --------------------------------------------------------------------------- #
+# main(): the completion events name and size the model
+# --------------------------------------------------------------------------- #
+def test_download_event_reports_the_model_id_and_size(tmp_path, monkeypatch, stub_download, capsys):
+    """The host learns the id and size on completion, instead of re-deriving them or
+    running a listing container right after a multi-GB transfer. The id is the one
+    the listing derives for the same file: path-qualified for an ad-hoc download.
+    """
+    import list_models
+
+    base = tmp_path / "models"
+    models_dir = base / "llamacpp"
+    models_dir.mkdir(parents=True)
+
+    _run_main(monkeypatch, "--model-url", "unsloth/Qwen3-0.6B-GGUF:Q3_K_S", "--output-dir", str(models_dir))
+
+    done = read_events(capsys)[-1]
+    assert done["description"].startswith("Downloaded to:")
+    assert done["model_id"] == "llamacpp:unsloth/Qwen3-0.6B-GGUF/Q3_K_S"
+    assert done["size_mb"] == 0.0  # the stub writes a 1-byte file
+    listed = list_models.find_llamacpp_models(str(base))
+    assert [m["id"] for m in listed] == [done["model_id"]]
+
+
+def test_download_event_reports_the_recorded_id_not_the_location(tmp_path, monkeypatch, stub_download, capsys):
+    """A file landing where the catalog declares some entry is not thereby that
+    entry: the identity comes from the download's own record, so a request the
+    models-list variables do not match stays user-configured and path-named."""
+    monkeypatch.setattr(hf_downloader, "catalog_gguf_declarations", lambda *a, **k: [("unsloth/Qwen3-0.6B-GGUF", None, "llamacpp:Qwen3-0.6B-Q3_K_S")])
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+
+    _run_main(monkeypatch, "--model-url", "unsloth/Qwen3-0.6B-GGUF:Q3_K_S", "--output-dir", str(models_dir))
+
+    assert read_events(capsys)[-1]["model_id"] == "llamacpp:unsloth/Qwen3-0.6B-GGUF/Q3_K_S"
+
+
+def test_already_installed_request_reports_the_same_identity(tmp_path, monkeypatch, stub_download, capsys):
+    """Asking again for an installed model returns its id and size without a transfer."""
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    _run_main(monkeypatch, "--model-url", "unsloth/Qwen3-0.6B-GGUF:Q3_K_S", "--output-dir", str(models_dir))
+    downloaded_event = read_events(capsys)[-1]
+
+    _run_main(monkeypatch, "--model-url", "unsloth/Qwen3-0.6B-GGUF:Q3_K_S", "--output-dir", str(models_dir))
+
+    exists_event = read_events(capsys)[-1]
+    assert exists_event["description"].startswith("Model exists:")
+    assert stub_download == ["*Q3_K_S*.gguf"]  # the second run transferred nothing
+    assert exists_event["model_id"] == downloaded_event["model_id"]
+    assert exists_event["size_mb"] == downloaded_event["size_mb"]
+    assert exists_event["artifacts"] == downloaded_event["artifacts"]

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from arduino.app_bricks.pose_estimation import KEYPOINT_NAMES, Keypoint, Person, PoseEstimation
+from arduino.app_bricks.pose_estimation import KEYPOINT_NAMES, POSE_NAMES, Keypoint, Person, PoseEstimation
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,7 +48,13 @@ def pe(monkeypatch: pytest.MonkeyPatch):
 @pytest.fixture()
 def pe_debounced(monkeypatch: pytest.MonkeyPatch):
     """Return a PoseEstimation instance with a 0.3s debounce."""
-    yield from _make_instance(monkeypatch, debounce_sec=0.3)
+    yield from _make_instance(monkeypatch, count_debounce_sec=0.3)
+
+
+@pytest.fixture()
+def pe_strict(monkeypatch: pytest.MonkeyPatch):
+    """Return a PoseEstimation instance that refuses any joint outside the frame."""
+    yield from _make_instance(monkeypatch, out_of_frame_tolerance=0.0)
 
 
 def _make_instance(monkeypatch: pytest.MonkeyPatch, **kwargs):
@@ -80,9 +86,23 @@ def _make_instance(monkeypatch: pytest.MonkeyPatch, **kwargs):
 # ---------------------------------------------------------------------------
 
 
+def test_stop_resets_the_temporal_state_with_the_asset_thresholds(pe):
+    pe._pose_ema.update({"sitting": 1.0}, dt=1.0)
+    pe.stop()
+    pe._executor = ThreadPoolExecutor(max_workers=1)  # the fixture teardown shuts one down
+
+    assert pe._pose_ema.smoothed["sitting"] == 0.0
+    assert pe._pose_ema.enter_threshold == pe._pose_thresholds["enter"]
+    assert pe._pose_ema.exit_threshold == pe._pose_thresholds["exit"]
+
+
 # ---------------------------------------------------------------------------
 # Detection parsing tests
 # ---------------------------------------------------------------------------
+
+
+def test_pose_names_lists_the_asset_poses():
+    assert POSE_NAMES == ("left_arm_raised", "right_arm_raised", "sitting", "standing")
 
 
 class TestDetectionParsing:
@@ -166,6 +186,15 @@ class TestPresenceCallbacks:
         _wait(done, "count change callbacks")
         assert counts == [1, 2]
 
+    def test_people_count_property_holds_the_reported_count(self, pe: PoseEstimation):
+        assert pe.people_count == 0
+
+        pe._process_detection(_detection_with([_pose_dict(), _pose_dict(x=300)]))
+        assert pe.people_count == 2
+
+        pe._process_detection(_detection_with([]))
+        assert pe.people_count == 0
+
     def test_low_confidence_poses_are_filtered(self, pe: PoseEstimation):
         entered = threading.Event()
         got_keypoints = threading.Event()
@@ -192,6 +221,42 @@ class TestPresenceCallbacks:
         time.sleep(0.3)
         pe_debounced._process_detection(_detection_with([]))
         _wait(exited, "debounced exit callback")
+
+    def test_dropped_detection_frame_never_fires_exit(self, pe_debounced: PoseEstimation):
+        exited = threading.Event()
+        pe_debounced.on_exit(lambda: exited.set())
+
+        pe_debounced._process_detection(_detection_with([_pose_dict()]))
+        pe_debounced._process_detection(_detection_with([]))
+        pe_debounced._process_detection(_detection_with([_pose_dict()]))
+
+        time.sleep(0.4)
+        pe_debounced._process_detection(_detection_with([_pose_dict()]))
+
+        assert not exited.wait(timeout=0.1), "a dropped frame must not fire exit"
+
+    def test_people_count_grows_at_once_and_drops_on_hold(self, pe_debounced: PoseEstimation):
+        counts = []
+        dropped = threading.Event()
+
+        def on_count(count: int):
+            counts.append(count)
+            if counts == [1, 2, 1]:
+                dropped.set()
+
+        pe_debounced.on_count_change(on_count)
+
+        pe_debounced._process_detection(_detection_with([_pose_dict()]))
+        time.sleep(0.1)  # Let the first callback complete to avoid the busy-discard
+        pe_debounced._process_detection(_detection_with([_pose_dict(), _pose_dict(x=300)]))
+        time.sleep(0.1)
+        pe_debounced._process_detection(_detection_with([_pose_dict()]))
+
+        assert counts == [1, 2], "a growing count is immediate, a dropping one is not"
+
+        time.sleep(0.3)
+        pe_debounced._process_detection(_detection_with([_pose_dict()]))
+        _wait(dropped, "debounced count drop")
 
 
 # ---------------------------------------------------------------------------
@@ -300,21 +365,38 @@ class TestPoseEvents:
         pe._frame_hw = None
         assert pe._classify_person(far_out) is not None
 
-    def test_a_tip_extrapolated_from_a_seen_joint_is_still_readable(self, pe: PoseEstimation):
+    def test_zero_tolerance_demands_every_joint_inside_the_frame(self, pe_strict: PoseEstimation):
+        pe_strict._frame_hw = (480, 640)
+        assert pe_strict._classify_person(_person()) is not None
+
+        just_outside = _person()
+        kp = just_outside.keypoints["left_ankle"]
+        just_outside.keypoints["left_ankle"] = Keypoint(name=kp.name, x=kp.x, y=481, score=kp.score)
+        assert pe_strict._classify_person(just_outside) is None
+
+    def test_a_tip_extrapolated_outside_from_a_seen_joint_is_still_readable(self, pe: PoseEstimation):
         pe._frame_hw = (480, 640)
         sitting_close = _person()
         for name in ("left_ankle", "right_ankle"):
             kp = sitting_close.keypoints[name]
-            sitting_close.keypoints[name] = Keypoint(name=name, x=kp.x, y=kp.y + 100, score=0.01)
+            sitting_close.keypoints[name] = Keypoint(name=name, x=kp.x, y=560, score=0.01)
         assert pe._classify_person(sitting_close) is not None
 
-    def test_a_limb_with_nothing_observed_makes_the_frame_unreadable(self, pe: PoseEstimation):
+    def test_uncertain_joints_inside_the_image_still_classify(self, pe: PoseEstimation):
         pe._frame_hw = (480, 640)
-        invented_legs = _person()
+        guessed_legs = _person()
         for name in ("left_knee", "right_knee", "left_ankle", "right_ankle"):
-            kp = invented_legs.keypoints[name]
-            invented_legs.keypoints[name] = Keypoint(name=name, x=kp.x, y=kp.y, score=0.03)
-        assert pe._classify_person(invented_legs) is None
+            kp = guessed_legs.keypoints[name]
+            guessed_legs.keypoints[name] = Keypoint(name=name, x=kp.x, y=kp.y, score=0.03)
+        assert pe._classify_person(guessed_legs) is not None
+
+    def test_every_gate_outcome_is_counted(self, pe: PoseEstimation):
+        pe._frame_hw = (480, 640)
+        assert pe._classify_person(_person()) is not None
+        assert pe._classify_person(_person(score=0.01)) is None
+        assert pe._gate_counts["classified"] == 1
+        assert pe._gate_counts["anchors"] == 1
+        assert pe._gate_last[0] == "anchors"
 
     def test_enter_then_exit_fire_with_stable_classifications(self, pe: PoseEstimation, monkeypatch):
         events = []
@@ -353,8 +435,14 @@ class TestPoseEvents:
 
         assert seen == [big]
 
-    def test_weak_anchor_joints_make_the_frame_unreadable(self, pe: PoseEstimation):
-        assert pe._classify_person(_person(score=0.05)) is None
+    def test_a_fully_guessed_torso_makes_the_frame_unreadable(self, pe: PoseEstimation):
+        assert pe._classify_person(_person(score=0.01)) is None
+
+    def test_one_observed_anchor_is_enough_to_classify(self, pe: PoseEstimation):
+        person = _person(score=0.01)
+        kp = person.keypoints["left_shoulder"]
+        person.keypoints["left_shoulder"] = Keypoint(name="left_shoulder", x=kp.x, y=kp.y, score=0.5)
+        assert pe._classify_person(person) is not None
 
     def test_a_readable_skeleton_yields_a_probability_dict(self, pe: PoseEstimation):
         probs = pe._classify_person(_person())
@@ -376,6 +464,63 @@ class TestPoseEvents:
         assert not called.wait(timeout=0.3)
 
 
+class TestReadableCallback:
+    def _feed(self, pe: PoseEstimation, steps: int, start: float) -> float:
+        now = start
+        for _ in range(steps):
+            now += 0.1
+            pe._update_pose_classification([_person()], now)
+        return now
+
+    def test_readable_is_gained_at_once_and_lost_on_hold(self, pe: PoseEstimation, monkeypatch):
+        states = []
+        gained, lost = threading.Event(), threading.Event()
+
+        def on_readable(value: bool):
+            states.append(value)
+            (gained if value else lost).set()
+
+        pe.on_readable_change(on_readable)
+
+        monkeypatch.setattr(pe, "_classify_person", lambda p: {"standing": 1.0})
+        now = self._feed(pe, steps=2, start=0.0)
+        _wait(gained, "readable")
+        time.sleep(0.1)
+
+        monkeypatch.setattr(pe, "_classify_person", lambda p: None)
+        self._feed(pe, steps=10, start=now)
+        _wait(lost, "unreadable")
+
+        assert states == [True, False]
+
+    def test_the_property_holds_the_reported_state(self, pe: PoseEstimation, monkeypatch):
+        assert pe.readable is False
+
+        monkeypatch.setattr(pe, "_classify_person", lambda p: {"standing": 1.0})
+        now = self._feed(pe, steps=2, start=0.0)
+        assert pe.readable is True
+
+        monkeypatch.setattr(pe, "_classify_person", lambda p: None)
+        self._feed(pe, steps=10, start=now)
+        assert pe.readable is False
+
+    def test_a_single_unreadable_frame_is_ignored(self, pe: PoseEstimation, monkeypatch):
+        states = []
+        pe.on_readable_change(states.append)
+
+        monkeypatch.setattr(pe, "_classify_person", lambda p: {"standing": 1.0})
+        now = self._feed(pe, steps=2, start=0.0)
+        time.sleep(0.1)
+
+        monkeypatch.setattr(pe, "_classify_person", lambda p: None)
+        now = self._feed(pe, steps=1, start=now)
+        monkeypatch.setattr(pe, "_classify_person", lambda p: {"standing": 1.0})
+        self._feed(pe, steps=3, start=now)
+
+        time.sleep(0.2)
+        assert states == [True]
+
+
 class TestSetConfidence:
     def test_updates_the_filter_and_validates_input(self, pe: PoseEstimation):
         pe.set_confidence(0.8)
@@ -390,3 +535,56 @@ class TestSetConfidence:
         with pytest.raises(ValueError):
             pe.set_confidence(True)
         assert pe._confidence == 0.8
+
+
+class TestSetDrawBboxes:
+    def test_updates_the_flag_and_validates_input(self, pe: PoseEstimation):
+        assert pe._draw_bboxes is False
+
+        pe.set_draw_bboxes(True)
+        assert pe._draw_bboxes is True
+
+        with pytest.raises(ValueError):
+            pe.set_draw_bboxes(1)
+        with pytest.raises(ValueError):
+            pe.set_draw_bboxes("on")
+        with pytest.raises(ValueError):
+            pe.set_draw_bboxes(None)
+        assert pe._draw_bboxes is True
+
+
+class TestSetDrawUncertain:
+    def test_updates_the_flag_and_validates_input(self, pe: PoseEstimation):
+        assert pe._draw_low_confidence_points is True
+
+        pe.set_draw_low_confidence_points(False)
+        assert pe._draw_low_confidence_points is False
+
+        with pytest.raises(ValueError):
+            pe.set_draw_low_confidence_points(0)
+        with pytest.raises(ValueError):
+            pe.set_draw_low_confidence_points("off")
+        assert pe._draw_low_confidence_points is False
+
+
+class TestSetBboxPadding:
+    def test_replaces_the_padding_and_validates_input(self, pe: PoseEstimation):
+        assert pe._bbox_padding == (0.0, 0.0, 0.0, 0.0)
+
+        pe.set_bbox_padding((0.15, 0.20, 0.15, 0.20))  # (top, right, bottom, left), come CSS
+        assert pe._bbox_padding == (0.15, 0.20, 0.15, 0.20)
+
+        pe.set_bbox_padding(0.1)  # scalare: tutti i lati
+        assert pe._bbox_padding == (0.1, 0.1, 0.1, 0.1)
+
+        with pytest.raises(ValueError):
+            pe.set_bbox_padding(1.5)
+        with pytest.raises(ValueError):
+            pe.set_bbox_padding((0.1, 0.2))
+        with pytest.raises(ValueError):
+            pe.set_bbox_padding((0.1, 0.2, 0.3, -0.1))
+        with pytest.raises(ValueError):
+            pe.set_bbox_padding("high")
+        with pytest.raises(ValueError):
+            pe.set_bbox_padding(True)
+        assert pe._bbox_padding == (0.1, 0.1, 0.1, 0.1)

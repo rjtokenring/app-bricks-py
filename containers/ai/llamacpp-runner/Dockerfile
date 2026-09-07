@@ -18,6 +18,8 @@ RUN set -x; \
     apt-get update -y; \
     apt-get install -y --no-install-recommends --no-install-suggests libgomp1; \
     apt-get dist-clean; \
+    # pyyaml: configure-llamacpp.py parses the .arduino_metadata.yaml download records
+    pip install --no-cache-dir pyyaml; \
     tar -xzf /tmp/llamacpp.tar.gz -C /opt; \
     rm /tmp/llamacpp.tar.gz; \
     chown -R arduino:arduino /opt/pkg-cpu; \
