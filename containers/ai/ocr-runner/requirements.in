@@ -1,0 +1,12 @@
+# Direct dependencies of the ocr-runner. requirements.txt is the fully pinned, hashed
+# lock generated from this file for the container target (linux aarch64, CPython 3.13,
+# the python:3.13-slim base of qairt-common-base). Regenerate it with:
+#
+#   uv pip compile requirements.in --python-platform aarch64-manylinux_2_34 \
+#       --python-version 3.13 --generate-hashes -o requirements.txt
+#
+# Bumping onnxruntime-qnn changes the QAIRT bundled in the wheel (2.5.0 -> QAIRT 2.49.40),
+# which invalidates every pre-compiled HTP context binary shipped next to the models.
+opencv-python-headless==5.0.0.93
+onnxruntime==1.29.0
+onnxruntime-qnn==2.5.0

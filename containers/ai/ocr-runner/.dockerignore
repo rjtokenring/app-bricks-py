@@ -1,0 +1,14 @@
+# Development-only material that must not end up in the image.
+easyOCR-onnx/
+.venv/
+__pycache__/
+*.pyc
+sbom-delta/
+README.md
+.dockerignore
+ci.json
+# Models are fetched (and hash-checked) at build time; a local copy would just be
+# duplicated into the build context. Pre-compiled HTP context binaries do ship.
+models/**/*.onnx
+models/**/*.data
+!models/**/*.qnn_ctx.onnx

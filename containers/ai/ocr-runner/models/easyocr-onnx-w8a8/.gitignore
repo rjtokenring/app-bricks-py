@@ -1,0 +1,3 @@
+*.onnx
+*.data
+!*.qnn_ctx.onnx

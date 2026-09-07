@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
-"""Constants for the EasyOCR LiteRT pipeline.
+"""Constants for the EasyOCR ONNX Runtime pipeline.
 
 Values mirror `qai_hub_models/models/easyocr/{app,model}.py` (ai-hub-models v0.61.0)
 and `easyocr/config.py` (JaidedAI/EasyOCR).
@@ -10,12 +10,18 @@ and `easyocr/config.py` (JaidedAI/EasyOCR).
 
 # --- Model files ------------------------------------------------------------
 
-DETECTOR_MODEL_PATH = "models/easyocr-tflite-w8a8/detector.tflite"
-RECOGNIZER_MODEL_PATH = "models/easyocr-tflite-w8a8/recognizer.tflite"
+# w8a8, the quantized export the Hexagon NPU runs natively. ai-hub also publishes a float
+# variant, deliberately not used here: same size on disk, ~2x slower on the CPU, and on the
+# HTP it only runs as emulated fp16. The .onnx/.data pairs are fetched and hash-checked by
+# tools/download_models.py; metadata.json (quantization parameters) is tracked in git.
+MODEL_DIR = "models/easyocr-onnx-w8a8"
+DETECTOR_MODEL_PATH = f"{MODEL_DIR}/detector.onnx"
+RECOGNIZER_MODEL_PATH = f"{MODEL_DIR}/recognizer.onnx"
 
-# Network input resolutions, as exported by ai-hub-models.
-# detector:   [1, 3, 608, 800] RGB   float [0, 1]
-# recognizer: [1, 1,  64, 800] GREY  float [0, 1]
+# Network input resolutions, as exported by ai-hub-models. The ONNX exports keep the
+# native NCHW layout (the TFLite ones got rewritten to NHWC); the model wrapper transposes.
+# detector:   [1, 3, 608, 800] RGB   uint8, quantized from float [0, 1]
+# recognizer: [1, 1,  64, 800] GREY  uint8, quantized from float [0, 1]
 DETECTOR_INPUT_HEIGHT = 608
 DETECTOR_INPUT_WIDTH = 800
 RECOGNIZER_INPUT_HEIGHT = 64
@@ -53,7 +59,7 @@ RECOGNIZER_ARGS = {
 # english_g2, the "standard" recognizer network EasyOCR selects for lang_list=["en"].
 # The CTC converter prepends a [blank] token, so the model has len(CHARACTERS) + 1 classes.
 NUMBER = "0123456789"
-SYMBOL = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ \u20ac"
+SYMBOL = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ €"
 EN_CHAR = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 CHARACTERS = NUMBER + SYMBOL + EN_CHAR
 

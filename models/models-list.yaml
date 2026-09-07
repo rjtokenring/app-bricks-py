@@ -2118,7 +2118,7 @@ models:
     bricks:
       - id: "arduino:ocr"
     metadata:
-      model_size_mb: 30
+      model_size_mb: 98
       source: "qualcomm-ai-hub"
       source-model-id: "easyocr"
       source-model-url: "https://aihub.qualcomm.com/models/easyocr"

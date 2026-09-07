@@ -2,4 +2,4 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
-"""EasyOCR LiteRT runner utilities."""
+"""EasyOCR ONNX Runtime runner utilities."""

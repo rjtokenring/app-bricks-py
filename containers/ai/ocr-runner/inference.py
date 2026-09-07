@@ -2,20 +2,25 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
-"""EasyOCR (CRAFT detector + CRNN recognizer) on ai-edge-litert.
+"""EasyOCR (CRAFT detector + CRNN recognizer) on ONNX Runtime.
 
 Pipeline mirrors `qai_hub_models/models/easyocr/app.py` from ai-hub-models v0.61.0,
 reimplemented with numpy/OpenCV only - no torch, no easyocr package at runtime.
+
+Both networks run on the QNN execution provider (Hexagon NPU) when it is available and
+fall back to the ORT CPU provider otherwise; see `utils/onnx_ep.py`. The TFLite/LiteRT
+version of this runner could not delegate the recognizer to the NPU at all, which is why
+the runtime was switched.
 """
 
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
 
 from aihub.image_processing import denormalize_coordinates, resize_pad
-from aihub.tf import load_qnn_delegate
 
 from utils.bbox_processing import box_4corners, box_xx_yy, diff, get_det_boxes, group_text_box
 from utils.constants import (
@@ -29,7 +34,7 @@ from utils.constants import (
 )
 from utils.image_processing import adjust_contrast, four_point_transform
 from utils.metadata import build_metadata
-from utils.model_io_processing import LiteRTModel
+from utils.model_io_processing import ONNXModel
 from utils.post_processing import CTCLabelConverter
 
 # Stage-by-stage timing prints, disable with EASYOCR_DEBUG=0.
@@ -41,18 +46,44 @@ def _debug(message: str) -> None:
         print(f"[ocr-debug] {message}", flush=True)
 
 
-# Load models
-detector = LiteRTModel(
-    os.environ.get("EASYOCR_DETECTOR_MODEL", DETECTOR_MODEL_PATH),
-    delegates=load_qnn_delegate(),
-)
-# The recognizer runs on CPU: the exported CRNN graph contains a dynamic-sized
-# tensor, which the QNN/HTP delegate (static shapes only) rejects at load time.
-# Move it back to the NPU once the model is re-exported with static shapes.
-# Note: keep it single-threaded - multi-threading (num_threads=4 on an 8-core
-# machine) was measured almost 2x SLOWER than 1 thread on this quantized graph.
-recognizer = LiteRTModel(
-    os.environ.get("EASYOCR_RECOGNIZER_MODEL", RECOGNIZER_MODEL_PATH),
+def _load_models() -> tuple[ONNXModel, ONNXModel]:
+    """
+    Open both networks. The execution provider is picked per model, so the detector can
+    sit on the NPU while the recognizer stays on the CPU (or vice versa) via
+    EASYOCR_EP_DETECTOR / EASYOCR_EP_RECOGNIZER.
+
+    On the QNN/HTP backend the first open of a model compiles its graph, which is
+    single-threaded inside QNN and runs into minutes for the recognizer. The compiled
+    result is cached as a context binary (see utils/onnx_ep.py), so that cost is paid once
+    per cache - or never, when a pre-compiled binary ships next to the model. The two
+    models are independent sessions, so EASYOCR_PARALLEL_INIT=1 compiles them on two
+    threads; off by default because concurrent QNN backend initialisation is not something
+    the EP documents as supported.
+    """
+    specs = (
+        (os.environ.get("EASYOCR_DETECTOR_MODEL", DETECTOR_MODEL_PATH), os.environ.get("EASYOCR_EP_DETECTOR")),
+        (os.environ.get("EASYOCR_RECOGNIZER_MODEL", RECOGNIZER_MODEL_PATH), os.environ.get("EASYOCR_EP_RECOGNIZER")),
+    )
+
+    t_start = time.perf_counter()
+    if os.environ.get("EASYOCR_PARALLEL_INIT", "0") == "1":
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            models = list(pool.map(lambda spec: ONNXModel(spec[0], backend=spec[1]), specs))
+    else:
+        models = [ONNXModel(path, backend=backend) for path, backend in specs]
+    _debug(f"models loaded in {(time.perf_counter() - t_start) * 1000:.0f} ms")
+
+    return models[0], models[1]
+
+
+detector, recognizer = _load_models()
+_debug(
+    f"detector on {detector.execution_provider}, recognizer on {recognizer.execution_provider}"
+    + (
+        " (measured)"
+        if detector.placement or recognizer.placement
+        else " (attached, not verified; run tools/check_ep.py or set EASYOCR_QNN_VERIFY=1)"
+    )
 )
 
 converter = CTCLabelConverter(CHARACTERS, LANG_CHAR)
@@ -72,7 +103,7 @@ def apply_config(config: dict) -> None:
         print(f"config: allowlist set to {allowlist!r}", flush=True)
 
 
-_recognizer_classes = int(recognizer.output_details[0]["shape"][-1])
+_recognizer_classes = int(recognizer.output_shapes[0][-1])
 if _recognizer_classes != converter.num_classes:
     print(
         f"Warning: recognizer emits {_recognizer_classes} classes but the configured character "

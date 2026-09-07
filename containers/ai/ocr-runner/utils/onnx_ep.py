@@ -1,0 +1,581 @@
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
+#
+# SPDX-License-Identifier: MPL-2.0
+
+"""ONNX Runtime session factory with optional Qualcomm QNN (Hexagon NPU) acceleration.
+
+This replaces the LiteRT `aihub.tf.load_qnn_delegate()` helper the other runners use.
+Where TFLite reaches the NPU through an external delegate .so, ONNX Runtime reaches it
+through the QNN execution provider, which ships in two flavours:
+
+  * plugin EP (`onnxruntime-qnn` >= 2.x, maintained by Qualcomm) - a standalone wheel
+    registered at runtime against a stock `onnxruntime` install. It is the only variant
+    with Linux aarch64 wheels, so it is the one the container installs. The wheel is
+    self-contained: it carries its own QAIRT (libQnnHtp.so, libQnnHtpPrepare.so and the
+    libQnnHtpV*Skel.so DSP libraries), independent from the QAIRT in the base image.
+  * bundled EP (`onnxruntime-qnn` 1.x, Windows arm64/x64) - ships QNN inside the ORT
+    wheel itself and shows up directly in `ort.get_available_providers()`.
+
+Both are handled here; the plugin is preferred and the bundled build is the fallback.
+
+Environment variables
+---------------------
+EASYOCR_EP                  auto (default) | qnn | cpu
+EASYOCR_QNN_BACKEND_PATH    explicit QnnHtp.dll / libQnnHtp.so path
+EASYOCR_QNN_ADSP_PATH       ADSP_LIBRARY_PATH for the DSP skel libraries (Linux)
+EASYOCR_QNN_KEEP_ADSP_PATH  1 - keep an inherited ADSP_LIBRARY_PATH as it is
+EASYOCR_QNN_PERF_MODE       burst (default), sustained_high_performance, balanced, ...
+EASYOCR_QNN_FINALIZATION_MODE  0 (default, fastest compile) .. 3 (slowest compile)
+EASYOCR_QNN_SOC_MODEL       QNN SoC id, lets the HTP compile for a specific target
+EASYOCR_QNN_HTP_ARCH        HTP architecture number (68, 69, 73, 75, 79, ...)
+EASYOCR_QNN_VTCM_MB         VTCM budget in MB
+EASYOCR_QNN_PROFILING       off (default) | basic | detailed (QNN-internal profiling)
+EASYOCR_QNN_OP_TRACE        1 - dump the ONNX-op -> QNN-op mapping
+EASYOCR_ORT_PROFILE         1 - write an ORT profile showing the QNN/CPU node split
+EASYOCR_QNN_CONTEXT_CACHE   1 (default) - cache the compiled HTP graph next to the model
+EASYOCR_QNN_CONTEXT_DIR     where to put that cache (defaults to the model directory)
+EASYOCR_QNN_CONTEXT_STRICT  1 - recompile instead of loading a binary built elsewhere
+EASYOCR_QNN_STRICT          1 - fail instead of silently running subgraphs on the CPU
+EASYOCR_QNN_RPC_LATENCY     per-run RPC control latency in microseconds (e.g. 100)
+EASYOCR_ORT_LOG_LEVEL       0 = verbose, prints which nodes QNN actually took
+EASYOCR_ORT_THREADS         intra-op thread count
+"""
+
+from __future__ import annotations
+
+import glob
+import json
+import os
+import sys
+import tempfile
+import threading
+from collections import defaultdict
+
+import onnxruntime as ort
+
+QNN_EP_NAME = "QNNExecutionProvider"
+CPU_EP_NAME = "CPUExecutionProvider"
+
+# QNN ships the HTP backend as a plain shared library; the EP dlopen()s it by name.
+DEFAULT_HTP_LIBRARY = "QnnHtp.dll" if sys.platform == "win32" else "libQnnHtp.so"
+
+# The DSP-side libraries the HTP backend loads through FastRPC. Host library and skel
+# must come from the same QAIRT release.
+SKEL_GLOB = "libQnnHtpV*Skel.so"
+
+# Provider options applied to every QNN session.
+#   htp_performance_mode                      clock/DCVS policy while the graph runs
+#   htp_graph_finalization_optimization_mode  0 (ORT's default) = compile fastest. Higher
+#                                             modes trade startup for runtime, and graph
+#                                             finalization is single-threaded and can take
+#                                             minutes, so raise it only after measuring
+#   enable_htp_fp16_precision                 run whatever float32 survives inside the QDQ
+#                                             graph as fp16 on the NPU rather than
+#                                             bouncing it back to the CPU
+#   offload_graph_io_quantization             keep graph-boundary quantize/dequantize on
+#                                             the CPU, so a QDQ graph still takes float I/O
+DEFAULT_QNN_OPTIONS = {
+    "htp_performance_mode": "burst",
+    "htp_graph_finalization_optimization_mode": "0",
+    "enable_htp_fp16_precision": "1",
+    "offload_graph_io_quantization": "1",
+}
+
+# Compile-time provider options: a context binary is only valid for the exact values it
+# was compiled with, so these are part of its fingerprint.
+CONTEXT_COMPILE_OPTIONS = (
+    "htp_graph_finalization_optimization_mode",
+    "enable_htp_fp16_precision",
+    "offload_graph_io_quantization",
+    "soc_model",
+    "htp_arch",
+    "vtcm_mb",
+)
+
+_plugin_registered = False
+_adsp_checked = False
+_setup_lock = threading.RLock()
+
+
+def _log(message: str) -> None:
+    print(f"[ocr-ep] {message}", flush=True)
+
+
+def _plugin_module():
+    """The Qualcomm-maintained plugin EP wheel, or None if it is not installed."""
+    try:
+        import onnxruntime_qnn
+    except ImportError:
+        return None
+    return onnxruntime_qnn
+
+
+def _plugin_qnn_version(plugin) -> str:
+    """The QAIRT release bundled in the plugin wheel (e.g. '2.49.40'), or 'unknown'."""
+    if plugin is None:
+        return "none"
+    info = getattr(plugin, "build_and_package_info", None)
+    return str(getattr(info, "qnn_version", getattr(plugin, "qnn_version", "unknown")))
+
+
+def _register_plugin(plugin) -> bool:
+    """Register the plugin EP shared library with this process' ORT instance."""
+    with _setup_lock:
+        return _register_plugin_locked(plugin)
+
+
+def _register_plugin_locked(plugin) -> bool:
+    global _plugin_registered
+    if _plugin_registered:
+        return True
+    if not hasattr(ort, "register_execution_provider_library"):
+        _log(f"onnxruntime {ort.__version__} predates plugin execution providers; upgrade onnxruntime to use onnxruntime-qnn 2.x")
+        return False
+    try:
+        ort.register_execution_provider_library(QNN_EP_NAME, plugin.get_library_path())
+    except Exception as exc:  # noqa: BLE001 - any failure here just means "no NPU"
+        if "already registered" not in str(exc).lower():
+            _log(f"could not register the QNN plugin EP: {exc}")
+            return False
+    _plugin_registered = True
+    return True
+
+
+def _qnn_provider_options(plugin) -> dict[str, str]:
+    options = dict(DEFAULT_QNN_OPTIONS)
+
+    backend_path = os.environ.get("EASYOCR_QNN_BACKEND_PATH")
+    if not backend_path and plugin is not None and hasattr(plugin, "get_qnn_htp_path"):
+        try:
+            backend_path = plugin.get_qnn_htp_path()
+        except Exception:  # noqa: BLE001 - fall back to the bare library name
+            backend_path = None
+    options["backend_path"] = backend_path or DEFAULT_HTP_LIBRARY
+
+    options["htp_performance_mode"] = os.environ.get("EASYOCR_QNN_PERF_MODE", options["htp_performance_mode"])
+    options["htp_graph_finalization_optimization_mode"] = os.environ.get(
+        "EASYOCR_QNN_FINALIZATION_MODE", options["htp_graph_finalization_optimization_mode"]
+    )
+    options["profiling_level"] = os.environ.get("EASYOCR_QNN_PROFILING", "off")
+
+    # Target-specific tuning, only forwarded when actually set: an empty or wrong value
+    # here is enough to push the whole graph back onto the CPU.
+    for env_name, option_name in (
+        ("EASYOCR_QNN_SOC_MODEL", "soc_model"),
+        ("EASYOCR_QNN_HTP_ARCH", "htp_arch"),
+        ("EASYOCR_QNN_VTCM_MB", "vtcm_mb"),
+        # 1 = dump the ONNX-op -> QNN-op mapping, including the ops QNN would not take
+        ("EASYOCR_QNN_OP_TRACE", "enable_framework_op_trace"),
+    ):
+        value = os.environ.get(env_name)
+        if value:
+            options[option_name] = value
+
+    return options
+
+
+def _session_options(intra_op_threads: int | None, profile: bool = False) -> ort.SessionOptions:
+    session_options = ort.SessionOptions()
+    threads = intra_op_threads or int(os.environ.get("EASYOCR_ORT_THREADS", "0"))
+    if threads:
+        session_options.intra_op_num_threads = threads
+    if os.environ.get("EASYOCR_QNN_STRICT", "0") == "1":
+        session_options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
+    if profile or os.environ.get("EASYOCR_ORT_PROFILE", "0") == "1":
+        # Writes a chrome-trace JSON whose per-node events carry args.provider. That is the
+        # only reliable way to know which EP actually executed what: get_providers() lists
+        # every registered provider, including one that claimed no nodes at all.
+        session_options.enable_profiling = True
+        session_options.profile_file_prefix = "easyocr_ort_profile"
+    # 0 = verbose. At that level ORT prints the node partitioning, i.e. whether the graph
+    # really landed on the NPU ("All nodes placed on [QNNExecutionProvider]") or got split.
+    log_level = os.environ.get("EASYOCR_ORT_LOG_LEVEL")
+    if log_level:
+        ort.set_default_logger_severity(int(log_level))
+        session_options.log_severity_level = int(log_level)
+    return session_options
+
+
+def summarize_profile(profile_path: str, runs: int = 1) -> dict[str, tuple[int, float]]:
+    """
+    Group an ORT profile's kernel events by the execution provider that ran them.
+
+    Parameters
+    ----------
+    profile_path
+        Chrome-trace JSON written by ORT when profiling is enabled.
+    runs
+        How many inferences the profile covers; totals are divided by it.
+
+    Returns
+    -------
+    breakdown : dict
+        ``{provider: (count, microseconds)}``. QNN emits one event per fused partition
+        rather than one per original node, so its count is a partition count while the
+        CPU side is a node count - which is exactly the comparison that matters.
+    """
+    with open(profile_path, encoding="utf-8") as handle:
+        events = json.load(handle)
+
+    breakdown: dict[str, list] = defaultdict(lambda: [0, 0.0])
+    for event in events:
+        if event.get("cat") != "Node" or not event.get("name", "").endswith("_kernel_time"):
+            continue
+        provider = event.get("args", {}).get("provider", "unknown")
+        breakdown[provider][0] += 1
+        breakdown[provider][1] += event.get("dur", 0)
+
+    return {provider: (count // runs, duration / runs) for provider, (count, duration) in breakdown.items()}
+
+
+def _has_skels(directory: str) -> bool:
+    return bool(directory) and os.path.isdir(directory) and bool(glob.glob(os.path.join(directory, SKEL_GLOB)))
+
+
+def _prepare_adsp_path(backend_path: str) -> None:
+    """
+    Point ADSP_LIBRARY_PATH, which decides where the DSP loads its skel libraries, at
+    skels that match the HTP backend library about to be loaded.
+
+    Host library and skel must come from the same QAIRT release, or the backend fails to
+    start with QNN_DEVICE_ERROR_INVALID_CONFIG - and ORT only warns about an inherited
+    ADSP_LIBRARY_PATH in passing. In the container this matters: the base image exports
+    ADSP_LIBRARY_PATH=/usr/lib/rfsa/adsp (its own QAIRT, used by the LiteRT delegate),
+    while the `onnxruntime-qnn` wheel brings a different QAIRT with its own skels next to
+    libQnnHtp.so. Those are the ones that match, so they win unless told otherwise.
+    """
+    global _adsp_checked
+    with _setup_lock:
+        if _adsp_checked:
+            return
+        _adsp_checked = True
+
+    override = os.environ.get("EASYOCR_QNN_ADSP_PATH")
+    if override:
+        _set_adsp_path(override)
+        _log(f"ADSP_LIBRARY_PATH set to {override}")
+        return
+
+    current = os.environ.get("ADSP_LIBRARY_PATH")
+    if os.environ.get("EASYOCR_QNN_KEEP_ADSP_PATH", "0") == "1":
+        if current and not any(_has_skels(directory) for directory in _split_path(current)):
+            _log(f"warning: ADSP_LIBRARY_PATH={current} contains no {SKEL_GLOB}; keeping it as asked")
+        return
+
+    backend_dir = os.path.dirname(os.path.abspath(backend_path)) if os.sep in backend_path or "/" in backend_path else ""
+    if _has_skels(backend_dir):
+        if current != backend_dir:
+            _set_adsp_path(backend_dir)
+            _log(
+                f"ADSP_LIBRARY_PATH set to {backend_dir}, the skel libraries shipped with "
+                f"{os.path.basename(backend_path)}"
+                + (f" (was {current})" if current else "")
+                + ". Override with EASYOCR_QNN_ADSP_PATH, or keep the inherited value with EASYOCR_QNN_KEEP_ADSP_PATH=1."
+            )
+        return
+
+    if not current:
+        return  # ORT installs its own default, which is usually right
+
+    if any(_has_skels(directory) for directory in _split_path(current)):
+        return
+
+    # A value inherited from another project points the DSP at skel libraries from a
+    # different QAIRT version, and the HTP backend then dies with
+    # QNN_DEVICE_ERROR_INVALID_CONFIG. Dropping it is the verified fix: ORT installs its
+    # own working default when the variable is absent. Scoped to this process, and
+    # announced rather than silent.
+    os.environ.pop("ADSP_LIBRARY_PATH", None)
+    _log(
+        f"unset ADSP_LIBRARY_PATH ({current}) for this process: it contains no {SKEL_GLOB}, "
+        "which makes the HTP backend fail to start. ORT will install its own default. "
+        "Override with EASYOCR_QNN_ADSP_PATH, or keep yours with EASYOCR_QNN_KEEP_ADSP_PATH=1."
+    )
+
+
+def _split_path(value: str) -> list[str]:
+    separator = ";" if ";" in value else ":"
+    return [part for part in value.split(separator) if part]
+
+
+def _set_adsp_path(directory: str) -> None:
+    os.environ["ADSP_LIBRARY_PATH"] = directory
+    # The base image exports both; keep them in agreement.
+    if "CDSP_LIBRARY_PATH" in os.environ:
+        os.environ["CDSP_LIBRARY_PATH"] = directory
+
+
+def _writable(directory: str) -> bool:
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError:
+        return False
+    return os.access(directory, os.W_OK)
+
+
+def _context_write_dir(model_path: str) -> str:
+    """
+    Where a freshly compiled HTP context binary is written.
+
+    Next to the model by default. That directory is read-only in most container images,
+    so fall back to a cache directory rather than losing the NPU: a failed context write
+    otherwise takes the whole QNN session down with it.
+    """
+    explicit = os.environ.get("EASYOCR_QNN_CONTEXT_DIR")
+    if explicit:
+        return explicit
+
+    beside_model = os.path.dirname(os.path.abspath(model_path))
+    if _writable(beside_model):
+        return beside_model
+
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    fallback = os.path.join(base, "easyocr-onnx", "qnn-context")
+    if _writable(fallback):
+        _log(
+            f"{beside_model} is not writable; caching compiled HTP graphs in {fallback} instead. "
+            "Mount a volume there (or set EASYOCR_QNN_CONTEXT_DIR) to keep them across container restarts."
+        )
+        return fallback
+
+    fallback = os.path.join(tempfile.gettempdir(), "easyocr-onnx-qnn-context")
+    _log(f"no writable cache directory found; falling back to {fallback} (lost on reboot)")
+    return fallback
+
+
+def _context_binary_name(model_path: str) -> str:
+    stem = os.path.splitext(os.path.basename(model_path))[0]
+    return f"{stem}.qnn_ctx.onnx"
+
+
+def _context_write_path(model_path: str) -> str:
+    """Where a freshly compiled HTP context binary for `model_path` is written."""
+    return os.path.join(_context_write_dir(model_path), _context_binary_name(model_path))
+
+
+def _find_context_binary(model_path: str) -> str | None:
+    """
+    Locate an existing compiled HTP context binary for `model_path`.
+
+    Pre-compiled binaries are shipped next to the model, and in an image that directory is
+    read-only - so the lookup does not depend on being able to write there. Search order:
+
+      1. the write directory (EASYOCR_QNN_CONTEXT_DIR, or the fallback cache when the
+         model directory is read-only) - a binary recompiled on this machine must shadow a
+         shipped one that was rejected and could not be deleted;
+      2. the model directory, where shipped binaries live.
+    """
+    name = _context_binary_name(model_path)
+    candidates = [_context_write_dir(model_path), os.path.dirname(os.path.abspath(model_path))]
+    seen: set[str] = set()
+    for directory in candidates:
+        if directory in seen:
+            continue
+        seen.add(directory)
+        path = os.path.join(directory, name)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+# Compiled context binaries are routinely built on one machine and copied to another - a
+# board to a container image, most often. They are only valid for the exact combination
+# below, and a mismatch that still loads is worse than one that fails, so the combination
+# is recorded next to the binary and checked on the way back in.
+def _context_fingerprint(model_path: str, options: dict[str, str]) -> dict[str, str]:
+    plugin = _plugin_module()
+    compile_options = {key: value for key, value in options.items() if key in CONTEXT_COMPILE_OPTIONS}
+    try:
+        stat = os.stat(model_path)
+        model_stamp = f"{stat.st_size}"
+    except OSError:
+        model_stamp = "?"
+
+    return {
+        "onnxruntime": ort.__version__,
+        "onnxruntime_qnn": str(getattr(plugin, "__version__", "none")),
+        "qnn_version": _plugin_qnn_version(plugin),
+        "backend": os.path.basename(options.get("backend_path", "")),
+        "model_bytes": model_stamp,
+        "options": json.dumps(compile_options, sort_keys=True),
+    }
+
+
+def _fingerprint_path(cache_path: str) -> str:
+    return f"{os.path.splitext(cache_path)[0]}.json"
+
+
+def _write_fingerprint(cache_path: str, model_path: str, options: dict[str, str]) -> None:
+    try:
+        with open(_fingerprint_path(cache_path), "w", encoding="utf-8") as handle:
+            json.dump(_context_fingerprint(model_path, options), handle, indent=2, sort_keys=True)
+    except OSError as exc:
+        _log(f"could not record the context binary fingerprint: {exc}")
+
+
+def _check_fingerprint(cache_path: str, model_path: str, options: dict[str, str]) -> bool:
+    """Compare a cached binary against the setup that is about to use it."""
+    path = _fingerprint_path(cache_path)
+    if not os.path.isfile(path):
+        _log(
+            f"{os.path.basename(cache_path)} has no fingerprint file next to it, so it cannot be checked "
+            "against this setup. If you copied it from another machine, copy the .json alongside it."
+        )
+        return True
+
+    try:
+        with open(path, encoding="utf-8") as handle:
+            recorded = json.load(handle)
+    except (OSError, ValueError) as exc:
+        _log(f"unreadable fingerprint {path}: {exc}")
+        return True
+
+    current = _context_fingerprint(model_path, options)
+    differences = [f"{key}: {recorded.get(key)!r} -> {current[key]!r}" for key in current if recorded.get(key) != current[key]]
+    if not differences:
+        return True
+
+    _log(
+        f"WARNING: {os.path.basename(cache_path)} was compiled under a different setup - "
+        + "; ".join(differences)
+        + ". Loading it anyway; it is only valid for the SoC, QAIRT version and compile options that produced it. "
+        "Delete it to recompile, or set EASYOCR_QNN_CONTEXT_STRICT=1 to recompile automatically on a mismatch."
+    )
+    return os.environ.get("EASYOCR_QNN_CONTEXT_STRICT", "0") != "1"
+
+
+def _create_qnn_session(
+    model_path: str,
+    plugin,
+    options: dict[str, str],
+    session_options: ort.SessionOptions,
+) -> ort.InferenceSession:
+    """Create a session on the QNN EP, preferring the plugin registration path."""
+    if plugin is not None and _register_plugin(plugin) and hasattr(session_options, "add_provider_for_devices"):
+        devices = [device for device in ort.get_ep_devices() if device.ep_name == QNN_EP_NAME]
+        if devices:
+            session_options.add_provider_for_devices(devices, options)
+            return ort.InferenceSession(model_path, sess_options=session_options)
+        _log("the QNN plugin EP is installed but reports no compatible device")
+
+    if QNN_EP_NAME in ort.get_available_providers():
+        return ort.InferenceSession(
+            model_path,
+            sess_options=session_options,
+            providers=[QNN_EP_NAME],
+            provider_options=[options],
+        )
+
+    raise RuntimeError("QNNExecutionProvider is not available. On a Snapdragon target install it with `pip install -r requirements.txt`.")
+
+
+def _try_qnn(model_path: str, intra_op_threads: int | None, profile: bool) -> ort.InferenceSession | None:
+    plugin = _plugin_module()
+    if plugin is None and QNN_EP_NAME not in ort.get_available_providers():
+        _log("QNN EP not installed, using the CPU provider")
+        return None
+
+    options = _qnn_provider_options(plugin)
+    _prepare_adsp_path(options["backend_path"])
+    use_cache = os.environ.get("EASYOCR_QNN_CONTEXT_CACHE", "1") != "0"
+
+    # A compiled HTP context binary skips graph finalization, which otherwise costs
+    # minutes of startup on every process launch. The first run writes it, later runs
+    # load it instead of the original graph.
+    cache_path = _find_context_binary(model_path) if use_cache else None
+    if cache_path is not None and not _check_fingerprint(cache_path, model_path, options):
+        _log(f"recompiling {os.path.basename(model_path)} because the cached binary does not match")
+    elif cache_path is not None:
+        try:
+            session = _create_qnn_session(cache_path, plugin, options, _session_options(intra_op_threads, profile))
+            _log(f"QNN EP attached from cached context binary {cache_path}")
+            return session
+        except Exception as exc:  # noqa: BLE001 - a stale binary is not fatal, just rebuild
+            _log(f"cached context binary rejected ({exc}); recompiling from {model_path}")
+            try:
+                os.remove(cache_path)
+            except OSError:
+                _log(f"{cache_path} could not be deleted (read-only?); the recompiled binary will shadow it")
+
+    write_path = _context_write_path(model_path) if use_cache else None
+    try:
+        session_options = _session_options(intra_op_threads, profile)
+        if write_path:
+            session_options.add_session_config_entry("ep.context_enable", "1")
+            session_options.add_session_config_entry("ep.context_file_path", write_path)
+            session_options.add_session_config_entry("ep.context_embed_mode", "1")
+        session = _create_qnn_session(model_path, plugin, options, session_options)
+    except Exception as exc:  # noqa: BLE001 - unsupported ops, missing libs, wrong SoC, ...
+        if not write_path:
+            _log(f"QNN EP could not run {os.path.basename(model_path)}: {exc}")
+            return None
+        # Writing the context binary is an optimisation. Never let it cost us the NPU.
+        _log(f"context binary generation failed ({exc}); retrying without it")
+        try:
+            session = _create_qnn_session(model_path, plugin, options, _session_options(intra_op_threads, profile))
+        except Exception as retry_exc:  # noqa: BLE001
+            _log(f"QNN EP could not run {os.path.basename(model_path)}: {retry_exc}")
+            return None
+
+    if write_path and os.path.isfile(write_path):
+        _write_fingerprint(write_path, model_path, options)
+        _log(f"compiled HTP context binary written to {write_path}")
+
+    # Deliberately not claiming the NPU here. ORT creates the session even when QNN's
+    # GetCapability fails outright and the EP ends up claiming zero nodes; only a profiled
+    # run settles it, which is what ONNXModel.verify_placement() does.
+    _log(f"QNN EP attached to {os.path.basename(model_path)}, node placement not yet verified")
+    return session
+
+
+def _cpu_session(model_path: str, intra_op_threads: int | None, profile: bool) -> ort.InferenceSession:
+    return ort.InferenceSession(
+        model_path,
+        sess_options=_session_options(intra_op_threads, profile),
+        providers=[CPU_EP_NAME],
+    )
+
+
+def build_session(
+    model_path: str,
+    backend: str | None = None,
+    intra_op_threads: int | None = None,
+    profile: bool = False,
+) -> tuple[ort.InferenceSession, str]:
+    """
+    Open `model_path` on the best available execution provider.
+
+    Parameters
+    ----------
+    model_path
+        Path to the .onnx graph.
+    backend
+        "auto" (default) tries QNN and falls back to the CPU, "qnn" requires the NPU,
+        "cpu" skips QNN entirely. Defaults to $EASYOCR_EP.
+    intra_op_threads
+        CPU thread count; 0/None leaves it to ORT.
+    profile
+        Enable ORT profiling on the session, so the caller can read back which provider
+        actually executed which nodes. Stops as soon as `end_profiling()` is called.
+
+    Returns
+    -------
+    session : ort.InferenceSession
+    provider : str
+        Name of the provider the session actually landed on.
+    """
+    backend = (backend or os.environ.get("EASYOCR_EP", "auto")).lower()
+    if backend not in ("auto", "qnn", "cpu"):
+        raise ValueError(f"Unknown backend {backend!r}, expected auto, qnn or cpu")
+
+    if backend != "cpu":
+        session = _try_qnn(model_path, intra_op_threads, profile)
+        if session is not None:
+            return session, session.get_providers()[0]
+        if backend == "qnn":
+            raise RuntimeError(
+                f"EASYOCR_EP=qnn was requested but {model_path} could not be placed on the "
+                "QNN execution provider. See the log lines above for the reason."
+            )
+
+    return _cpu_session(model_path, intra_op_threads, profile), CPU_EP_NAME
