@@ -132,6 +132,7 @@ supported_boards: ["ventunoq"]
 
 ## Methods
 
+- **`init()`**: Optional warm-up call to pre-load the model before the first `chat()`. It sends a tiny black image generated in memory together with a YES/NO question, so the vision encoder is exercised as well. Raises `RuntimeError` if the model is misconfigured or the runner is not responsive.
 - **`chat(message, images=None)`**: Sends a prompt and optional images, then returns the complete generated response as a string.
 - **`chat_stream(message, images=None)`**: Sends a prompt and optional images, then yields generated text chunks as they arrive.
 - **`stop_stream()`**: Requests cancellation of the active streaming response.
