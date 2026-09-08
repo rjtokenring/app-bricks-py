@@ -124,7 +124,6 @@ def configure_environment(output_dir: str | None) -> None:
     os.environ["EASYOCR_EP"] = "qnn"  # fail instead of silently compiling nothing on the CPU
     os.environ["EASYOCR_QNN_CONTEXT_CACHE"] = "1"
     os.environ["EASYOCR_QNN_CONTEXT_STRICT"] = "1"  # a binary from another setup is recompiled, not reused
-    os.environ.setdefault("EASYOCR_DEBUG", "0")
     if output_dir:
         os.environ["EASYOCR_QNN_CONTEXT_DIR"] = os.path.abspath(output_dir)
 

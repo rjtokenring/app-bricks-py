@@ -24,7 +24,7 @@ EASYOCR_EP                  auto (default) | qnn | cpu
 EASYOCR_QNN_BACKEND_PATH    explicit QnnHtp.dll / libQnnHtp.so path
 EASYOCR_QNN_ADSP_PATH       ADSP_LIBRARY_PATH for the DSP skel libraries (Linux)
 EASYOCR_QNN_KEEP_ADSP_PATH  1 - keep an inherited ADSP_LIBRARY_PATH as it is
-EASYOCR_QNN_PERF_MODE       burst (default), sustained_high_performance, balanced, ...
+EASYOCR_QNN_PERF_MODE       sustained_high_performance (default), burst, balanced, ...
 EASYOCR_QNN_FINALIZATION_MODE  0 (default, fastest compile) .. 3 (slowest compile)
 EASYOCR_QNN_SOC_MODEL       QNN SoC id, lets the HTP compile for a specific target
 EASYOCR_QNN_HTP_ARCH        HTP architecture number (68, 69, 73, 75, 79, ...)
@@ -37,7 +37,8 @@ EASYOCR_QNN_CONTEXT_DIR     where to put that cache (defaults to the model direc
 EASYOCR_QNN_CONTEXT_STRICT  1 - recompile instead of loading a binary built elsewhere
 EASYOCR_QNN_STRICT          1 - fail instead of silently running subgraphs on the CPU
 EASYOCR_QNN_RPC_LATENCY     per-run RPC control latency in microseconds (e.g. 100)
-EASYOCR_ORT_LOG_LEVEL       0 = verbose, prints which nodes QNN actually took
+EASYOCR_ORT_LOG_LEVEL       ORT log severity, 3 = errors only (default); 0 = verbose, prints
+                            which nodes QNN actually took
 EASYOCR_ORT_THREADS         intra-op thread count
 """
 
@@ -64,7 +65,19 @@ DEFAULT_HTP_LIBRARY = "QnnHtp.dll" if sys.platform == "win32" else "libQnnHtp.so
 SKEL_GLOB = "libQnnHtpV*Skel.so"
 
 # Provider options applied to every QNN session.
-#   htp_performance_mode                      clock/DCVS policy while the graph runs
+#   htp_performance_mode                      clock/DCVS policy while the graph runs.
+#                                             sustained_high_performance, not burst: for
+#                                             burst ORT also requests RPC polling QoS
+#                                             (rpc_polling_time=9999 -> fastrpc
+#                                             RPC_POLL_QOS), which the container's fastrpc
+#                                             1.0.6 rejects; QNN then drops the whole power
+#                                             config, DCVS included, ORT logs "Unable to set
+#                                             HTP power configurations" and the HTP runs at
+#                                             default clocks: 65 ms per recognizer call
+#                                             instead of 15 (measured on QCS8275).
+#                                             sustained_high_performance carries no polling
+#                                             request and measured identical to burst on the
+#                                             host, where fastrpc 1.0.15 accepts polling.
 #   htp_graph_finalization_optimization_mode  0 (ORT's default) = compile fastest. Higher
 #                                             modes trade startup for runtime, and graph
 #                                             finalization is single-threaded and can take
@@ -75,7 +88,7 @@ SKEL_GLOB = "libQnnHtpV*Skel.so"
 #   offload_graph_io_quantization             keep graph-boundary quantize/dequantize on
 #                                             the CPU, so a QDQ graph still takes float I/O
 DEFAULT_QNN_OPTIONS = {
-    "htp_performance_mode": "burst",
+    "htp_performance_mode": "sustained_high_performance",
     "htp_graph_finalization_optimization_mode": "0",
     "enable_htp_fp16_precision": "1",
     "offload_graph_io_quantization": "1",
@@ -97,6 +110,9 @@ CONTEXT_COMPILE_OPTIONS = (
     "htp_arch",
     "vtcm_mb",
 )
+
+# ORT log severity (0 verbose, 1 info, 2 warning, 3 error, 4 fatal) unless EASYOCR_ORT_LOG_LEVEL says otherwise.
+DEFAULT_ORT_LOG_SEVERITY = 3
 
 _plugin_registered = False
 _adsp_checked = False
@@ -193,12 +209,14 @@ def _session_options(intra_op_threads: int | None, profile: bool = False) -> ort
         # every registered provider, including one that claimed no nodes at all.
         session_options.enable_profiling = True
         session_options.profile_file_prefix = "easyocr_ort_profile"
-    # 0 = verbose. At that level ORT prints the node partitioning, i.e. whether the graph
-    # really landed on the NPU ("All nodes placed on [QNNExecutionProvider]") or got split.
-    log_level = os.environ.get("EASYOCR_ORT_LOG_LEVEL")
-    if log_level:
-        ort.set_default_logger_severity(int(log_level))
-        session_options.log_severity_level = int(log_level)
+    # Errors only by default: at WARNING, ORT prints per session that "some nodes were not
+    # assigned to the preferred execution providers" (the 4 DequantizeLinear nodes QNN
+    # leaves on the CPU, expected) plus Windows-only feature notices. 0 = verbose, at that
+    # level ORT prints the node partitioning, i.e. whether the graph really landed on the
+    # NPU ("All nodes placed on [QNNExecutionProvider]") or got split.
+    severity = int(os.environ.get("EASYOCR_ORT_LOG_LEVEL") or DEFAULT_ORT_LOG_SEVERITY)
+    ort.set_default_logger_severity(severity)
+    session_options.log_severity_level = severity
     return session_options
 
 
@@ -270,14 +288,11 @@ def _prepare_adsp_path(backend_path: str) -> None:
 
     backend_dir = os.path.dirname(os.path.abspath(backend_path)) if os.sep in backend_path or "/" in backend_path else ""
     if _has_skels(backend_dir):
+        # The expected case in the container (base image exports its own QAIRT's skel
+        # directory): switch silently, EASYOCR_QNN_ADSP_PATH / EASYOCR_QNN_KEEP_ADSP_PATH
+        # are the documented overrides.
         if current != backend_dir:
             _set_adsp_path(backend_dir)
-            _log(
-                f"ADSP_LIBRARY_PATH set to {backend_dir}, the skel libraries shipped with "
-                f"{os.path.basename(backend_path)}"
-                + (f" (was {current})" if current else "")
-                + ". Override with EASYOCR_QNN_ADSP_PATH, or keep the inherited value with EASYOCR_QNN_KEEP_ADSP_PATH=1."
-            )
         return
 
     if not current:
@@ -319,13 +334,15 @@ def _writable(directory: str) -> bool:
     return os.access(directory, os.W_OK)
 
 
-def _context_write_dir(model_path: str) -> str:
+def _context_write_dir(model_path: str, announce: bool = False) -> str:
     """
     Where a freshly compiled HTP context binary is written.
 
     Next to the model by default. That directory is read-only in most container images,
     so fall back to a cache directory rather than losing the NPU: a failed context write
-    otherwise takes the whole QNN session down with it.
+    otherwise takes the whole QNN session down with it. The fallback is only announced
+    when `announce` is set, i.e. when a compile is actually about to write there - the
+    same lookup runs at every start to find shipped binaries, where it is not news.
     """
     explicit = os.environ.get("EASYOCR_QNN_CONTEXT_DIR")
     if explicit:
@@ -338,14 +355,16 @@ def _context_write_dir(model_path: str) -> str:
     base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
     fallback = os.path.join(base, "easyocr-onnx", "qnn-context")
     if _writable(fallback):
-        _log(
-            f"{beside_model} is not writable; caching compiled HTP graphs in {fallback} instead. "
-            "Mount a volume there (or set EASYOCR_QNN_CONTEXT_DIR) to keep them across container restarts."
-        )
+        if announce:
+            _log(
+                f"{beside_model} is not writable; caching compiled HTP graphs in {fallback} instead. "
+                "Mount a volume there (or set EASYOCR_QNN_CONTEXT_DIR) to keep them across container restarts."
+            )
         return fallback
 
     fallback = os.path.join(tempfile.gettempdir(), "easyocr-onnx-qnn-context")
-    _log(f"no writable cache directory found; falling back to {fallback} (lost on reboot)")
+    if announce:
+        _log(f"no writable cache directory found; falling back to {fallback} (lost on reboot)")
     return fallback
 
 
@@ -369,7 +388,7 @@ def _context_binary_names(model_path: str) -> list[str]:
 
 def _context_write_path(model_path: str) -> str:
     """Where a freshly compiled HTP context binary for `model_path` is written (SoC-specific name when the SoC is known)."""
-    return os.path.join(_context_write_dir(model_path), _context_binary_names(model_path)[0])
+    return os.path.join(_context_write_dir(model_path, announce=True), _context_binary_names(model_path)[0])
 
 
 def _find_context_binary(model_path: str) -> str | None:

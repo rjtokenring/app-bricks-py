@@ -41,7 +41,8 @@ def _stub_onnxruntime(version: str = "1.29.0") -> types.ModuleType:
     ort.SessionOptions = SessionOptions
     ort.RunOptions = type("RunOptions", (), {"add_run_config_entry": lambda self, k, v: None})
     ort.get_available_providers = lambda: ["CPUExecutionProvider"]
-    ort.set_default_logger_severity = lambda level: None
+    ort.default_severity_calls = []
+    ort.set_default_logger_severity = ort.default_severity_calls.append
     return ort
 
 
@@ -338,7 +339,7 @@ def test_adsp_path_follows_the_skels_shipped_with_the_backend(onnx_ep, tmp_path,
 
     assert os.environ["ADSP_LIBRARY_PATH"] == str(wheel)
     assert os.environ["CDSP_LIBRARY_PATH"] == str(wheel)
-    assert "was /usr/lib/rfsa/adsp" in capsys.readouterr().out
+    assert capsys.readouterr().out == ""  # the expected case in the container: switched silently
 
 
 def test_adsp_path_override_and_keep_are_honoured(onnx_ep, tmp_path, monkeypatch):
@@ -365,6 +366,33 @@ def test_inherited_adsp_path_without_skels_is_dropped_for_bare_backend(onnx_ep, 
 
     assert "ADSP_LIBRARY_PATH" not in os.environ
     assert "unset ADSP_LIBRARY_PATH" in capsys.readouterr().out
+
+
+# --- provider / session options -----------------------------------------------------------
+
+
+def test_default_perf_mode_avoids_rpc_polling(onnx_ep):
+    """burst makes ORT request RPC polling QoS, which the container's fastrpc 1.0.6 rejects; QNN
+    then drops the whole power config and the HTP runs at default clocks (65 ms/box vs 15)."""
+    assert onnx_ep.DEFAULT_QNN_OPTIONS["htp_performance_mode"] == "sustained_high_performance"
+    assert onnx_ep._qnn_provider_options(None)["htp_performance_mode"] == "sustained_high_performance"
+
+
+def test_perf_mode_env_override(onnx_ep, monkeypatch):
+    monkeypatch.setenv("EASYOCR_QNN_PERF_MODE", "burst")
+    assert onnx_ep._qnn_provider_options(None)["htp_performance_mode"] == "burst"
+
+
+def test_ort_logs_errors_only_by_default(onnx_ep, monkeypatch):
+    monkeypatch.delenv("EASYOCR_ORT_LOG_LEVEL", raising=False)
+    options = onnx_ep._session_options(None)
+    assert options.log_severity_level == 3
+    assert sys.modules["onnxruntime"].default_severity_calls[-1] == 3
+
+    monkeypatch.setenv("EASYOCR_ORT_LOG_LEVEL", "0")
+    options = onnx_ep._session_options(None)
+    assert options.log_severity_level == 0
+    assert sys.modules["onnxruntime"].default_severity_calls[-1] == 0
 
 
 # --- profile summary ---------------------------------------------------------------------

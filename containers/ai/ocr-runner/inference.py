@@ -21,6 +21,7 @@ import cv2
 import numpy as np
 
 from aihub.image_processing import denormalize_coordinates, resize_pad
+from aihub.logging import logger
 
 from utils.bbox_processing import box_4corners, box_xx_yy, diff, get_det_boxes, group_text_box
 from utils.constants import (
@@ -38,13 +39,18 @@ from utils.model_io_processing import ONNXModel
 from utils.orientation import parse_rotations, plan_variants, rotate_cutout, select_best_readings
 from utils.post_processing import CTCLabelConverter
 
-# Stage-by-stage timing prints, disable with EASYOCR_DEBUG=0.
-DEBUG_TIMING = os.environ.get("EASYOCR_DEBUG", "1") != "0"
+# Stage-by-stage timing and configuration prints, off by default; EASYOCR_DEBUG=1 enables
+# them. One INFO summary line per frame is always logged (see inference_callback).
+DEBUG_TIMING = os.environ.get("EASYOCR_DEBUG", "0") == "1"
 
 
 def _debug(message: str) -> None:
     if DEBUG_TIMING:
         print(f"[ocr-debug] {message}", flush=True)
+
+
+# Per-frame counters filled by recognizer_get_text for the summary line.
+_frame_stats = {"boxes": 0, "reads": 0, "retries": 0}
 
 
 def _load_models() -> tuple[ONNXModel, ONNXModel]:
@@ -78,8 +84,8 @@ def _load_models() -> tuple[ONNXModel, ONNXModel]:
 
 
 detector, recognizer = _load_models()
-_debug(
-    f"detector on {detector.execution_provider}, recognizer on {recognizer.execution_provider}"
+logger.info(
+    f"ocr: detector on {detector.execution_provider}, recognizer on {recognizer.execution_provider}"
     + (
         " (measured)"
         if detector.placement or recognizer.placement
@@ -113,20 +119,20 @@ def apply_config(config: dict) -> None:
         value = config.get("allowlist")
         allowlist = str(value) if value else None
         converter.set_allowlist(allowlist)
-        print(f"config: allowlist set to {allowlist!r}", flush=True)
+        _debug(f"config: allowlist set to {allowlist!r}")
     if "rotation" in config:
         try:
             _settings["rotations"] = parse_rotations(config.get("rotation"))
         except ValueError as exc:
-            print(f"config: rotations ignored ({exc}); keeping {_settings['rotations']}", flush=True)
+            logger.warning(f"ocr: config rotation ignored ({exc}); keeping {_settings['rotations']}")
         else:
-            print(f"config: rotations set to {_settings['rotations']}", flush=True)
+            _debug(f"config: rotations set to {_settings['rotations']}")
 
 
 _recognizer_classes = int(recognizer.output_shapes[0][-1])
 if _recognizer_classes != converter.num_classes:
-    print(
-        f"Warning: recognizer emits {_recognizer_classes} classes but the configured character "
+    logger.warning(
+        f"ocr: recognizer emits {_recognizer_classes} classes but the configured character "
         f"set has {converter.num_classes} (including the CTC blank). Decoded text will be wrong - "
         f"update CHARACTERS/LANG_CHAR in utils/constants.py to match the exported model."
     )
@@ -387,6 +393,7 @@ def recognizer_get_text(
     if rotations and best:
         rotated = sum(1 for angle, _, _ in best if angle)
         _debug(f"rotations {rotations}: {len(frames) - len(cutouts)} extra readings, {rotated}/{len(best)} boxes read best when rotated")
+    _frame_stats["boxes"], _frame_stats["reads"] = len(cutouts), len(frames)
 
     # Re-read anything the recognizer was unsure about, with the contrast pushed up.
     contrast_ths = RECOGNIZER_ARGS["contrast_ths"]
@@ -397,6 +404,7 @@ def recognizer_get_text(
         high_contrast_predictions = recognizer_inference([adjust_contrast(cutout_frames[i], contrast) for i in low_confidence_indices])
     else:
         high_contrast_predictions = []
+    _frame_stats["retries"] = len(low_confidence_indices)
 
     result_horizontal: list[tuple[box_xx_yy, str, float]] = []
     result_free: list[tuple[box_4corners, str, float]] = []
@@ -478,4 +486,11 @@ def inference_callback(rgb_frame: np.ndarray) -> tuple[np.ndarray | None, dict]:
         f"(detector {(t_postprocess - t_start) * 1000:.0f} ms, recognizer {(t_end - t_postprocess) * 1000:.0f} ms)"
     )
 
-    return None, build_metadata(result_horizontal, result_free)
+    metadata = build_metadata(result_horizontal, result_free)
+    # One line per frame, always: enough to trace calls and performance from the container logs.
+    logger.info(
+        f"ocr: {rgb_frame.shape[1]}x{rgb_frame.shape[0]} frame, {len(metadata['detections'])} texts from {_frame_stats['boxes']} boxes "
+        f"({_frame_stats['reads']} reads, {_frame_stats['retries']} retries) in {(t_end - t_start) * 1000:.0f} ms "
+        f"[detector {(t_postprocess - t_start) * 1000:.0f} ms, recognizer {(t_end - t_postprocess) * 1000:.0f} ms]"
+    )
+    return None, metadata

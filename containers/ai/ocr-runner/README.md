@@ -158,8 +158,9 @@ EASYOCR_QNN_VERIFY=1 python -c "import inference"      # loads both models like 
 Partial offload is normal (4 `DequantizeLinear` nodes stay on the CPU in the recognizer,
 ~2 % of the time); many partitions are not. If the backend does not come up at all
 (`QNN_DEVICE_ERROR_INVALID_CONFIG`, "Failed to create device"), the usual causes in order
-are: an `ADSP_LIBRARY_PATH` that does not hold the skels matching `libQnnHtp.so` (the
-`[ocr-ep]` log line says which directory was chosen), FastRPC permissions (`/dev/fastrpc-cdsp`
+are: an `ADSP_LIBRARY_PATH` that does not hold the skels matching `libQnnHtp.so` (ORT's own
+warning `Using existing ADSP_LIBRARY_PATH setting of ...` names the directory in use; the
+runner switches to the wheel's silently), FastRPC permissions (`/dev/fastrpc-cdsp`
 and `/dev/dma_heap/system` not passed to the container), and an `htp_arch` / `soc_model`
 forced through the environment that the SoC does not have. `EASYOCR_ORT_LOG_LEVEL=0` makes
 ORT print the QNN error verbatim.
@@ -179,7 +180,7 @@ ORT print the QNN error verbatim.
 | `EASYOCR_QNN_BACKEND_PATH` | wheel's `libQnnHtp.so` | HTP backend library |
 | `EASYOCR_QNN_ADSP_PATH` | wheel directory | `ADSP_LIBRARY_PATH` for the DSP skel libraries |
 | `EASYOCR_QNN_KEEP_ADSP_PATH` | `0` | `1` = keep the inherited `ADSP_LIBRARY_PATH` untouched |
-| `EASYOCR_QNN_PERF_MODE` | `burst` | `sustained_high_performance`, `balanced`, `power_saver`, ... |
+| `EASYOCR_QNN_PERF_MODE` | `sustained_high_performance` | `burst`, `balanced`, `power_saver`, ... See the note on `burst` below |
 | `EASYOCR_QNN_FINALIZATION_MODE` | `0` | `0` fastest compile ... `3` slowest compile / fastest run (invalidates binaries) |
 | `EASYOCR_QNN_SOC_MODEL` / `EASYOCR_QNN_HTP_ARCH` / `EASYOCR_QNN_VTCM_MB` | - | target-specific tuning (invalidates binaries) |
 | `EASYOCR_PARALLEL_INIT` | `0` | `1` = compile the two models on two threads |
@@ -187,9 +188,23 @@ ORT print the QNN error verbatim.
 | `EASYOCR_QNN_OP_TRACE` | `0` | `1` = dump the ONNX-op to QNN-op mapping |
 | `EASYOCR_ORT_PROFILE` | `0` | `1` = write an ORT profile showing the QNN/CPU node split |
 | `EASYOCR_QNN_RPC_LATENCY` | - | per-run RPC control latency, microseconds |
-| `EASYOCR_ORT_LOG_LEVEL` | - | `0` = verbose ORT logging (prints the partitioning) |
+| `EASYOCR_ORT_LOG_LEVEL` | `3` | ORT log severity: `3` errors only, `2` warnings, `0` verbose (prints the partitioning) |
 | `EASYOCR_ORT_THREADS` | - | intra-op threads for the CPU provider |
-| `EASYOCR_DEBUG` | `1` | stage timings on stdout, `0` to silence |
+| `EASYOCR_DEBUG` | `0` | `1` = stage-by-stage timings and applied config on stdout. One INFO summary line per frame is always logged |
+
+## Why not `burst`
+
+`htp_performance_mode=burst` is the QNN mode with the highest clocks, but with `burst` ORT
+also asks fastrpc for RPC polling QoS (`rpc_polling_time=9999`, i.e. `RPC_POLL_QOS`). The
+container ships its own fastrpc 1.0.6, built from source in `qairt-common-base`, and there
+`manage_poll_qos` fails; QNN rejects the **whole** power configuration, DCVS included, ORT
+logs `Unable to set HTP power configurations` and the HTP stays at default clocks. Measured
+in the container on the 21q: detector invoke 103 ms and 65 ms per recognizer call with
+`burst` or `default`, 22 ms and 15 ms with `sustained_high_performance`, which asks for no
+polling. On the host, whose fastrpc is 1.0.15 (`qcom-fastrpc1`), `burst` works and is no
+faster than `sustained_high_performance` for this workload. Hence the default. If the base
+image moves to a fastrpc that accepts `RPC_POLL_QOS`, `burst` becomes an option again; the
+runtime-only nature of this option means switching it never invalidates the context binaries.
 
 ## Models
 
