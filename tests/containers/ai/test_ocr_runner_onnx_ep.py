@@ -69,7 +69,7 @@ def _load(name: str, monkeypatch, plugin: types.ModuleType | None = None):
 
 
 @pytest.fixture
-def onnx_ep(monkeypatch):
+def onnx_ep(monkeypatch, tmp_path):
     # Each test gets a fresh module: it keeps process-wide state (_adsp_checked).
     monkeypatch.delenv("EASYOCR_QNN_CONTEXT_DIR", raising=False)
     monkeypatch.delenv("EASYOCR_QNN_CONTEXT_STRICT", raising=False)
@@ -77,6 +77,7 @@ def onnx_ep(monkeypatch):
     monkeypatch.delenv("EASYOCR_QNN_KEEP_ADSP_PATH", raising=False)
     monkeypatch.delenv("ADSP_LIBRARY_PATH", raising=False)
     monkeypatch.delenv("CDSP_LIBRARY_PATH", raising=False)
+    monkeypatch.setenv("EASYOCR_SOC_SYSFS", str(tmp_path / "no-soc0"))  # no SoC identity unless a test provides one
     return _load("onnx_ep", monkeypatch, plugin=_stub_plugin())
 
 
@@ -222,6 +223,97 @@ def test_missing_fingerprint_is_tolerated(onnx_ep, tmp_path, capsys):
 
     assert onnx_ep._check_fingerprint(str(cache), str(model), _options()) is True
     assert "no fingerprint" in capsys.readouterr().out
+
+
+# --- SoC identity ------------------------------------------------------------------------
+
+
+def _soc_sysfs(root: Path, soc_id: str, machine: str) -> Path:
+    directory = root / "soc0"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "soc_id").write_text(f"{soc_id}\n", encoding="utf-8")
+    (directory / "machine").write_text(f"{machine}\n", encoding="utf-8")
+    return directory
+
+
+def test_fingerprint_records_the_soc(onnx_ep, tmp_path, monkeypatch):
+    monkeypatch.setenv("EASYOCR_SOC_SYSFS", str(_soc_sysfs(tmp_path, "675", "QCS8275")))
+    fingerprint = onnx_ep._context_fingerprint(str(_make_model(tmp_path)), _options())
+    assert (fingerprint["soc_id"], fingerprint["soc_machine"]) == ("675", "QCS8275")
+
+
+def test_fingerprint_without_sysfs_records_unknown_soc(onnx_ep, tmp_path):
+    fingerprint = onnx_ep._context_fingerprint(str(_make_model(tmp_path)), _options())
+    assert (fingerprint["soc_id"], fingerprint["soc_machine"]) == ("unknown", "unknown")
+
+
+def test_binary_compiled_for_another_soc_is_rejected_even_when_not_strict(onnx_ep, tmp_path, monkeypatch, capsys):
+    model = _make_model(tmp_path)
+    cache = tmp_path / "recognizer.qnn_ctx.onnx"
+    cache.write_bytes(b"ctx")
+    monkeypatch.setenv("EASYOCR_SOC_SYSFS", str(_soc_sysfs(tmp_path / "compile-board", "675", "QCS8275")))
+    onnx_ep._write_fingerprint(str(cache), str(model), _options())
+
+    monkeypatch.setenv("EASYOCR_SOC_SYSFS", str(_soc_sysfs(tmp_path / "other-board", "519", "QCS6490")))
+    monkeypatch.delenv("EASYOCR_QNN_CONTEXT_STRICT", raising=False)
+
+    assert onnx_ep._check_fingerprint(str(cache), str(model), _options()) is False
+    out = capsys.readouterr().out
+    assert "ERROR" in out and "QCS8275 (soc_id 675)" in out and "QCS6490 (soc_id 519)" in out
+
+
+def test_binary_for_the_same_soc_passes(onnx_ep, tmp_path, monkeypatch, capsys):
+    model = _make_model(tmp_path)
+    cache = tmp_path / "recognizer.qnn_ctx.onnx"
+    cache.write_bytes(b"ctx")
+    monkeypatch.setenv("EASYOCR_SOC_SYSFS", str(_soc_sysfs(tmp_path, "675", "QCS8275")))
+    onnx_ep._write_fingerprint(str(cache), str(model), _options())
+
+    assert onnx_ep._check_fingerprint(str(cache), str(model), _options()) is True
+    assert "WARNING" not in capsys.readouterr().out
+
+
+def test_unidentifiable_soc_warns_but_loads(onnx_ep, tmp_path, monkeypatch, capsys):
+    """A container without /sys/devices/soc0 mounted cannot check the SoC: say so, do not refuse."""
+    model = _make_model(tmp_path)
+    cache = tmp_path / "recognizer.qnn_ctx.onnx"
+    cache.write_bytes(b"ctx")
+    monkeypatch.setenv("EASYOCR_SOC_SYSFS", str(_soc_sysfs(tmp_path, "675", "QCS8275")))
+    onnx_ep._write_fingerprint(str(cache), str(model), _options())
+
+    monkeypatch.setenv("EASYOCR_SOC_SYSFS", str(tmp_path / "missing"))
+    assert onnx_ep._check_fingerprint(str(cache), str(model), _options()) is True
+    out = capsys.readouterr().out
+    assert "cannot be identified" in out and "Mount /sys/devices/soc0" in out
+    assert "WARNING:" not in out  # the soc fields alone must not count as a setup difference
+
+
+def test_binary_name_carries_the_soc_id(onnx_ep, tmp_path, monkeypatch):
+    model = _make_model(tmp_path / "models")
+    assert onnx_ep._context_binary_names(str(model)) == ["recognizer.qnn_ctx.onnx"]
+
+    monkeypatch.setenv("EASYOCR_SOC_SYSFS", str(_soc_sysfs(tmp_path, "675", "QCS8275")))
+    assert onnx_ep._context_binary_names(str(model)) == ["recognizer.soc675.qnn_ctx.onnx", "recognizer.qnn_ctx.onnx"]
+    assert onnx_ep._context_write_path(str(model)) == str(tmp_path / "models" / "recognizer.soc675.qnn_ctx.onnx")
+
+
+def test_binaries_for_several_socs_coexist_and_the_matching_one_is_picked(onnx_ep, tmp_path, monkeypatch):
+    """One image, one binary per supported SoC: the runner picks the one for the board it is on."""
+    model_dir = tmp_path / "models"
+    model = _make_model(model_dir)
+    for soc in ("675", "519"):
+        (model_dir / f"recognizer.soc{soc}.qnn_ctx.onnx").write_bytes(b"ctx")
+    (model_dir / "recognizer.qnn_ctx.onnx").write_bytes(b"generic")
+
+    monkeypatch.setenv("EASYOCR_SOC_SYSFS", str(_soc_sysfs(tmp_path / "a", "675", "QCS8275")))
+    assert onnx_ep._find_context_binary(str(model)) == str(model_dir / "recognizer.soc675.qnn_ctx.onnx")
+
+    monkeypatch.setenv("EASYOCR_SOC_SYSFS", str(_soc_sysfs(tmp_path / "b", "519", "QCS6490")))
+    assert onnx_ep._find_context_binary(str(model)) == str(model_dir / "recognizer.soc519.qnn_ctx.onnx")
+
+    # Unsupported SoC: only the unsuffixed binary is considered (and its fingerprint checked later).
+    monkeypatch.setenv("EASYOCR_SOC_SYSFS", str(_soc_sysfs(tmp_path / "c", "999", "Other")))
+    assert onnx_ep._find_context_binary(str(model)) == str(model_dir / "recognizer.qnn_ctx.onnx")
 
 
 # --- ADSP_LIBRARY_PATH -------------------------------------------------------------------

@@ -5,8 +5,13 @@
 #   uv pip compile requirements.in --python-platform aarch64-manylinux_2_34 \
 #       --python-version 3.13 --generate-hashes -o requirements.txt
 #
-# Bumping onnxruntime-qnn changes the QAIRT bundled in the wheel (2.5.0 -> QAIRT 2.49.40),
-# which invalidates every pre-compiled HTP context binary shipped next to the models.
+# Bumping onnxruntime-qnn changes the QAIRT bundled in the wheel, which invalidates every
+# pre-compiled HTP context binary shipped next to the models. The line below is read by
+# tests/containers/ai/test_ocr_runner_context_binaries.py and compared with the
+# `qnn_version` recorded in models/**/*.qnn_ctx.json: update it together with the pin
+# (the value is `onnxruntime_qnn.build_and_package_info.qnn_version` of the new wheel)
+# and recompile the binaries with tools/compile_htp_context.py.
+# qairt-version: 2.49.40
 opencv-python-headless==5.0.0.93
 onnxruntime==1.29.0
 onnxruntime-qnn==2.5.0

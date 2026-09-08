@@ -7,11 +7,16 @@
 Why
 ---
 The first QNN session on a model compiles its graph for the HTP. Graph finalization is
-single-threaded inside QNN and takes minutes on the recognizer (~6.5 min measured on
-QCS8275; the detector takes ~1.5 s). ONNX Runtime can serialize the compiled graph as an
-"EP context" model - `<model>.qnn_ctx.onnx` - that later sessions load in about a second
-instead of compiling. This script produces those files so they can be committed next to
-the models and shipped in the image: no container ever pays the compile.
+single-threaded inside QNN and takes minutes on the recognizer (130 s measured on the 21q
+board with finalization mode 0, 6.5 min with mode 3; the detector takes ~2 s). ONNX
+Runtime can serialize the compiled graph as an
+"EP context" model - `<model>.soc<soc_id>.qnn_ctx.onnx` - that later sessions load in
+0.25 s instead of compiling. This script produces those files so they can be committed
+next to the models and shipped in the image: no container ever pays the compile.
+
+The name carries the SoC id (/sys/devices/soc0/soc_id, e.g. `recognizer.soc675.qnn_ctx.onnx`
+for a QCS8275), so one image can ship one binary per supported SoC and the runner picks
+the one matching the board. Run this script once per SoC to support and commit all of them.
 
 A context binary is valid only for the exact combination that produced it:
 
@@ -20,9 +25,10 @@ A context binary is valid only for the exact combination that produced it:
   * the model file
   * the compile-time provider options in `utils.onnx_ep.DEFAULT_QNN_OPTIONS`
 
-That combination is recorded next to each binary as `<model>.qnn_ctx.json` and checked by
-the runner at start-up (see `utils/onnx_ep.py`). Commit the `.json` together with the
-`.onnx`. Rebuild both whenever any of the four items above changes.
+That combination is recorded next to each binary as `<model>.soc<soc_id>.qnn_ctx.json` and
+checked by the runner at start-up (see `utils/onnx_ep.py`); a binary whose recorded soc_id
+differs from the board's is refused. Commit the `.json` together with the `.onnx`. Rebuild
+both whenever any of the four items above changes.
 
 Where to run it
 ---------------

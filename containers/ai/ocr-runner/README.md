@@ -19,7 +19,7 @@ graphs land on the NPU: detector ~20 ms, recognizer ~15 ms per box (QCS8275 / IQ
 | `utils/model_io_processing.py` | `ONNXModel`: NHWC float in/out over the NCHW uint8 graphs, using `metadata.json` |
 | `utils/constants.py` | model paths, thresholds, character set |
 | `utils/{bbox,image,post}_processing.py`, `utils/metadata.py` | runtime-agnostic EasyOCR ports (unchanged from the TFLite version) |
-| `models/easyocr-onnx-w8a8/` | `.onnx` + `.data` graphs, `metadata.json`, and the compiled `*.qnn_ctx.onnx` / `*.qnn_ctx.json` |
+| `models/easyocr-onnx-w8a8/` | `.onnx` + `.data` graphs, `metadata.json`, and the compiled `*.soc<id>.qnn_ctx.onnx` / `.json`, one pair per SoC |
 | `tools/compile_htp_context.py` | run on the board: compiles both graphs for the HTP and writes the context binaries |
 | `requirements.in` / `requirements.txt` | direct dependencies / hash-locked set for linux aarch64 + CPython 3.13 |
 
@@ -55,16 +55,36 @@ release, and the compile options. Each is fixed in git:
 To bump any of them, edit `requirements.in` and regenerate (command in the file header),
 or replace the model files, and then **recompile the context binaries**.
 
+CI enforces it: `tests/containers/ai/test_ocr_runner_context_binaries.py` compares every
+committed `*.qnn_ctx.json` with the `==` pins in `requirements.txt`, the `# qairt-version:`
+line in `requirements.in`, the compile-time subset of `DEFAULT_QNN_OPTIONS` and the size of
+the `.onnx` it was compiled from, and checks they were compiled on the supported SoC
+(`soc_id` 675, QCS8275). A wheel bump, a model swap or an option change without recompiled
+binaries fails the test suite with the recompile command in the message. What CI cannot
+check is whether the binaries actually run on a board: that is the runtime `soc_id` check.
+
 ## HTP context binaries (the 7-minute problem)
 
 The first QNN session on a model compiles the graph for the HTP. Graph finalization is
-single-threaded inside QNN and, on the recognizer, takes minutes (~6.5 min measured on
-QCS8275, against ~1.5 s for the detector). The compiled result is written next to the
-model as `<model>.qnn_ctx.onnx` plus a `<model>.qnn_ctx.json` fingerprint, and every later
-start loads it in about a second.
+single-threaded inside QNN: on the 21q board (QCS8300-class SoC, HTP v73) the detector
+takes 2.1 s and the recognizer 130 s with `htp_graph_finalization_optimization_mode=0`
+(6.5 min with mode 3). The compiled result is written next to the model as
+`<model>.soc<soc_id>.qnn_ctx.onnx` plus a `<model>.soc<soc_id>.qnn_ctx.json` fingerprint,
+and every later start loads it in 0.25 s.
 
-The binaries are meant to be compiled once on the target and committed, so no container
-ever compiles:
+The SoC id in the name (`/sys/devices/soc0/soc_id`, 675 for the QCS8275) is what makes a
+**multi-SoC image** possible: ship one pair per supported SoC side by side and the runner
+loads the one matching the board it is on. Supporting another SoC means running the
+compile script once on such a board and committing its pair; `SUPPORTED_SOCS` in
+`tests/containers/ai/test_ocr_runner_context_binaries.py` lists the SoCs that must have
+binaries. The unsuffixed `<model>.qnn_ctx.onnx` is only written and looked up when the SoC
+cannot be identified.
+
+The binaries are compiled once on the target and **committed** (`detector.soc675.qnn_ctx.onnx`
+21.3 MB, `recognizer.soc675.qnn_ctx.onnx` 10.5 MB, compiled 2026-09-08 on the 21q board with
+`onnxruntime-qnn` 2.5.0 / QAIRT 2.49.40), so no container ever compiles. Measured
+placement: detector 1 QNN partition, 100 % on the NPU; recognizer 1 QNN partition plus 4
+`DequantizeLinear` nodes on the CPU (1.9 % of the time). To regenerate them:
 
 ```bash
 # on the board, from this directory, with requirements.txt installed
@@ -75,7 +95,7 @@ The script (docstring has the details, including how to run it inside the runner
 opens each graph on QNN exactly like the runner does, writes the binary and its
 fingerprint, measures how much of the graph the NPU really executes and fails if it ran
 nothing, then reopens the model from the binary and reports the warm start time. Commit
-`models/easyocr-onnx-w8a8/*.qnn_ctx.onnx` and `*.qnn_ctx.json` and rebuild the image.
+`models/easyocr-onnx-w8a8/*.soc<id>.qnn_ctx.onnx` and `.json` and rebuild the image.
 
 Lookup order at start-up (`_find_context_binary`):
 
@@ -85,19 +105,32 @@ Lookup order at start-up (`_find_context_binary`):
 2. the model directory - where the **committed, pre-compiled binaries** live. This works
    with a read-only model directory, so binaries baked into the image are used as-is.
 
+In each directory `<model>.soc<soc_id>.qnn_ctx.onnx` is tried first, then the unsuffixed
+name.
+
 A binary is only valid for the SoC/HTP architecture, QAIRT release, model file and compile
 options that produced it. The `.json` records `onnxruntime`, `onnxruntime_qnn`,
-`qnn_version` (the bundled QAIRT), the backend library, the model size and the compile
-options. On load it is compared with the current setup and every difference is logged by
-name. By default the binary is still loaded (`EASYOCR_QNN_CONTEXT_STRICT=1` recompiles
-instead); a binary QNN itself rejects is deleted and recompiled, and if it cannot be
-deleted (read-only image layer) the recompiled one lands in the cache directory and shadows
-it from then on. Making a mismatch a hard, early failure is the next step once the binaries
-are committed.
+`qnn_version` (the bundled QAIRT), the backend library, the model size, the compile
+options, and the SoC it was compiled on (`soc_id` and `soc_machine` from
+`/sys/devices/soc0`, e.g. `675` / `QCS8275`). On load it is compared with the current
+setup:
 
-Until they are, the first start of a fresh container pays the compile, well past the
-brick's 30 s connection timeout and the compose healthcheck: mount a volume at
-`EASYOCR_QNN_CONTEXT_DIR` so it is paid once per board, or start the container ahead of time.
+* a **different `soc_id`** rejects the binary outright, with an `ERROR` line naming both
+  SoCs: HTP code compiled for one SoC does not run on another. The same SoC on a board from
+  another vendor has the same `soc_id`, so it passes. The brick's compose file mounts
+  `/sys/devices/soc0` read-only into the container for this check; without it the runner
+  logs that the SoC cannot be identified and loads the binary unchecked;
+* every other difference is logged by name and the binary is still loaded
+  (`EASYOCR_QNN_CONTEXT_STRICT=1` recompiles instead).
+
+A binary QNN itself rejects is deleted and recompiled, and if it cannot be deleted
+(read-only image layer) the recompiled one lands in the cache directory and shadows it from
+then on.
+
+Without a usable binary the first start of a container pays the compile, well past the
+brick's 30 s connection timeout and the compose healthcheck. That is the failure mode a
+fingerprint mismatch must never degrade into silently; see the section above for what
+invalidates the binaries.
 
 ## Running outside Docker (on the board)
 

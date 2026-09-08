@@ -81,6 +81,12 @@ DEFAULT_QNN_OPTIONS = {
     "offload_graph_io_quantization": "1",
 }
 
+# Where Linux exposes the SoC identity. A context binary is HTP code for the architecture
+# and VTCM of the SoC it was compiled on, so the SoC is part of its fingerprint and checked
+# before loading. Inside the container this directory has to be mounted from the host (the
+# brick's compose file does); EASYOCR_SOC_SYSFS points elsewhere for tests.
+SOC_SYSFS_DIR = "/sys/devices/soc0"
+
 # Compile-time provider options: a context binary is only valid for the exact values it
 # was compiled with, so these are part of its fingerprint.
 CONTEXT_COMPILE_OPTIONS = (
@@ -343,14 +349,27 @@ def _context_write_dir(model_path: str) -> str:
     return fallback
 
 
-def _context_binary_name(model_path: str) -> str:
+def _context_binary_names(model_path: str) -> list[str]:
+    """
+    File names a compiled HTP context binary for `model_path` may have, most specific first.
+
+    Binaries are SoC-specific, so they carry the SoC id in their name:
+    `<model>.soc<soc_id>.qnn_ctx.onnx`. That lets one image ship one binary per supported
+    SoC side by side, and the runner picks the one matching /sys/devices/soc0/soc_id. The
+    unsuffixed `<model>.qnn_ctx.onnx` is the name used when the SoC cannot be identified,
+    and is accepted as a fallback (its fingerprint is still checked).
+    """
     stem = os.path.splitext(os.path.basename(model_path))[0]
-    return f"{stem}.qnn_ctx.onnx"
+    soc_id, _ = _soc_info()
+    names = [f"{stem}.qnn_ctx.onnx"]
+    if soc_id != "unknown":
+        names.insert(0, f"{stem}.soc{soc_id}.qnn_ctx.onnx")
+    return names
 
 
 def _context_write_path(model_path: str) -> str:
-    """Where a freshly compiled HTP context binary for `model_path` is written."""
-    return os.path.join(_context_write_dir(model_path), _context_binary_name(model_path))
+    """Where a freshly compiled HTP context binary for `model_path` is written (SoC-specific name when the SoC is known)."""
+    return os.path.join(_context_write_dir(model_path), _context_binary_names(model_path)[0])
 
 
 def _find_context_binary(model_path: str) -> str | None:
@@ -364,17 +383,20 @@ def _find_context_binary(model_path: str) -> str | None:
          model directory is read-only) - a binary recompiled on this machine must shadow a
          shipped one that was rejected and could not be deleted;
       2. the model directory, where shipped binaries live.
+
+    In each directory the SoC-specific name is tried before the unsuffixed one.
     """
-    name = _context_binary_name(model_path)
+    names = _context_binary_names(model_path)
     candidates = [_context_write_dir(model_path), os.path.dirname(os.path.abspath(model_path))]
     seen: set[str] = set()
     for directory in candidates:
         if directory in seen:
             continue
         seen.add(directory)
-        path = os.path.join(directory, name)
-        if os.path.isfile(path):
-            return path
+        for name in names:
+            path = os.path.join(directory, name)
+            if os.path.isfile(path):
+                return path
     return None
 
 
@@ -382,6 +404,24 @@ def _find_context_binary(model_path: str) -> str | None:
 # board to a container image, most often. They are only valid for the exact combination
 # below, and a mismatch that still loads is worse than one that fails, so the combination
 # is recorded next to the binary and checked on the way back in.
+def _soc_info() -> tuple[str, str]:
+    """
+    (soc_id, machine) of the SoC this process runs on, from sysfs.
+
+    Both are 'unknown' when the files cannot be read: a non-Qualcomm development machine,
+    or a container without /sys/devices/soc0 mounted from the host.
+    """
+    directory = os.environ.get("EASYOCR_SOC_SYSFS", SOC_SYSFS_DIR)
+    values: list[str] = []
+    for name in ("soc_id", "machine"):
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as handle:
+                values.append(handle.read().strip() or "unknown")
+        except OSError:
+            values.append("unknown")
+    return values[0], values[1]
+
+
 def _context_fingerprint(model_path: str, options: dict[str, str]) -> dict[str, str]:
     plugin = _plugin_module()
     compile_options = {key: value for key, value in options.items() if key in CONTEXT_COMPILE_OPTIONS}
@@ -390,6 +430,7 @@ def _context_fingerprint(model_path: str, options: dict[str, str]) -> dict[str, 
         model_stamp = f"{stat.st_size}"
     except OSError:
         model_stamp = "?"
+    soc_id, soc_machine = _soc_info()
 
     return {
         "onnxruntime": ort.__version__,
@@ -398,6 +439,8 @@ def _context_fingerprint(model_path: str, options: dict[str, str]) -> dict[str, 
         "backend": os.path.basename(options.get("backend_path", "")),
         "model_bytes": model_stamp,
         "options": json.dumps(compile_options, sort_keys=True),
+        "soc_id": soc_id,
+        "soc_machine": soc_machine,
     }
 
 
@@ -431,12 +474,37 @@ def _check_fingerprint(cache_path: str, model_path: str, options: dict[str, str]
         return True
 
     current = _context_fingerprint(model_path, options)
-    differences = [f"{key}: {recorded.get(key)!r} -> {current[key]!r}" for key in current if recorded.get(key) != current[key]]
+    name = os.path.basename(cache_path)
+
+    # The SoC is not negotiable: HTP code compiled for one SoC does not run on another, so
+    # a mismatch rejects the binary outright instead of "loading it anyway".
+    recorded_soc, current_soc = recorded.get("soc_id"), current["soc_id"]
+    if recorded_soc not in (None, "unknown"):
+        if current_soc == "unknown":
+            _log(
+                f"warning: {name} was compiled for {recorded.get('soc_machine')} (soc_id {recorded_soc}) but this SoC cannot be "
+                f"identified: {os.environ.get('EASYOCR_SOC_SYSFS', SOC_SYSFS_DIR)}/soc_id is not readable. Mount /sys/devices/soc0 "
+                "from the host into the container to enable the check."
+            )
+        elif current_soc != recorded_soc:
+            _log(
+                f"ERROR: {name} was compiled for {recorded.get('soc_machine')} (soc_id {recorded_soc}) but this board is "
+                f"{current['soc_machine']} (soc_id {current_soc}). HTP context binaries are SoC-specific: not loading it. "
+                "Recompile on this board with tools/compile_htp_context.py."
+            )
+            return False
+
+    # soc_machine is informational (the id is what is compared); everything else must match.
+    differences = [
+        f"{key}: {recorded.get(key)!r} -> {current[key]!r}"
+        for key in current
+        if key != "soc_machine" and not (key == "soc_id" and current_soc == "unknown") and recorded.get(key) != current[key]
+    ]
     if not differences:
         return True
 
     _log(
-        f"WARNING: {os.path.basename(cache_path)} was compiled under a different setup - "
+        f"WARNING: {name} was compiled under a different setup - "
         + "; ".join(differences)
         + ". Loading it anyway; it is only valid for the SoC, QAIRT version and compile options that produced it. "
         "Delete it to recompile, or set EASYOCR_QNN_CONTEXT_STRICT=1 to recompile automatically on a mismatch."
