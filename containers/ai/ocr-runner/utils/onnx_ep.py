@@ -10,9 +10,13 @@ through the QNN execution provider, which ships in two flavours:
 
   * plugin EP (`onnxruntime-qnn` >= 2.x, maintained by Qualcomm) - a standalone wheel
     registered at runtime against a stock `onnxruntime` install. It is the only variant
-    with Linux aarch64 wheels, so it is the one the container installs. The wheel is
-    self-contained: it carries its own QAIRT (libQnnHtp.so, libQnnHtpPrepare.so and the
-    libQnnHtpV*Skel.so DSP libraries), independent from the QAIRT in the base image.
+    with Linux aarch64 wheels, so it is the one the container installs. The wheel ships a
+    full QAIRT of its own (libQnnHtp.so, libQnnHtpPrepare.so, libQnnHtpV*Skel.so, ~190 MB)
+    and that is what the EP uses: the base image's QAIRT (2.45.41) is older than the one the
+    EP is built against (2.49.40) and is refused, and the EP releases built with older
+    QAIRTs miscompile the recognizer (see the README). The backend can be redirected to a
+    system copy with EASYOCR_QNN_BACKEND_PATH once the base image ships the same release;
+    `_check_backend_matches_plugin` then verifies the two match at start-up.
   * bundled EP (`onnxruntime-qnn` 1.x, Windows arm64/x64) - ships QNN inside the ORT
     wheel itself and shows up directly in `ort.get_available_providers()`.
 
@@ -21,11 +25,15 @@ Both are handled here; the plugin is preferred and the bundled build is the fall
 Environment variables
 ---------------------
 EASYOCR_EP                  auto (default) | qnn | cpu
-EASYOCR_QNN_BACKEND_PATH    explicit QnnHtp.dll / libQnnHtp.so path
+EASYOCR_QNN_BACKEND_PATH    explicit QnnHtp.dll / libQnnHtp.so path (default: the wheel's
+                            copy if present, else the bare name resolved by the dynamic
+                            loader, i.e. a system QAIRT)
 EASYOCR_QNN_ADSP_PATH       ADSP_LIBRARY_PATH for the DSP skel libraries (Linux)
 EASYOCR_QNN_KEEP_ADSP_PATH  1 - keep an inherited ADSP_LIBRARY_PATH as it is
 EASYOCR_QNN_PERF_MODE       sustained_high_performance (default), burst, balanced, ...
 EASYOCR_QNN_FINALIZATION_MODE  0 (default, fastest compile) .. 3 (slowest compile)
+EASYOCR_QNN_FP16            enable_htp_fp16_precision override (default 1)
+EASYOCR_QNN_OFFLOAD_IO_QUANT  offload_graph_io_quantization override (default 1)
 EASYOCR_QNN_SOC_MODEL       QNN SoC id, lets the HTP compile for a specific target
 EASYOCR_QNN_HTP_ARCH        HTP architecture number (68, 69, 73, 75, 79, ...)
 EASYOCR_QNN_VTCM_MB         VTCM budget in MB
@@ -53,6 +61,12 @@ import threading
 from collections import defaultdict
 
 import onnxruntime as ort
+
+# ORT log severity (0 verbose, 1 info, 2 warning, 3 error, 4 fatal) unless EASYOCR_ORT_LOG_LEVEL
+# says otherwise. Applied at import too: ORT's device discovery already logs at WARNING
+# ("GPU device discovery failed: /sys/class/drm/card0/device/vendor") before any session.
+DEFAULT_ORT_LOG_SEVERITY = 3
+ort.set_default_logger_severity(int(os.environ.get("EASYOCR_ORT_LOG_LEVEL") or DEFAULT_ORT_LOG_SEVERITY))
 
 QNN_EP_NAME = "QNNExecutionProvider"
 CPU_EP_NAME = "CPUExecutionProvider"
@@ -111,9 +125,6 @@ CONTEXT_COMPILE_OPTIONS = (
     "vtcm_mb",
 )
 
-# ORT log severity (0 verbose, 1 info, 2 warning, 3 error, 4 fatal) unless EASYOCR_ORT_LOG_LEVEL says otherwise.
-DEFAULT_ORT_LOG_SEVERITY = 3
-
 _plugin_registered = False
 _adsp_checked = False
 _setup_lock = threading.RLock()
@@ -138,6 +149,52 @@ def _plugin_qnn_version(plugin) -> str:
         return "none"
     info = getattr(plugin, "build_and_package_info", None)
     return str(getattr(info, "qnn_version", getattr(plugin, "qnn_version", "unknown")))
+
+
+_backend_versions: dict[str, str] = {}
+
+
+def _backend_qairt_version(backend_path: str) -> str:
+    """
+    The QAIRT release a QNN backend library belongs to, read from its `AISW_VERSION: x.y.z`
+    build string ('unknown' if the file cannot be read or carries no such string).
+
+    Used to make sure the backend the EP is about to load is the release the wheel was
+    built for: the EP only checks the QNN API version, which does not change every release.
+    """
+    if backend_path in _backend_versions:
+        return _backend_versions[backend_path]
+    version = "unknown"
+    try:
+        with open(backend_path, "rb") as handle:
+            data = handle.read()
+        marker = data.find(b"AISW_VERSION: ")
+        if marker >= 0:
+            start = marker + len(b"AISW_VERSION: ")
+            end = start
+            while end < len(data) and data[end : end + 1] in b"0123456789.":
+                end += 1
+            version = data[start:end].decode() or "unknown"
+    except OSError:
+        pass
+    _backend_versions[backend_path] = version
+    return version
+
+
+def _check_backend_matches_plugin(backend_path: str, plugin) -> None:
+    """Warn when the backend library is not the QAIRT release the plugin EP was built with."""
+    if plugin is None or not (os.sep in backend_path or "/" in backend_path):
+        return  # bundled EP, or a bare name resolved by the loader: nothing to compare against
+    backend, expected = _backend_qairt_version(backend_path), _plugin_qnn_version(plugin)
+    if backend == "unknown":
+        plugin_version = getattr(plugin, "__version__", "?")
+        _log(f"warning: could not read the QAIRT version of {backend_path}; expected {expected} (onnxruntime-qnn {plugin_version})")
+    elif backend != expected:
+        _log(
+            f"WARNING: {backend_path} is QAIRT {backend} but onnxruntime-qnn {getattr(plugin, '__version__', '?')} was built with QAIRT "
+            f"{expected}. Keep them in lockstep: bump QNP_VER in qairt-common-base and the onnxruntime-qnn pin together, then recompile "
+            "the HTP context binaries."
+        )
 
 
 def _register_plugin(plugin) -> bool:
@@ -166,12 +223,17 @@ def _register_plugin_locked(plugin) -> bool:
 def _qnn_provider_options(plugin) -> dict[str, str]:
     options = dict(DEFAULT_QNN_OPTIONS)
 
+    # Backend library: explicit path, else the wheel's own copy when it is still there,
+    # else the bare name, which the dynamic loader resolves through ld.so.cache (/usr/lib
+    # in the container, where the base image's QAIRT lives).
     backend_path = os.environ.get("EASYOCR_QNN_BACKEND_PATH")
     if not backend_path and plugin is not None and hasattr(plugin, "get_qnn_htp_path"):
         try:
-            backend_path = plugin.get_qnn_htp_path()
+            candidate = plugin.get_qnn_htp_path()
         except Exception:  # noqa: BLE001 - fall back to the bare library name
-            backend_path = None
+            candidate = None
+        if candidate and os.path.isfile(candidate):
+            backend_path = candidate
     options["backend_path"] = backend_path or DEFAULT_HTP_LIBRARY
 
     options["htp_performance_mode"] = os.environ.get("EASYOCR_QNN_PERF_MODE", options["htp_performance_mode"])
@@ -179,6 +241,15 @@ def _qnn_provider_options(plugin) -> dict[str, str]:
         "EASYOCR_QNN_FINALIZATION_MODE", options["htp_graph_finalization_optimization_mode"]
     )
     options["profiling_level"] = os.environ.get("EASYOCR_QNN_PROFILING", "off")
+    # Compile-time options, overridable for experiments; both are part of the context
+    # binary fingerprint, so changing them means recompiling.
+    for env_name, option_name in (
+        ("EASYOCR_QNN_FP16", "enable_htp_fp16_precision"),
+        ("EASYOCR_QNN_OFFLOAD_IO_QUANT", "offload_graph_io_quantization"),
+    ):
+        value = os.environ.get(env_name)
+        if value:
+            options[option_name] = value
 
     # Target-specific tuning, only forwarded when actually set: an empty or wrong value
     # here is enough to push the whole graph back onto the CPU.
@@ -456,6 +527,7 @@ def _context_fingerprint(model_path: str, options: dict[str, str]) -> dict[str, 
         "onnxruntime_qnn": str(getattr(plugin, "__version__", "none")),
         "qnn_version": _plugin_qnn_version(plugin),
         "backend": os.path.basename(options.get("backend_path", "")),
+        "backend_qairt": _backend_qairt_version(options.get("backend_path", "")),
         "model_bytes": model_stamp,
         "options": json.dumps(compile_options, sort_keys=True),
         "soc_id": soc_id,
@@ -513,11 +585,12 @@ def _check_fingerprint(cache_path: str, model_path: str, options: dict[str, str]
             )
             return False
 
-    # soc_machine is informational (the id is what is compared); everything else must match.
+    # soc_machine is informational (the id is what is compared); everything else recorded
+    # must match. Fields a fingerprint predates (written by an older runner) are not compared.
     differences = [
-        f"{key}: {recorded.get(key)!r} -> {current[key]!r}"
+        f"{key}: {recorded[key]!r} -> {current[key]!r}"
         for key in current
-        if key != "soc_machine" and not (key == "soc_id" and current_soc == "unknown") and recorded.get(key) != current[key]
+        if key in recorded and key != "soc_machine" and not (key == "soc_id" and current_soc == "unknown") and recorded[key] != current[key]
     ]
     if not differences:
         return True
@@ -563,6 +636,7 @@ def _try_qnn(model_path: str, intra_op_threads: int | None, profile: bool) -> or
         return None
 
     options = _qnn_provider_options(plugin)
+    _check_backend_matches_plugin(options["backend_path"], plugin)
     _prepare_adsp_path(options["backend_path"])
     use_cache = os.environ.get("EASYOCR_QNN_CONTEXT_CACHE", "1") != "0"
 

@@ -395,6 +395,53 @@ def test_ort_logs_errors_only_by_default(onnx_ep, monkeypatch):
     assert sys.modules["onnxruntime"].default_severity_calls[-1] == 0
 
 
+def test_backend_falls_back_to_the_system_library_when_the_wheel_copy_is_gone(onnx_ep, tmp_path, monkeypatch):
+    """The image deletes the wheel's libQnn*.so and uses the base image's QAIRT instead."""
+    monkeypatch.delenv("EASYOCR_QNN_BACKEND_PATH", raising=False)
+    plugin = sys.modules["onnxruntime_qnn"]
+    plugin.get_qnn_htp_path = lambda: str(tmp_path / "site-packages" / "onnxruntime_qnn" / "libQnnHtp.so")  # not there
+    assert onnx_ep._qnn_provider_options(plugin)["backend_path"] == onnx_ep.DEFAULT_HTP_LIBRARY  # bare name, ld.so.cache resolves it
+
+    wheel_lib = tmp_path / "site-packages" / "onnxruntime_qnn" / "libQnnHtp.so"
+    wheel_lib.parent.mkdir(parents=True)
+    wheel_lib.write_bytes(b"")
+    assert onnx_ep._qnn_provider_options(plugin)["backend_path"] == str(wheel_lib)  # still present: used
+
+    monkeypatch.setenv("EASYOCR_QNN_BACKEND_PATH", "/usr/lib/libQnnHtp.so")
+    assert onnx_ep._qnn_provider_options(plugin)["backend_path"] == "/usr/lib/libQnnHtp.so"  # explicit wins
+
+
+def _fake_backend(path: Path, version: str | None) -> Path:
+    payload = b"\x7fELF" + b"\x00" * 64 + (b"AISW_VERSION: " + version.encode() + b"\x00" if version else b"") + b"other strings"
+    path.write_bytes(payload)
+    return path
+
+
+def test_backend_qairt_version_is_read_from_the_library(onnx_ep, tmp_path):
+    assert onnx_ep._backend_qairt_version(str(_fake_backend(tmp_path / "libQnnHtp.so", "2.45.41"))) == "2.45.41"
+    assert onnx_ep._backend_qairt_version(str(_fake_backend(tmp_path / "libOther.so", None))) == "unknown"
+    assert onnx_ep._backend_qairt_version(str(tmp_path / "missing.so")) == "unknown"
+
+
+def test_backend_and_plugin_qairt_mismatch_is_reported(onnx_ep, tmp_path, capsys):
+    plugin = sys.modules["onnxruntime_qnn"]  # built with 2.49.40 in the stub
+    onnx_ep._check_backend_matches_plugin(str(_fake_backend(tmp_path / "libQnnHtp.so", "2.45.41")), plugin)
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "QAIRT 2.45.41" in out and "2.49.40" in out and "lockstep" in out
+
+    onnx_ep._check_backend_matches_plugin(str(_fake_backend(tmp_path / "libQnnHtpOk.so", "2.49.40")), plugin)
+    assert capsys.readouterr().out == ""
+
+    onnx_ep._check_backend_matches_plugin("libQnnHtp.so", plugin)  # bare name: nothing to read, nothing said
+    assert capsys.readouterr().out == ""
+
+
+def test_fingerprint_records_the_backend_qairt(onnx_ep, tmp_path):
+    backend = _fake_backend(tmp_path / "libQnnHtp.so", "2.45.41")
+    fingerprint = onnx_ep._context_fingerprint(str(_make_model(tmp_path)), _options(backend_path=str(backend)))
+    assert fingerprint["backend_qairt"] == "2.45.41"
+
+
 # --- profile summary ---------------------------------------------------------------------
 
 

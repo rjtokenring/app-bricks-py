@@ -1,5 +1,6 @@
 {
   "backend": "libQnnHtp.so",
+  "backend_qairt": "2.49.40",
   "model_bytes": "35805",
   "onnxruntime": "1.29.0",
   "onnxruntime_qnn": "2.5.0",

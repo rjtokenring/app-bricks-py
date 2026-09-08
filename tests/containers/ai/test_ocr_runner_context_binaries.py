@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 RUNNER_DIR = Path(__file__).resolve().parents[3] / "containers" / "ai" / "ocr-runner"
+BASE_IMAGE_DOCKERFILE = Path(__file__).resolve().parents[3] / "containers" / "base" / "qairt-common-base" / "Dockerfile"
 MODEL_DIR = RUNNER_DIR / "models" / "easyocr-onnx-w8a8"
 MODELS = ("detector", "recognizer")
 
@@ -57,6 +58,7 @@ def _expected_compile_options() -> dict[str, str]:
     """The compile-time subset of DEFAULT_QNN_OPTIONS, read from utils/onnx_ep.py itself."""
     stub = types.ModuleType("onnxruntime")
     stub.__version__ = "0"
+    stub.set_default_logger_severity = lambda level: None
     saved = sys.modules.get("onnxruntime")
     sys.modules["onnxruntime"] = stub
     try:
@@ -125,6 +127,10 @@ def test_fingerprint_matches_the_pinned_runtime(model: str, soc_id: str):
     assert fingerprint["backend"] == "libQnnHtp.so", (
         f"{model}: compiled for backend {fingerprint['backend']!r}, the runner uses the HTP (libQnnHtp.so)"
     )
+    assert fingerprint.get("backend_qairt") == qairt, (
+        f"{model}: the backend library used at compile time was QAIRT {fingerprint.get('backend_qairt')}, requirements.in declares "
+        f"qairt-version {qairt} {RECOMPILE_HINT}"
+    )
 
 
 @pytest.mark.parametrize(("model", "soc_id"), CASES)
@@ -148,3 +154,21 @@ def test_declared_qairt_version_matches_the_documented_wheel():
     qairt = _declared_qairt_version()
     lock = (RUNNER_DIR / "requirements.txt").read_text(encoding="utf-8")
     assert f"QAIRT {qairt}" in lock, f"requirements.txt header does not mention QAIRT {qairt}; regenerate it from requirements.in"
+
+
+def test_plugin_qairt_matches_the_base_image_qairt():
+    """When the runner is configured to use the base image's QAIRT (Dockerfile sets
+    EASYOCR_QNN_BACKEND_PATH=/usr/lib/libQnnHtp.so and drops the wheel's copy), the wheel must be
+    the release built with that exact QAIRT. QNP_VER in qairt-common-base is `major.minor.patch.build`;
+    the wheel reports `major.minor.patch`. While the wheel's own QAIRT is in use the check does not apply."""
+    dockerfile = (RUNNER_DIR / "Dockerfile").read_text(encoding="utf-8")
+    if not re.search(r"^ENV EASYOCR_QNN_BACKEND_PATH=/usr/lib/libQnnHtp\.so", dockerfile, re.MULTILINE):
+        pytest.skip("the runner uses the QAIRT bundled in the onnxruntime-qnn wheel, not the base image's")
+    match = re.search(r"^ENV QNP_VER=(\S+)", BASE_IMAGE_DOCKERFILE.read_text(encoding="utf-8"), re.MULTILINE)
+    assert match, "QNP_VER not found in the qairt-common-base Dockerfile"
+    base_qairt = ".".join(match.group(1).split(".")[:3])
+    declared = _declared_qairt_version()
+    assert declared == base_qairt, (
+        f"requirements.in declares qairt-version {declared} but the base image ships QAIRT {match.group(1)}: pick the onnxruntime-qnn "
+        f"release built with QAIRT {base_qairt} (github.com/onnxruntime/onnxruntime-qnn/releases), update the pins {RECOMPILE_HINT}"
+    )
