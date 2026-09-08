@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 
 RUNNER_DIR = Path(__file__).resolve().parents[3] / "containers" / "ai" / "ocr-runner"
-MODEL_DIR = RUNNER_DIR / "models" / "easyocr-onnx-w8a8"
+MODEL_DIR = RUNNER_DIR / "models" / "easyocr-onnx-float"
 
 
 def _stub_onnxruntime(version: str = "1.29.0") -> types.ModuleType:
@@ -492,16 +492,33 @@ def test_quantize_clips_to_the_dtype_range(model_io):
     assert model_io.quantize(values, 0, 1 / 255, np.dtype(np.uint8)).tolist() == [0, 255]
 
 
-def test_quantization_metadata_is_read_from_the_tracked_json(model_io):
-    """The container ships metadata.json in git: this is what the uint8 w8a8 graphs need
-    to turn real images into input tensors and logits back into probabilities."""
+def test_tracked_float_metadata_carries_no_quantization(model_io):
+    """The shipped graphs are the float export: float32 I/O, nothing to (de)quantize."""
     detector = model_io._load_quantization_metadata(str(MODEL_DIR / "detector.onnx"))
     recognizer = model_io._load_quantization_metadata(str(MODEL_DIR / "recognizer.onnx"))
+    assert detector == {"inputs": {}, "outputs": {}}
+    assert recognizer == {"inputs": {}, "outputs": {}}
+    metadata = json.loads((MODEL_DIR / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["precision"] == "float"
+    assert metadata["model_files"]["recognizer.onnx"]["inputs"]["image"]["dtype"] == "float32"
 
-    assert detector["inputs"]["image"] == pytest.approx((0.003921568859368563, 0.0))
-    assert detector["outputs"]["results"] == pytest.approx((0.004232470877468586, 12.0))
-    assert recognizer["inputs"]["image"] == pytest.approx((0.003920610062777996, 0.0))
-    assert recognizer["outputs"]["output_preds"] == pytest.approx((0.2553488612174988, 127.0))
+
+def test_quantization_metadata_is_read_for_integer_graphs(model_io, tmp_path):
+    """ai-hub's w8a8 export ships uint8 graphs whose scale/zero-point live in metadata.json."""
+    (tmp_path / "metadata.json").write_text(
+        json.dumps({
+            "model_files": {
+                "recognizer.onnx": {
+                    "inputs": {"image": {"dtype": "uint8", "quantization_parameters": {"scale": 0.003920610062777996, "zero_point": 0}}},
+                    "outputs": {"output_preds": {"dtype": "uint8", "quantization_parameters": {"scale": 0.2553488612174988, "zero_point": 127}}},
+                }
+            }
+        }),
+        encoding="utf-8",
+    )
+    params = model_io._load_quantization_metadata(str(tmp_path / "recognizer.onnx"))
+    assert params["inputs"]["image"] == pytest.approx((0.003920610062777996, 0.0))
+    assert params["outputs"]["output_preds"] == pytest.approx((0.2553488612174988, 127.0))
 
 
 def test_quantization_metadata_is_empty_without_the_json(model_io, tmp_path):

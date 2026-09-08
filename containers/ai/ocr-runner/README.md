@@ -2,13 +2,14 @@
 
 Model runner behind the `arduino:ocr` brick. CRAFT text detector + CRNN recognizer from
 [Qualcomm AI Hub's EasyOCR](https://aihub.qualcomm.com/models/easyocr) (ai-hub-models
-v0.61.0, w8a8), executed with ONNX Runtime on the Hexagon NPU through the QNN execution
-provider. Pre/post-processing is numpy/OpenCV only: no torch, no `easyocr` package.
+v0.61.0, float export), executed with ONNX Runtime on the Hexagon NPU as fp16 through the
+QNN execution provider. Pre/post-processing is numpy/OpenCV only: no torch, no `easyocr`
+package.
 
 This used to be a TFLite/LiteRT runner. It was ported because the TFLite recognizer could
 not be delegated to the NPU through `libQnnTFLiteDelegate.so` (dynamic-shaped tensor in
 the exported graph), so it ran on the CPU at ~250 ms per text box. With ONNX Runtime both
-graphs land on the NPU: detector ~20 ms, recognizer ~15 ms per box (QCS8275 / IQ8).
+graphs land on the NPU: detector ~85 ms, recognizer ~17 ms per box (QCS8275 / IQ8, float).
 
 ## Layout
 
@@ -16,11 +17,11 @@ graphs land on the NPU: detector ~20 ms, recognizer ~15 ms per box (QCS8275 / IQ
 | --- | --- |
 | `inference.py` | the pipeline; `inference_callback` and `apply_config` are what `aihub-models-runner` calls |
 | `utils/onnx_ep.py` | ORT session factory: QNN plugin EP, CPU fallback, HTP context binaries, fingerprints |
-| `utils/model_io_processing.py` | `ONNXModel`: NHWC float in/out over the NCHW uint8 graphs, using `metadata.json` |
+| `utils/model_io_processing.py` | `ONNXModel`: NHWC float in/out over the NCHW graphs (and (de)quantization from `metadata.json` for integer exports) |
 | `utils/constants.py` | model paths, thresholds, character set |
 | `utils/orientation.py` | rotated text: read each cutout at 90/180/270 too and keep the most confident reading (`rotation` setting) |
 | `utils/{bbox,image,post}_processing.py`, `utils/metadata.py` | runtime-agnostic EasyOCR ports (unchanged from the TFLite version) |
-| `models/easyocr-onnx-w8a8/` | `.onnx` + `.data` graphs, `metadata.json`, and the compiled `*.soc<id>.qnn_ctx.onnx` / `.json`, one pair per SoC |
+| `models/easyocr-onnx-float/` | `.onnx` + `.data` graphs, `metadata.json`, and the compiled `*.soc<id>.qnn_ctx.onnx` / `.json`, one pair per SoC |
 | `tools/compile_htp_context.py` | run on the board: compiles both graphs for the HTP and writes the context binaries |
 | `requirements.in` / `requirements.txt` | the complete package list / its hash lock for linux aarch64 + CPython 3.13, installed with `--no-deps` |
 
@@ -42,8 +43,8 @@ the brick restates them on every call.
 Three things decide whether a compiled HTP graph is reusable: the model bytes, the QAIRT
 release, and the compile options. Each is fixed in git:
 
-* **Models**: tracked in the repository (`models/easyocr-onnx-w8a8/`), the
-  `easyocr-onnx-w8a8.zip` of ai-hub release v0.61.0 unpacked as is.
+* **Models**: tracked in the repository (`models/easyocr-onnx-float/`), the
+  `easyocr-onnx-float.zip` of ai-hub release v0.61.0 unpacked as is.
 * **Runtime**: `requirements.in` lists every package the image installs (no transitive
   resolution: sympy, mpmath, coloredlogs and humanfriendly, ~80 MB the wheels declare but
   never import, stay out); `requirements.txt` is its `uv pip compile --no-deps
@@ -111,8 +112,8 @@ check is whether the binaries actually run on a board: that is the runtime `soc_
 
 The first QNN session on a model compiles the graph for the HTP. Graph finalization is
 single-threaded inside QNN: on the 21q board (QCS8275, HTP v75: the backend loads `libQnnHtpV75Stub.so`) the detector
-takes 2.1 s and the recognizer 130 s with `htp_graph_finalization_optimization_mode=0`
-(6.5 min with mode 3). The compiled result is written next to the model as
+takes 3 s and the recognizer 109 s with `htp_graph_finalization_optimization_mode=0`
+(minutes more with mode 3). The compiled result is written next to the model as
 `<model>.soc<soc_id>.qnn_ctx.onnx` plus a `<model>.soc<soc_id>.qnn_ctx.json` fingerprint,
 and every later start loads it in 0.25 s.
 
@@ -125,10 +126,9 @@ binaries. The unsuffixed `<model>.qnn_ctx.onnx` is only written and looked up wh
 cannot be identified.
 
 The binaries are compiled once on the target and **committed** (`detector.soc675.qnn_ctx.onnx`
-21.3 MB, `recognizer.soc675.qnn_ctx.onnx` 10.5 MB, compiled 2026-09-08 on the 21q board with
+42.3 MB, `recognizer.soc675.qnn_ctx.onnx` 11.2 MB, compiled 2026-09-08 on the 21q board with
 `onnxruntime-qnn` 2.5.0 / QAIRT 2.49.40), so no container ever compiles. Measured
-placement: detector 1 QNN partition, 100 % on the NPU; recognizer 1 QNN partition plus 4
-`DequantizeLinear` nodes on the CPU (1.9 % of the time). To regenerate them:
+placement: both graphs 1 QNN partition, 100 % on the NPU. To regenerate them:
 
 ```bash
 # on the board, from this directory, with requirements.txt installed
@@ -185,8 +185,8 @@ python tools/compile_htp_context.py                    # compiles, then reports 
 EASYOCR_QNN_VERIFY=1 python -c "import inference"      # loads both models like the runner and reports the placement
 ```
 
-Partial offload is normal (4 `DequantizeLinear` nodes stay on the CPU in the recognizer,
-~2 % of the time); many partitions are not. If the backend does not come up at all
+Both float graphs run entirely on the NPU; a few CPU nodes would be acceptable, many
+partitions are not. If the backend does not come up at all
 (`QNN_DEVICE_ERROR_INVALID_CONFIG`, "Failed to create device"), the usual causes in order
 are: an `ADSP_LIBRARY_PATH` that does not hold the skels matching `libQnnHtp.so` (ORT's own
 warning `Using existing ADSP_LIBRARY_PATH setting of ...` names the directory in use; the
@@ -239,12 +239,36 @@ runtime-only nature of this option means switching it never invalidates the cont
 
 ## Models
 
-`models/easyocr-onnx-w8a8`: `uint8` I/O, NCHW, static shapes - detector `[1, 3, 608, 800]`,
+`models/easyocr-onnx-float`: float32 I/O, NCHW, static shapes - detector `[1, 3, 608, 800]`,
 recognizer `[1, 1, 64, 800]`. Each graph is `<model>.onnx` plus external weights
-`<model>.data`; `metadata.json` carries the per-tensor scale/zero-point of the graph
-boundaries (ONNX keeps none), which `ONNXModel` needs to feed images and read logits.
+`<model>.data`; `metadata.json` describes the I/O (no quantization parameters for this
+export; `ONNXModel` reads them from there when an integer export is used instead).
 **Keep the three together.**
 
-ai-hub also publishes a float export. It is the same size on disk (w8a8 is a QDQ graph:
-weights quantized in value, still stored as float32) but ~2x slower on the CPU and only
-runs on the HTP as emulated fp16, so it is not used.
+### Why float and not w8a8
+
+ai-hub also publishes a w8a8 export. It is the same size on disk (a QDQ graph: weights
+quantized in value, stored as float32) and it is faster on the HTP, but its HTP execution
+degrades the recognizer in a way the same quantized graph on the CPU does not. Measured on
+the 21q with `onnxruntime-qnn` 2.5.0, two photos (a printed sheet with 28 text regions and
+a barcode label, correct value 7630049202832):
+
+| | barcode | sheet: regions with character errors | typical confidence |
+| --- | --- | --- | --- |
+| w8a8 on the HTP | 7630049202**88**2 | 4 (`ENERICQ`, `APP TQ`, `SU APP.TQ`, `~SU APPUNTAMENTO`) | 0.5-0.7, one region at 0.19 |
+| w8a8 on the CPU | 7630049202**821** | 0 of those | 0.9-1.0 |
+| float on the CPU | 7630049202**822** | 0 of those | 0.9-1.0 |
+| float on the HTP | 7630049202832 | 1 (`APP To`) | 0.9-1.0 |
+
+Flipping `enable_htp_fp16_precision` or `offload_graph_io_quantization` for the w8a8 graph
+changes nothing. The price of float on the HTP:
+
+| | detector invoke | recognizer per box | 1 region | 28 regions | context binaries |
+| --- | --- | --- | --- | --- | --- |
+| w8a8 | 22 ms | 15 ms | 62 ms | 525 ms | 21.3 + 10.5 MB |
+| float | 85 ms | 17 ms | 135 ms | 656 ms | 42.3 + 11.2 MB |
+
++63 ms per image and +2 ms per text box, for readings that match the exact model and
+confidences that stay above the brick's default threshold. The w8a8 export is one env var
+away for comparisons (`EASYOCR_DETECTOR_MODEL` / `EASYOCR_RECOGNIZER_MODEL`), its
+`metadata.json` carries the scale/zero-point `ONNXModel` needs.

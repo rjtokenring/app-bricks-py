@@ -50,7 +50,7 @@ or inside the runner image, so the QAIRT is exactly the one that will run in pro
         ghcr.io/arduino/app-bricks/ocr-runner:<tag> \\
         python tools/compile_htp_context.py
 
-Either way the binaries land in models/easyocr-onnx-w8a8/ (or --output-dir), next to the
+Either way the binaries land in models/easyocr-onnx-float/ (or --output-dir), next to the
 graphs they were compiled from.
 
 What it does

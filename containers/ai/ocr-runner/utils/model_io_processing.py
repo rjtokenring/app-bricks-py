@@ -9,10 +9,11 @@ Hides the three things that differ between the exported EasyOCR .onnx variants:
     (see `utils.onnx_ep`).
   * tensor layout - the ai-hub-models ONNX exports are NCHW, unlike the TFLite ones
     which get rewritten to NHWC. The pipeline speaks NHWC, so we transpose here.
-  * quantization - the w8a8 export takes and returns real uint8 tensors, and ONNX
+  * quantization - the float export (the one shipped) takes and returns float32 and
+    needs none of this; the w8a8 export takes and returns real uint8 tensors, and ONNX
     keeps no quantization parameters on the graph inputs/outputs. They live in the
-    `metadata.json` that ai-hub ships next to the models, so that file is read here.
-    The float export needs none of this.
+    `metadata.json` that ai-hub ships next to the models, so that file is read here
+    whenever the graph I/O is integer.
 """
 
 from __future__ import annotations

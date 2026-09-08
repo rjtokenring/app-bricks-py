@@ -28,7 +28,7 @@ import pytest
 
 RUNNER_DIR = Path(__file__).resolve().parents[3] / "containers" / "ai" / "ocr-runner"
 BASE_IMAGE_DOCKERFILE = Path(__file__).resolve().parents[3] / "containers" / "base" / "qairt-common-base" / "Dockerfile"
-MODEL_DIR = RUNNER_DIR / "models" / "easyocr-onnx-w8a8"
+MODEL_DIR = RUNNER_DIR / "models" / "easyocr-onnx-float"
 MODELS = ("detector", "recognizer")
 
 # SoCs the image ships binaries for, soc_id -> machine (/sys/devices/soc0/{soc_id,machine}).
