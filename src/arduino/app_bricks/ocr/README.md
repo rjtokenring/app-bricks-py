@@ -59,13 +59,36 @@ Tuning:
   text rather than just filtering the output. Pass `""` in a call to lift the
   restriction for that image only.
 
+- `rotation` (constructor, overridable per call) also reads detected pieces of
+  text rotated by the given angles (any of 90, 180, 270) and keeps the most
+  confident reading, for photos where the text does not run left to right:
+  vertical labels, an upside-down tag. Text is always read upright too; 90 and 270
+  are only tried on regions taller than wide (that is what vertical text looks
+  like), 180 on every region, and a rotated reading replaces the upright one only
+  when it is clearly more confident. Each applicable angle costs one more recognizer pass
+  per region, so leave it off when the orientation is known. Pass `[]` in a call
+  to read upright only for that image. Phone photos usually need none of this:
+  their EXIF orientation is applied when the image is decoded.
+
 ```python
 from arduino.app_bricks.ocr import OCR
 
 ocr = OCR(confidence=0.5)
 reading = ocr.extract_text("/path/to/meter.jpg", allowlist="0123456789.")
 print(reading.text)
+
+sideways = ocr.extract_text("/path/to/page.jpg", rotation=[90, 270])
 ```
+
+Image size: the model looks at the whole image scaled to 800x608, so a piece of
+text has to be reasonably large in the frame to be found, roughly at least 1.5% of
+the image height (a whole A4 page photographed from afar is beyond it: crop or get
+closer). Sending more pixels does not change that, so the brick downscales images
+larger than 2048 px on their longest side before sending them (JPEG, quality
+lowered if needed to stay under the runner's 1 MiB message limit). Positions in the
+result always refer to the image you passed in. A dense image with many pieces of
+text takes longer: each detected region is one recognizer pass (about 15 ms on the
+NPU), times the number of orientations.
 
 Runner note: the model runner produces text metadata only — there is no annotated
 video feed and no MJPEG stream. Calls are serialized and block until the runner

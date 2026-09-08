@@ -6,10 +6,29 @@ import base64
 import json
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 
 from arduino.app_bricks.ocr import OCR, OcrError, OcrResult, TextDetection
+
+
+def _jpeg_bytes(width: int = 8, height: int = 8, quality: int = 90) -> bytes:
+    """A real, small JPEG (a gradient, so it is not trivially compressible)."""
+    frame = np.zeros((height, width, 3), dtype=np.uint8)
+    frame[..., 0] = np.linspace(0, 255, width, dtype=np.uint8)[None, :]
+    frame[..., 1] = np.linspace(0, 255, height, dtype=np.uint8)[:, None]
+    ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    assert ok
+    return encoded.tobytes()
+
+
+_JPEG = _jpeg_bytes()
+
+
+def _decode(b64: str) -> np.ndarray:
+    return cv2.imdecode(np.frombuffer(base64.b64decode(b64), np.uint8), cv2.IMREAD_COLOR)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -108,21 +127,93 @@ def test_constructor_resolves_runner_endpoints(ocr: OCR):
 
 def test_encode_image_accepts_numpy_arrays():
     frame = np.zeros((8, 8, 3), dtype=np.uint8)
-    encoded = OCR._encode_image(frame)
+    encoded, scale = OCR._encode_image(frame)
     data = base64.b64decode(encoded)
     assert data[:2] == b"\xff\xd8"  # JPEG magic number
+    assert scale == (1.0, 1.0)
 
 
-def test_encode_image_accepts_encoded_bytes():
-    payload = b"\xff\xd8fake-jpeg-bytes"
-    assert base64.b64decode(OCR._encode_image(payload)) == payload
+def test_encode_image_sends_small_encoded_bytes_untouched():
+    encoded, scale = OCR._encode_image(_JPEG)
+    assert base64.b64decode(encoded) == _JPEG  # no recompression when it already fits
+    assert scale == (1.0, 1.0)
 
 
 def test_encode_image_accepts_file_paths(tmp_path: Path):
     image_file = tmp_path / "image.jpg"
-    image_file.write_bytes(b"\xff\xd8fake-jpeg-bytes")
-    assert base64.b64decode(OCR._encode_image(image_file)) == b"\xff\xd8fake-jpeg-bytes"
-    assert base64.b64decode(OCR._encode_image(str(image_file))) == b"\xff\xd8fake-jpeg-bytes"
+    image_file.write_bytes(_JPEG)
+    assert base64.b64decode(OCR._encode_image(image_file)[0]) == _JPEG
+    assert base64.b64decode(OCR._encode_image(str(image_file))[0]) == _JPEG
+
+
+def test_encode_image_rejects_undecodable_bytes():
+    with pytest.raises(ValueError):
+        OCR._encode_image(b"\xff\xd8fake-jpeg-bytes")
+
+
+def test_encode_image_downscales_large_arrays_to_the_max_side():
+    frame = np.zeros((3024, 4032, 3), dtype=np.uint8)
+    frame[..., 2] = np.linspace(0, 255, 4032, dtype=np.uint8)[None, :]
+
+    encoded, (scale_x, scale_y) = OCR._encode_image(frame)
+
+    sent = _decode(encoded)
+    assert sent.shape[:2] == (1536, 2048)  # longest side capped, aspect ratio kept
+    assert (scale_x, scale_y) == pytest.approx((2048 / 4032, 1536 / 3024))
+    assert len(base64.b64decode(encoded)) * 4 / 3 <= 1_000_000
+
+
+def test_encode_image_downscales_large_encoded_files(tmp_path: Path):
+    big = _jpeg_bytes(width=4000, height=2000)
+    image_file = tmp_path / "big.jpg"
+    image_file.write_bytes(big)
+
+    encoded, (scale_x, scale_y) = OCR._encode_image(image_file)
+
+    assert base64.b64decode(encoded) != big
+    assert _decode(encoded).shape[:2] == (1024, 2048)
+    assert (scale_x, scale_y) == pytest.approx((2048 / 4000, 1024 / 2000))
+
+
+def _png_bytes(arr: np.ndarray) -> bytes:
+    ok, encoded = cv2.imencode(".png", arr)
+    assert ok
+    return encoded.tobytes()
+
+
+def test_encode_image_handles_png_with_alpha_and_greyscale():
+    small_rgba = _png_bytes(np.full((8, 8, 4), (10, 20, 30, 0), np.uint8))
+    small_grey = _png_bytes(np.full((8, 8), 200, np.uint8))
+    for data in (small_rgba, small_grey):
+        encoded, scale = OCR._encode_image(data)
+        assert base64.b64decode(encoded) == data  # small PNGs travel untouched
+        assert scale == (1.0, 1.0)
+        assert _decode(encoded).shape == (8, 8, 3)  # the runner decodes them as BGR
+
+    big_rgba = _png_bytes(np.full((2200, 3000, 4), (10, 20, 30, 128), np.uint8))
+    encoded, (scale_x, scale_y) = OCR._encode_image(big_rgba)
+    assert base64.b64decode(encoded)[:2] == b"\xff\xd8"  # downscaled ones are re-encoded as JPEG
+    assert _decode(encoded).shape[:2] == (1502, 2048)
+    assert (scale_x, scale_y) == pytest.approx((2048 / 3000, 1502 / 2200))
+
+
+def test_encode_image_accepts_greyscale_and_bgra_arrays():
+    for frame in (np.full((8, 8), 200, np.uint8), np.full((8, 8, 4), (10, 20, 30, 255), np.uint8)):
+        encoded, scale = OCR._encode_image(frame)
+        assert _decode(encoded).shape == (8, 8, 3)
+        assert scale == (1.0, 1.0)
+
+
+def test_encode_image_keeps_the_payload_under_the_runner_limit():
+    # White noise at 2048 px does not compress: the encoder has to lower quality, then size.
+    rng = np.random.default_rng(0)
+    frame = rng.integers(0, 256, size=(1536, 2048, 3), dtype=np.uint8)
+
+    encoded, (scale_x, scale_y) = OCR._encode_image(frame)
+
+    assert 4 * ((len(base64.b64decode(encoded)) + 2) // 3) <= 1_000_000
+    sent = _decode(encoded)
+    assert sent.shape[1] == round(2048 * scale_x) and sent.shape[0] == round(1536 * scale_y)
 
 
 def test_encode_image_rejects_missing_files(tmp_path: Path):
@@ -155,6 +246,16 @@ def test_parse_metadata_round_trip():
     assert first.polygon == [(10, 20), (110, 20), (110, 60), (10, 60)]
 
 
+def test_parse_metadata_maps_positions_back_to_the_original_image():
+    result = OCR._parse_metadata(_runner_metadata(), 0.0, scale=(0.5, 0.25))
+
+    first = result.detections[0]
+    assert first.bounding_box_xyxy == (20, 80, 220, 240)
+    assert first.polygon == [(20, 80), (220, 80), (220, 240), (20, 240)]
+    second = result.detections[1]
+    assert second.polygon[0] == (28, 336)
+
+
 def test_parse_metadata_handles_empty_payloads():
     result = OCR._parse_metadata({})
     assert result.text == ""
@@ -184,15 +285,15 @@ def test_extract_text_sends_config_then_frame_and_parses_answer(ocr: OCR, monkey
     recv_ws = FakeConnection("5001", messages=[answer])
     _patch_connect(monkeypatch, {"5000": send_ws, "5001": recv_ws})
 
-    result = ocr.extract_text(b"\xff\xd8fake-jpeg-bytes")
+    result = ocr.extract_text(_JPEG)
 
     assert result.text == "HELLO\nWORLD"
     assert len(send_ws.sent) == 2
     # The config travels before the frame, so the runner applies it to this image
     config = json.loads(send_ws.sent[0])
-    assert config == {"config": {"allowlist": ""}}
+    assert config == {"config": {"allowlist": "", "rotation": []}}
     sent = json.loads(send_ws.sent[1])
-    assert base64.b64decode(sent["frame"]) == b"\xff\xd8fake-jpeg-bytes"
+    assert base64.b64decode(sent["frame"]) == _JPEG
 
 
 def test_extract_text_filters_by_constructor_confidence(monkeypatch: pytest.MonkeyPatch):
@@ -203,7 +304,7 @@ def test_extract_text_filters_by_constructor_confidence(monkeypatch: pytest.Monk
     _patch_connect(monkeypatch, {"5000": send_ws, "5001": recv_ws})
 
     ocr = _make_ocr(monkeypatch, confidence=0.9)
-    result = ocr.extract_text(b"\xff\xd8fake-jpeg-bytes")
+    result = ocr.extract_text(_JPEG)
 
     assert [d.text for d in result.detections] == ["HELLO"]
     assert result.text == "HELLO"  # rebuilt from the kept detections
@@ -215,7 +316,7 @@ def test_extract_text_confidence_call_override_wins(ocr: OCR, monkeypatch: pytes
     recv_ws = FakeConnection("5001", messages=[answer])
     _patch_connect(monkeypatch, {"5000": send_ws, "5001": recv_ws})
 
-    result = ocr.extract_text(b"\xff\xd8fake-jpeg-bytes", confidence=0.9)
+    result = ocr.extract_text(_JPEG, confidence=0.9)
 
     assert [d.text for d in result.detections] == ["HELLO"]
 
@@ -238,9 +339,9 @@ def test_extract_text_sends_constructor_allowlist(monkeypatch: pytest.MonkeyPatc
     _patch_connect(monkeypatch, {"5000": send_ws, "5001": recv_ws})
 
     ocr = _make_ocr(monkeypatch, allowlist="0123456789")
-    ocr.extract_text(b"\xff\xd8fake-jpeg-bytes")
+    ocr.extract_text(_JPEG)
 
-    assert json.loads(send_ws.sent[0]) == {"config": {"allowlist": "0123456789"}}
+    assert json.loads(send_ws.sent[0]) == {"config": {"allowlist": "0123456789", "rotation": []}}
 
 
 def test_extract_text_allowlist_call_override_wins(monkeypatch: pytest.MonkeyPatch):
@@ -250,12 +351,51 @@ def test_extract_text_allowlist_call_override_wins(monkeypatch: pytest.MonkeyPat
     _patch_connect(monkeypatch, {"5000": send_ws, "5001": recv_ws})
 
     ocr = _make_ocr(monkeypatch, allowlist="0123456789")
-    ocr.extract_text(b"\xff\xd8fake-jpeg-bytes", allowlist="ABC")
-    ocr.extract_text(b"\xff\xd8fake-jpeg-bytes", allowlist="")  # lifts the restriction for this call
+    ocr.extract_text(_JPEG, allowlist="ABC")
+    ocr.extract_text(_JPEG, allowlist="")  # lifts the restriction for this call
 
     configs = [json.loads(send_ws.sent[i]) for i in (0, 2)]
-    assert configs[0] == {"config": {"allowlist": "ABC"}}
-    assert configs[1] == {"config": {"allowlist": ""}}
+    assert configs[0] == {"config": {"allowlist": "ABC", "rotation": []}}
+    assert configs[1] == {"config": {"allowlist": "", "rotation": []}}
+
+
+def test_extract_text_sends_constructor_rotation_and_call_override(monkeypatch: pytest.MonkeyPatch):
+    answers = [json.dumps({"frame": None, "metadata": {}})] * 3
+    send_ws = FakeConnection("5000")
+    recv_ws = FakeConnection("5001", messages=answers)
+    _patch_connect(monkeypatch, {"5000": send_ws, "5001": recv_ws})
+
+    ocr = _make_ocr(monkeypatch, rotation=[270, 90, 90])
+    ocr.extract_text(_JPEG)
+    ocr.extract_text(_JPEG, rotation=180)
+    ocr.extract_text(_JPEG, rotation=[])  # upright only for this call
+
+    configs = [json.loads(send_ws.sent[i])["config"]["rotation"] for i in (0, 2, 4)]
+    assert configs == [[90, 270], [180], []]
+
+
+def test_rotation_is_validated():
+    assert OCR._validate_rotation(None) == []
+    assert OCR._validate_rotation(90) == [90]
+    assert OCR._validate_rotation((180, 90, 0, 450)) == [90, 180]  # 0 is upright, 450 wraps to 90
+    for bad in ([45], "90", [True], [90.5], [None]):
+        with pytest.raises(ValueError):
+            OCR._validate_rotation(bad)
+
+
+def test_extract_text_returns_positions_in_the_original_image(ocr: OCR, monkeypatch: pytest.MonkeyPatch):
+    """A 4032x3024 frame is sent at 2048x1536; the runner's boxes come back scaled up again."""
+    answer = json.dumps({"frame": None, "metadata": _runner_metadata()})
+    send_ws = FakeConnection("5000")
+    recv_ws = FakeConnection("5001", messages=[answer])
+    _patch_connect(monkeypatch, {"5000": send_ws, "5001": recv_ws})
+
+    frame = np.zeros((3024, 4032, 3), dtype=np.uint8)
+    result = ocr.extract_text(frame)
+
+    assert _decode(json.loads(send_ws.sent[1])["frame"]).shape[:2] == (1536, 2048)
+    factor = 4032 / 2048
+    assert result.detections[0].bounding_box_xyxy == tuple(round(v * factor) for v in (10, 20, 110, 60))
 
 
 def test_extract_text_raises_when_runner_is_unreachable(monkeypatch: pytest.MonkeyPatch):
@@ -268,7 +408,7 @@ def test_extract_text_raises_when_runner_is_unreachable(monkeypatch: pytest.Monk
 
     ocr = _make_ocr(monkeypatch, timeout=0.05)
     with pytest.raises(OcrError):
-        ocr.extract_text(b"\xff\xd8fake-jpeg-bytes")
+        ocr.extract_text(_JPEG)
 
 
 def test_extract_text_raises_when_runner_does_not_answer(ocr: OCR, monkeypatch: pytest.MonkeyPatch):
@@ -277,4 +417,4 @@ def test_extract_text_raises_when_runner_does_not_answer(ocr: OCR, monkeypatch: 
     _patch_connect(monkeypatch, {"5000": send_ws, "5001": recv_ws})
 
     with pytest.raises(OcrError):
-        ocr.extract_text(b"\xff\xd8fake-jpeg-bytes")
+        ocr.extract_text(_JPEG)

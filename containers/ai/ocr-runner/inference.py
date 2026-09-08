@@ -35,6 +35,7 @@ from utils.constants import (
 from utils.image_processing import adjust_contrast, four_point_transform
 from utils.metadata import build_metadata
 from utils.model_io_processing import ONNXModel
+from utils.orientation import parse_rotations, plan_variants, rotate_cutout, select_best_readings
 from utils.post_processing import CTCLabelConverter
 
 # Stage-by-stage timing prints, disable with EASYOCR_DEBUG=0.
@@ -88,6 +89,13 @@ _debug(
 
 converter = CTCLabelConverter(CHARACTERS, LANG_CHAR)
 
+# Client-configurable settings that are not part of the CTC converter. Read once per frame.
+_settings: dict = {
+    # Extra rotations (degrees, multiples of 90) every cutout is also read at; the most
+    # confident reading per box wins. Empty = upright only. Config key: "rotation".
+    "rotations": [],
+}
+
 
 def apply_config(config: dict) -> None:
     """Apply a client configuration payload; unknown keys are ignored.
@@ -95,12 +103,24 @@ def apply_config(config: dict) -> None:
     Supported settings:
         allowlist (str): Restrict recognition to these characters (e.g. "0123456789").
             An empty string removes the restriction.
+        rotation (list[int]): Also read detected regions rotated by these angles
+            (90, 180, 270) and keep the most confident reading, for text that is not
+            upright in the image. 90/270 are only tried on regions taller than wide
+            (vertical text), 180 on every region. An empty list reads upright only.
+            Each applicable angle costs one extra recognizer pass per region.
     """
     if "allowlist" in config:
         value = config.get("allowlist")
         allowlist = str(value) if value else None
         converter.set_allowlist(allowlist)
         print(f"config: allowlist set to {allowlist!r}", flush=True)
+    if "rotation" in config:
+        try:
+            _settings["rotations"] = parse_rotations(config.get("rotation"))
+        except ValueError as exc:
+            print(f"config: rotations ignored ({exc}); keeping {_settings['rotations']}", flush=True)
+        else:
+            print(f"config: rotations set to {_settings['rotations']}", flush=True)
 
 
 _recognizer_classes = int(recognizer.output_shapes[0][-1])
@@ -210,7 +230,7 @@ def get_cutouts(
     free_boxes: list[box_4corners],
 ) -> tuple[list[tuple[box_xx_yy | box_4corners, float]], list[np.ndarray]]:
     """
-    Crop every detected text box out of the greyscale image and prepare it for the recognizer.
+    Crop every detected text box out of the greyscale image.
 
     Parameters
     ----------
@@ -225,8 +245,9 @@ def get_cutouts(
     -------
     boxes : list[tuple[box, float]]
         The box each cutout came from, plus its top y coordinate, sorted top to bottom.
-    cutout_frames : list[np.ndarray]
-        [1, 64, 800, 1] float32 recognizer inputs, one per box.
+    cutouts : list[np.ndarray]
+        [h, w] uint8 greyscale crops, one per box, still to be sized for the recognizer
+        with `prepare_recognizer_input`.
     """
     # If nothing was detected, read the whole image instead.
     if not horizontal_boxes and not free_boxes:
@@ -257,10 +278,8 @@ def get_cutouts(
 
     cutouts = sorted(cutouts, key=lambda item: item[2])
 
-    cutout_frames = [prepare_recognizer_input(cutout) for cutout, _, _ in cutouts]
     boxes = [(box, y_min) for _, box, y_min in cutouts]
-
-    return boxes, cutout_frames
+    return boxes, [cutout for cutout, _, _ in cutouts]
 
 
 def prepare_recognizer_input(cutout: np.ndarray) -> np.ndarray:
@@ -331,8 +350,9 @@ def recognizer_get_text(
     """
     Run the recognizer over every detected box and clean up the predictions.
 
-    Low-confidence cutouts are read a second time with boosted contrast, and the more
-    confident of the two readings wins.
+    When rotations are configured every cutout is also read rotated by each angle, and the
+    most confident reading per box wins. Low-confidence cutouts are then read a second time
+    with boosted contrast, and again the more confident of the two readings wins.
 
     Parameters
     ----------
@@ -351,9 +371,22 @@ def recognizer_get_text(
         (box, text, confidence) per slanted detection.
     """
     t_start = time.perf_counter()
-    boxes, cutout_frames = get_cutouts(img_grey, horizontal_boxes, free_boxes)
-    _debug(f"cutouts: {len(cutout_frames)} prepared in {(time.perf_counter() - t_start) * 1000:.0f} ms")
-    predictions = recognizer_inference(cutout_frames)
+    boxes, cutouts = get_cutouts(img_grey, horizontal_boxes, free_boxes)
+    rotations = list(_settings["rotations"])
+    # One (box, angle) reading per planned variant: upright for every box, plus the
+    # rotations applicable to its shape (see utils.orientation).
+    variants = plan_variants(cutouts, rotations)
+    frames = [prepare_recognizer_input(rotate_cutout(cutouts[index], angle)) for index, angle in variants]
+    _debug(f"cutouts: {len(cutouts)} boxes, {len(frames)} orientation(s) prepared in {(time.perf_counter() - t_start) * 1000:.0f} ms")
+
+    best = select_best_readings(recognizer_inference(frames), variants, len(cutouts))
+    predictions = [(text, confidence) for _, text, confidence in best]
+    # The frame each winning reading came from, for the contrast retry below.
+    winning_variant = {(index, angle): position for position, (index, angle) in enumerate(variants)}
+    cutout_frames = [frames[winning_variant[(index, angle)]] for index, (angle, _, _) in enumerate(best)]
+    if rotations and best:
+        rotated = sum(1 for angle, _, _ in best if angle)
+        _debug(f"rotations {rotations}: {len(frames) - len(cutouts)} extra readings, {rotated}/{len(best)} boxes read best when rotated")
 
     # Re-read anything the recognizer was unsure about, with the contrast pushed up.
     contrast_ths = RECOGNIZER_ARGS["contrast_ths"]

@@ -18,10 +18,24 @@ graphs land on the NPU: detector ~20 ms, recognizer ~15 ms per box (QCS8275 / IQ
 | `utils/onnx_ep.py` | ORT session factory: QNN plugin EP, CPU fallback, HTP context binaries, fingerprints |
 | `utils/model_io_processing.py` | `ONNXModel`: NHWC float in/out over the NCHW uint8 graphs, using `metadata.json` |
 | `utils/constants.py` | model paths, thresholds, character set |
+| `utils/orientation.py` | rotated text: read each cutout at 90/180/270 too and keep the most confident reading (`rotation` setting) |
 | `utils/{bbox,image,post}_processing.py`, `utils/metadata.py` | runtime-agnostic EasyOCR ports (unchanged from the TFLite version) |
 | `models/easyocr-onnx-w8a8/` | `.onnx` + `.data` graphs, `metadata.json`, and the compiled `*.soc<id>.qnn_ctx.onnx` / `.json`, one pair per SoC |
 | `tools/compile_htp_context.py` | run on the board: compiles both graphs for the HTP and writes the context binaries |
 | `requirements.in` / `requirements.txt` | direct dependencies / hash-locked set for linux aarch64 + CPython 3.13 |
+
+## Client configuration
+
+The brick sends a `{"config": {...}}` message before each frame; `apply_config` in
+`inference.py` applies it and unknown keys are ignored:
+
+| key | value | effect |
+| --- | --- | --- |
+| `allowlist` | string of characters, `""` to clear | only these characters can be decoded (CTC logits of the others are zeroed) |
+| `rotation` | list of angles among 90, 180, 270, `[]` to clear | cutouts are also recognized rotated and the most confident reading wins (EasyOCR's `rotation_info`, see `utils/orientation.py`). 90/270 only on cutouts taller than wide, 180 on all, and a rotated reading must beat the upright one by 0.1 of confidence: without both guards rotated horizontal lines read as confident garbage. One extra recognizer pass per applicable angle per box; detection runs once |
+
+Both settings are process-wide and persist until the next config message, which is why
+the brick restates them on every call.
 
 ## Everything is pinned
 
