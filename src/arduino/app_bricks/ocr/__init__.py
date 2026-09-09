@@ -72,8 +72,9 @@ class OcrResult:
     the full extracted text.
 
     Attributes:
-        text (str): Every recognized string joined by newlines, in reading order
-            (top to bottom, left to right). Empty when no text was found.
+        text (str): Every recognized string joined in reading order (top to
+            bottom, left to right), by newlines or, when `single_line` is set,
+            by single spaces. Empty when no text was found.
         detections (list[TextDetection]): One entry per piece of text found, in
             reading order, each with its position and confidence.
     """
@@ -108,6 +109,7 @@ class OCR:
         confidence: float = 0.3,
         allowlist: str | None = None,
         rotation: Iterable[int] | int | None = None,
+        single_line: bool = False,
         timeout: float = 30.0,
     ) -> None:
         """Initialize the OCR brick.
@@ -116,12 +118,11 @@ class OCR:
             confidence (float): Minimum recognition confidence for a piece of
                 text to be reported, in [0.0, 1.0]. Detections below it are dropped
                 from the result. Default is 0.3; pass 0.0 to report everything the
-                model finds. Can be overridden per call in `extract_text`.
+                model finds.
             allowlist (str): Restrict recognition to these characters, e.g.
                 "0123456789" to read only digits. Applied by the model runner while
                 decoding, so it improves accuracy on constrained text rather than
-                just filtering the output. Default is None (no restriction). Can be
-                overridden per call in `extract_text`.
+                just filtering the output. Default is None (no restriction).
             rotation (Iterable[int] | int): Extra orientations to try when reading
                 each detected piece of text, as angles in degrees among 90, 180 and
                 270, e.g. `[90, 270]` for text running vertically or `180` for
@@ -131,6 +132,11 @@ class OCR:
                 text), 180 on every region, and each applicable angle costs one
                 more recognizer pass per region. Default is None (upright only).
                 Can be overridden per call in `extract_text`.
+            single_line (bool): Join every recognized piece of text with single
+                spaces instead of newlines, so `result.text` is one line. Useful
+                when the image holds one logical string split across regions, e.g.
+                a plate or a serial number. Default is False. Can be overridden
+                per call in `extract_text`.
             timeout (float): Maximum seconds `extract_text` waits for the model
                 runner, connection retries included. Default is 30.
 
@@ -142,6 +148,7 @@ class OCR:
         self._confidence = self._validate_min_confidence(confidence)
         self._allowlist = allowlist
         self._rotation = self._validate_rotation(rotation)
+        self._single_line = bool(single_line)
         self._timeout = timeout
         # extract_text calls are serialized so each sent image matches its own answer
         self._lock = threading.Lock()
@@ -164,9 +171,8 @@ class OCR:
     def extract_text(
         self,
         image: np.ndarray | bytes | str | Path,
-        confidence: float | None = None,
-        allowlist: str | None = None,
         rotation: Iterable[int] | int | None = None,
+        single_line: bool | None = None,
     ) -> OcrResult:
         """Extract the text visible in an image.
 
@@ -180,16 +186,14 @@ class OCR:
                 array in BGR channel order (as returned by `Camera.capture()`),
                 the raw bytes of an encoded image file (e.g. JPEG or PNG), or a
                 path to an image file.
-            confidence (float): Override the constructor's `confidence`
-                for this call only. None (default) uses the constructor value.
-            allowlist (str): Override the constructor's `allowlist` for this call
-                only, e.g. "0123456789" to read only digits from this image. None
-                (default) uses the constructor value; pass "" to lift the
-                restriction for this call.
             rotation (Iterable[int] | int): Override the constructor's `rotation`
                 for this call only, e.g. `[90, 270]` for an image whose text runs
                 vertically. None (default) uses the constructor value; pass `[]`
                 to read upright only for this call.
+            single_line (bool): Override the constructor's `single_line` for this
+                call only: True joins every recognized piece of text with single
+                spaces instead of newlines. None (default) uses the constructor
+                value.
 
         Returns:
             OcrResult: The extracted text, with one `TextDetection` per piece of
@@ -197,25 +201,23 @@ class OCR:
 
         Raises:
             TypeError: If `image` is not one of the supported types.
-            ValueError: If `image` could not be decoded, `confidence` is not a
-                number in [0.0, 1.0], or `rotation` contains an angle other than
-                90, 180 or 270.
+            ValueError: If `image` could not be decoded, or `rotation` contains
+                an angle other than 90, 180 or 270.
             FileNotFoundError: If `image` is a path that does not exist.
             OcrError: If the model runner cannot be reached or does not answer
                 within the configured timeout.
         """
-        confidence = self._confidence if confidence is None else self._validate_min_confidence(confidence)
-        allowlist = self._allowlist if allowlist is None else allowlist
         rotation = self._rotation if rotation is None else self._validate_rotation(rotation)
+        single_line = self._single_line if single_line is None else bool(single_line)
 
         encoded, scale = self._encode_image(image)
         payload = json.dumps({"frame": encoded})
         # The runner keeps these settings across calls (and clients), so they are
         # restated on every request to make each call self-contained.
-        config = json.dumps({"config": {"allowlist": allowlist or "", "rotation": rotation}})
+        config = json.dumps({"config": {"allowlist": self._allowlist or "", "rotation": rotation}})
         with self._lock:
             metadata = self._request(payload, config)
-        return self._parse_metadata(metadata, confidence, scale)
+        return self._parse_metadata(metadata, self._confidence, scale, single_line)
 
     @staticmethod
     def _validate_min_confidence(value: float) -> float:
@@ -341,12 +343,18 @@ class OCR:
         ) from last_error
 
     @staticmethod
-    def _parse_metadata(metadata: dict, min_confidence: float = 0.0, scale: tuple[float, float] = (1.0, 1.0)) -> OcrResult:
+    def _parse_metadata(
+        metadata: dict,
+        min_confidence: float = 0.0,
+        scale: tuple[float, float] = (1.0, 1.0),
+        single_line: bool = False,
+    ) -> OcrResult:
         """Build an OcrResult out of the model runner's metadata payload.
 
         Detections below `min_confidence` are dropped, and the result text is
-        rebuilt from the kept detections (they arrive in reading order). Positions
-        are divided by `scale` (the x, y downscale applied before sending) so they
+        rebuilt from the kept detections (they arrive in reading order), joined by
+        newlines or, when `single_line` is set, by single spaces. Positions are
+        divided by `scale` (the x, y downscale applied before sending) so they
         refer to the original image.
         """
         scale_x, scale_y = scale
@@ -370,7 +378,8 @@ class OCR:
             if detection.confidence >= min_confidence:
                 detections.append(detection)
 
-        return OcrResult(text="\n".join(d.text for d in detections), detections=detections)
+        separator = " " if single_line else "\n"
+        return OcrResult(text=separator.join(d.text for d in detections), detections=detections)
 
 
 __all__ = [

@@ -310,17 +310,6 @@ def test_extract_text_filters_by_constructor_confidence(monkeypatch: pytest.Monk
     assert result.text == "HELLO"  # rebuilt from the kept detections
 
 
-def test_extract_text_confidence_call_override_wins(ocr: OCR, monkeypatch: pytest.MonkeyPatch):
-    answer = json.dumps({"frame": None, "metadata": _runner_metadata()})
-    send_ws = FakeConnection("5000")
-    recv_ws = FakeConnection("5001", messages=[answer])
-    _patch_connect(monkeypatch, {"5000": send_ws, "5001": recv_ws})
-
-    result = ocr.extract_text(_JPEG, confidence=0.9)
-
-    assert [d.text for d in result.detections] == ["HELLO"]
-
-
 def test_confidence_is_validated():
     with pytest.raises(ValueError):
         OCR._validate_min_confidence(1.5)
@@ -344,21 +333,6 @@ def test_extract_text_sends_constructor_allowlist(monkeypatch: pytest.MonkeyPatc
     assert json.loads(send_ws.sent[0]) == {"config": {"allowlist": "0123456789", "rotation": []}}
 
 
-def test_extract_text_allowlist_call_override_wins(monkeypatch: pytest.MonkeyPatch):
-    answers = [json.dumps({"frame": None, "metadata": {}})] * 2
-    send_ws = FakeConnection("5000")
-    recv_ws = FakeConnection("5001", messages=answers)
-    _patch_connect(monkeypatch, {"5000": send_ws, "5001": recv_ws})
-
-    ocr = _make_ocr(monkeypatch, allowlist="0123456789")
-    ocr.extract_text(_JPEG, allowlist="ABC")
-    ocr.extract_text(_JPEG, allowlist="")  # lifts the restriction for this call
-
-    configs = [json.loads(send_ws.sent[i]) for i in (0, 2)]
-    assert configs[0] == {"config": {"allowlist": "ABC", "rotation": []}}
-    assert configs[1] == {"config": {"allowlist": "", "rotation": []}}
-
-
 def test_extract_text_sends_constructor_rotation_and_call_override(monkeypatch: pytest.MonkeyPatch):
     answers = [json.dumps({"frame": None, "metadata": {}})] * 3
     send_ws = FakeConnection("5000")
@@ -372,6 +346,20 @@ def test_extract_text_sends_constructor_rotation_and_call_override(monkeypatch: 
 
     configs = [json.loads(send_ws.sent[i])["config"]["rotation"] for i in (0, 2, 4)]
     assert configs == [[90, 270], [180], []]
+
+
+def test_extract_text_single_line_joins_with_spaces(monkeypatch: pytest.MonkeyPatch):
+    answers = [json.dumps({"frame": None, "metadata": _runner_metadata()})] * 3
+    send_ws = FakeConnection("5000")
+    recv_ws = FakeConnection("5001", messages=answers)
+    _patch_connect(monkeypatch, {"5000": send_ws, "5001": recv_ws})
+
+    ocr = _make_ocr(monkeypatch, single_line=True)
+    assert ocr.extract_text(_JPEG).text == "HELLO WORLD"
+    assert ocr.extract_text(_JPEG, single_line=False).text == "HELLO\nWORLD"  # call override wins
+
+    upright = _make_ocr(monkeypatch, single_line=False)
+    assert upright.extract_text(_JPEG, single_line=True).text == "HELLO WORLD"
 
 
 def test_rotation_is_validated():

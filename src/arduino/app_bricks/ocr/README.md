@@ -49,15 +49,14 @@ if frame is not None:
 
 Tuning:
 
-- `confidence` (constructor, overridable per call) drops detections whose
-  recognition confidence is below the threshold and rebuilds `result.text` from
-  the kept ones. Default is 0.3; pass 0.0 to report everything the model finds.
-- `allowlist` (constructor, overridable per call) restricts recognition to the
-  given characters, e.g. `"0123456789"` to read only digits from a meter or a
-  serial number. It is applied by the model runner while decoding — the excluded
-  characters cannot be emitted at all — so it improves accuracy on constrained
-  text rather than just filtering the output. Pass `""` in a call to lift the
-  restriction for that image only.
+- `confidence` (constructor) drops detections whose recognition confidence is
+  below the threshold and rebuilds `result.text` from the kept ones. Default is
+  0.3; pass 0.0 to report everything the model finds.
+- `allowlist` (constructor) restricts recognition to the given characters, e.g.
+  `"0123456789"` to read only digits from a meter or a serial number. It is
+  applied by the model runner while decoding — the excluded characters cannot be
+  emitted at all — so it improves accuracy on constrained text rather than just
+  filtering the output.
 
 - `rotation` (constructor, overridable per call) also reads detected pieces of
   text rotated by the given angles (any of 90, 180, 270) and keeps the most
@@ -69,15 +68,20 @@ Tuning:
   per region, so leave it off when the orientation is known. Pass `[]` in a call
   to read upright only for that image. Phone photos usually need none of this:
   their EXIF orientation is applied when the image is decoded.
+- `single_line` (constructor, overridable per call) joins every recognized piece
+  of text with single spaces instead of newlines, so `result.text` is one line.
+  Useful when the image holds one logical string split across regions, e.g. a
+  plate or a serial number. Default is `False`.
 
 ```python
 from arduino.app_bricks.ocr import OCR
 
-ocr = OCR(confidence=0.5)
-reading = ocr.extract_text("/path/to/meter.jpg", allowlist="0123456789.")
+ocr = OCR(confidence=0.5, allowlist="0123456789.")
+reading = ocr.extract_text("/path/to/meter.jpg")
 print(reading.text)
 
 sideways = ocr.extract_text("/path/to/page.jpg", rotation=[90, 270])
+plate = ocr.extract_text("/path/to/plate.jpg", single_line=True)  # one line, no newlines
 ```
 
 Image size: the model looks at the whole image scaled to 800x608, so a piece of
