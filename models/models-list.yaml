@@ -1969,9 +1969,9 @@ models:
        source-model-id: "gemma-3-1b-it-GGUF"
        source-model-url: "https://huggingface.co/unsloth/gemma-3-1b-it-GGUF"
  - "llamacpp:Qwen3.5-0.8B-Q4_0":
-     name : "Qwen 3.5 0.8B"
+     name : "Qwen 3.5 0.8B - Q4_0"
      description: >-
-       Qwen 3.5 0.8B is a compact yet powerful language model developed by Alibaba, designed to deliver efficient performance on edge devices.
+       Qwen 3.5 0.8B (Q4_0 quantization) is a compact yet powerful language model developed by Alibaba, designed to deliver efficient performance on edge devices.
        With 0.8 billion parameters, it strikes a balance between capability and resource efficiency, making it ideal
        for applications that require natural language understanding and generation in constrained environments.
      supported_boards: ["ventunoq", "unoq"]
@@ -1996,6 +1996,35 @@ models:
        model_size_mb: 507
        source: "huggingface"
        source-model-id: "Qwen3.5-0.8B-Q4_0"
+       source-model-url: "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF"       
+ - "llamacpp:Qwen3.5-0.8B-Q8_0":
+     name : "Qwen 3.5 0.8B - Q8_0"
+     description: >-
+       Qwen 3.5 0.8B (Q8_0 quantization) is a compact yet powerful language model developed by Alibaba, designed to deliver efficient performance on edge devices.
+       With 0.8 billion parameters, it strikes a balance between capability and resource efficiency, making it ideal
+       for applications that require natural language understanding and generation in constrained environments.
+     supported_boards: ["ventunoq", "unoq"]
+     bricks:
+       - id: "arduino:llm"
+         model_configuration:
+           GGML_HEXAGON_DEVICES: 1       
+     deployment:
+       handler: "hf-handler"
+       platforms:
+         - ventunoq:
+             variables:
+               model_url: "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/blob/e524882462b3f2a9fe83be967c654c4322abb2f6/Qwen3.5-0.8B-Q8_0.gguf"
+               models_repository: "llamacpp"
+               model_directory: "unsloth/Qwen3.5-0.8B-GGUF"
+         - unoq:
+             variables:
+               model_url: "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/blob/e524882462b3f2a9fe83be967c654c4322abb2f6/Qwen3.5-0.8B-Q8_0.gguf"
+               models_repository: "llamacpp"
+               model_directory: "unsloth/Qwen3.5-0.8B-GGUF"
+     metadata:
+       model_size_mb: 812
+       source: "huggingface"
+       source-model-id: "Qwen3.5-0.8B-Q8_0"
        source-model-url: "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF"
  - "ei:yolox-small-qnn-object-detection":
     name : "General purpose object detection - YoloX small"
