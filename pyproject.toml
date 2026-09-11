@@ -20,6 +20,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
+    "arduino-router-bridge>=0.5.0",
     "pyyaml",
     "requests",
     "Pillow",
@@ -108,7 +109,6 @@ all = [
     "arduino_app_bricks[mood_detector]",
     "arduino_app_bricks[pose_estimation]",
     "arduino_app_bricks[stream]",
-    "arduino_app_bricks[arduino_cloud]",
     "arduino_app_bricks[telegram_bot]",
     "arduino_app_bricks[cloud_llm]",
     "arduino_app_bricks[cloud_asr]",
