@@ -10,13 +10,15 @@ through the QNN execution provider, which ships in two flavours:
 
   * plugin EP (`onnxruntime-qnn` >= 2.x, maintained by Qualcomm) - a standalone wheel
     registered at runtime against a stock `onnxruntime` install. It is the only variant
-    with Linux aarch64 wheels, so it is the one the container installs. The wheel ships a
-    full QAIRT of its own (libQnnHtp.so, libQnnHtpPrepare.so, libQnnHtpV*Skel.so, ~190 MB)
-    and that is what the EP uses: the base image's QAIRT (2.45.41) is older than the one the
-    EP is built against (2.49.40) and is refused, and the EP releases built with older
-    QAIRTs miscompile the recognizer (see the README). The backend can be redirected to a
-    system copy with EASYOCR_QNN_BACKEND_PATH once the base image ships the same release;
-    `_check_backend_matches_plugin` then verifies the two match at start-up.
+    with Linux aarch64 wheels, so it is the one the container installs (the base image,
+    aihub-onnx-models-runner, pins it in requirements.in). The wheel ships a full
+    QAIRT of its own (libQnnHtp.so, libQnnHtpPrepare.so, libQnnHtpV*Skel.so, ~190 MB) and
+    that is the QAIRT the NPU runs: the base image builds on python-slim and deliberately
+    ships no QAIRT SDK, since the EP refuses one older than the release it was built
+    against anyway, and the EP releases built with older QAIRTs miscompile the recognizer
+    (see the README). EASYOCR_QNN_BACKEND_PATH can still point the EP at a system copy in
+    an image that has one; `_check_backend_matches_plugin` then verifies at start-up that
+    it is the release the wheel was built with.
   * bundled EP (`onnxruntime-qnn` 1.x, Windows arm64/x64) - ships QNN inside the ORT
     wheel itself and shows up directly in `ort.get_available_providers()`.
 
@@ -192,8 +194,8 @@ def _check_backend_matches_plugin(backend_path: str, plugin) -> None:
     elif backend != expected:
         _log(
             f"WARNING: {backend_path} is QAIRT {backend} but onnxruntime-qnn {getattr(plugin, '__version__', '?')} was built with QAIRT "
-            f"{expected}. Keep them in lockstep: bump QNP_VER in qairt-common-base and the onnxruntime-qnn pin together, then recompile "
-            "the HTP context binaries."
+            f"{expected}. Unset EASYOCR_QNN_BACKEND_PATH to go back to the QAIRT the wheel bundles, or keep the two in lockstep and "
+            "recompile the HTP context binaries."
         )
 
 
@@ -223,9 +225,9 @@ def _register_plugin_locked(plugin) -> bool:
 def _qnn_provider_options(plugin) -> dict[str, str]:
     options = dict(DEFAULT_QNN_OPTIONS)
 
-    # Backend library: explicit path, else the wheel's own copy when it is still there,
-    # else the bare name, which the dynamic loader resolves through ld.so.cache (/usr/lib
-    # in the container, where the base image's QAIRT lives).
+    # Backend library: explicit path, else the wheel's own copy, which is what the
+    # container has - else the bare name, which the dynamic loader resolves through
+    # ld.so.cache, for a host that has a QAIRT installed system-wide.
     backend_path = os.environ.get("EASYOCR_QNN_BACKEND_PATH")
     if not backend_path and plugin is not None and hasattr(plugin, "get_qnn_htp_path"):
         try:
@@ -334,10 +336,11 @@ def _prepare_adsp_path(backend_path: str) -> None:
 
     Host library and skel must come from the same QAIRT release, or the backend fails to
     start with QNN_DEVICE_ERROR_INVALID_CONFIG - and ORT only warns about an inherited
-    ADSP_LIBRARY_PATH in passing. In the container this matters: the base image exports
-    ADSP_LIBRARY_PATH=/usr/lib/rfsa/adsp (its own QAIRT, used by the LiteRT delegate),
-    while the `onnxruntime-qnn` wheel brings a different QAIRT with its own skels next to
-    libQnnHtp.so. Those are the ones that match, so they win unless told otherwise.
+    ADSP_LIBRARY_PATH in passing. The skels that match are the ones the `onnxruntime-qnn`
+    wheel ships next to libQnnHtp.so, so they win unless told otherwise. That matters
+    wherever something else exports the variable: a LiteRT image built on qairt-common-base
+    sets ADSP_LIBRARY_PATH=/usr/lib/rfsa/adsp for its own, older QAIRT, and so do hosts
+    with a QAIRT SDK installed.
     """
     global _adsp_checked
     with _setup_lock:
@@ -359,8 +362,8 @@ def _prepare_adsp_path(backend_path: str) -> None:
 
     backend_dir = os.path.dirname(os.path.abspath(backend_path)) if os.sep in backend_path or "/" in backend_path else ""
     if _has_skels(backend_dir):
-        # The expected case in the container (base image exports its own QAIRT's skel
-        # directory): switch silently, EASYOCR_QNN_ADSP_PATH / EASYOCR_QNN_KEEP_ADSP_PATH
+        # The expected case: the skels next to the backend library are the matching
+        # ones, so switch silently. EASYOCR_QNN_ADSP_PATH / EASYOCR_QNN_KEEP_ADSP_PATH
         # are the documented overrides.
         if current != backend_dir:
             _set_adsp_path(backend_dir)
@@ -392,7 +395,7 @@ def _split_path(value: str) -> list[str]:
 
 def _set_adsp_path(directory: str) -> None:
     os.environ["ADSP_LIBRARY_PATH"] = directory
-    # The base image exports both; keep them in agreement.
+    # Images built on qairt-common-base export both; keep them in agreement.
     if "CDSP_LIBRARY_PATH" in os.environ:
         os.environ["CDSP_LIBRARY_PATH"] = directory
 

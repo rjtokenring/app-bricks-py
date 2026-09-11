@@ -35,7 +35,7 @@ Where to run it
 On the target board, with the NPU reachable. Either directly:
 
     uv venv .venv --python 3.13 && source .venv/bin/activate
-    uv pip install --require-hashes -r requirements.txt
+    uv pip install --require-hashes -r ../aihub-onnx-models-runner/requirements.txt
     python tools/compile_htp_context.py
 
 or inside the runner image, so the QAIRT is exactly the one that will run in production
@@ -43,10 +43,10 @@ or inside the runner image, so the QAIRT is exactly the one that will run in pro
 
     docker run --rm -it \\
         --device /dev/dma_heap/system --device /dev/fastrpc-cdsp \\
-        -v /sys/firmware/devicetree/base/model:/run/device-model \\
         -v /usr/share/qcom:/run/host-qcom:ro \\
+        -v /sys/devices/soc0:/sys/devices/soc0:ro \\
         -v "$PWD/models:/app/models" \\
-        --entrypoint /qairt-entrypoint.sh \\
+        --entrypoint /aihub-onnx-entrypoint.sh \\
         ghcr.io/arduino/app-bricks/ocr-runner:<tag> \\
         python tools/compile_htp_context.py
 

@@ -5,7 +5,7 @@
 # so exactly these packages, at these versions, with these hashes, end up in the image.
 #
 # onnxruntime-qnn 2.5.0 is built with onnxruntime 1.29.0 and bundles QAIRT 2.49.40
-# (libQnnHtp.so + libQnnHtpV68..V81 skels), which is the QAIRT the runner uses.
+# (libQnnHtp.so + libQnnHtpV68..V81 skels), which is the QAIRT this image's NPU runs on.
 #
 flatbuffers==25.12.19 \
     --hash=sha256:7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4

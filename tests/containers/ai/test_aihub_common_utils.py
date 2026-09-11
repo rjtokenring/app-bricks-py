@@ -15,10 +15,11 @@ from pathlib import Path
 
 import numpy as np
 
-# Make the aihub package from the base runner container importable.
-RUNNER_DIR = Path(__file__).resolve().parents[3] / "containers" / "ai" / "aihub-models-runner"
-if str(RUNNER_DIR) not in sys.path:
-    sys.path.insert(0, str(RUNNER_DIR))
+# Make the shared aihub package importable; it lives in its own source-only image, which
+# both aihub-models-runner and aihub-onnx-models-runner copy it from.
+FRAMEWORK_DIR = Path(__file__).resolve().parents[3] / "containers" / "ai" / "aihub-framework"
+if str(FRAMEWORK_DIR) not in sys.path:
+    sys.path.insert(0, str(FRAMEWORK_DIR))
 
 from aihub.draw import draw_box_from_xyxy, draw_connections, draw_points  # noqa: E402
 from aihub.image_processing import denormalize_coordinates, resize_pad  # noqa: E402

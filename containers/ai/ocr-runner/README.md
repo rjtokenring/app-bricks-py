@@ -15,7 +15,7 @@ graphs land on the NPU: detector ~85 ms, recognizer ~17 ms per box (QCS8275 / IQ
 
 | path | role |
 | --- | --- |
-| `inference.py` | the pipeline; `inference_callback` and `apply_config` are what `aihub-models-runner` calls |
+| `inference.py` | the pipeline; `inference_callback` and `apply_config` are what the `aihub` framework calls |
 | `utils/onnx_ep.py` | ORT session factory: QNN plugin EP, CPU fallback, HTP context binaries, fingerprints |
 | `utils/model_io_processing.py` | `ONNXModel`: NHWC float in/out over the NCHW graphs (and (de)quantization from `metadata.json` for integer exports) |
 | `utils/constants.py` | model paths, thresholds, character set |
@@ -23,7 +23,6 @@ graphs land on the NPU: detector ~85 ms, recognizer ~17 ms per box (QCS8275 / IQ
 | `utils/{bbox,image,post}_processing.py`, `utils/metadata.py` | runtime-agnostic EasyOCR ports (unchanged from the TFLite version) |
 | `models/easyocr-onnx-float/` | `.onnx` + `.data` graphs, `metadata.json`, and the compiled `*.soc<id>.qnn_ctx.onnx` / `.json`, one pair per SoC |
 | `tools/compile_htp_context.py` | run on the board: compiles both graphs for the HTP and writes the context binaries |
-| `requirements.in` / `requirements.txt` | the complete package list / its hash lock for linux aarch64 + CPython 3.13, installed with `--no-deps` |
 
 ## Client configuration
 
@@ -45,68 +44,70 @@ release, and the compile options. Each is fixed in git:
 
 * **Models**: tracked in the repository (`models/easyocr-onnx-float/`), the
   `easyocr-onnx-float.zip` of ai-hub release v0.61.0 unpacked as is.
-* **Runtime**: `requirements.in` lists every package the image installs (no transitive
-  resolution: sympy, mpmath, coloredlogs and humanfriendly, ~80 MB the wheels declare but
-  never import, stay out); `requirements.txt` is its `uv pip compile --no-deps
-  --generate-hashes` lock for the container target, installed with `pip install --no-deps
-  --require-hashes`. A rebuild can neither pick a newer `onnxruntime` nor a different
-  `onnxruntime-qnn` wheel nor an extra package. The QNN plugin wheel is self-contained:
-  `onnxruntime-qnn 2.5.0` ships **QAIRT 2.49.40** (`libQnnHtp.so`, `libQnnHtpPrepare.so`,
-  `libQnnHtpV68..V81Skel.so`, ~190 MB). That is *not* the QAIRT of the base image (2.45.41,
-  used by the LiteRT delegate in the other runners), so `utils/onnx_ep.py` re-points
-  `ADSP_LIBRARY_PATH` at the wheel's own skels - host library and DSP skel must come from
-  the same release or the backend fails with `QNN_DEVICE_ERROR_INVALID_CONFIG`. This is safe with the base image's own fastrpc build
-  (quic/fastrpc 1.0.6): it reads `ADSP_LIBRARY_PATH` with `getenv()` at every file open,
-  for the CDSP domain too, and always appends the yaml-derived `/usr/share/qcom/...` DSP
-  payload path after it; `CDSP_LIBRARY_PATH` is not referenced anywhere in its sources. The
-  two QAIRTs do not mix: the wheel's `libQnnHtp.so` loads `libQnnHtpPrepare.so`,
-  `libQnnSystem.so` and the stub by absolute path from its own directory (`dladdr`) and
-  checks their build ids, so the 2.45 copies in `/usr/lib` are never picked up. The only
-  system library it takes is `libcdsprpc.so`, which is the point. To see it on a board:
+* **Runtime**: entirely in the base image,
+  [`aihub-onnx-models-runner`](../aihub-onnx-models-runner). `onnxruntime`, the
+  `onnxruntime-qnn` plugin EP, `numpy` and `opencv-python-headless` are the same for every
+  ONNX runner, so they are pinned once there, in `requirements.in`/`.txt` - this runner
+  installs nothing of its own. That lock is a `uv pip compile --no-deps --generate-hashes`
+  lock for the container target, installed with `pip install --no-deps --require-hashes`, so
+  no transitive resolution happens at build time (sympy, mpmath, coloredlogs and
+  humanfriendly, ~80 MB the wheels declare but never import, stay out) and a rebuild can
+  neither pick a newer `onnxruntime` nor a different `onnxruntime-qnn` wheel nor an extra
+  package. The QNN plugin wheel is self-contained: `onnxruntime-qnn 2.5.0` ships
+  **QAIRT 2.49.40** (`libQnnHtp.so`, `libQnnHtpPrepare.so`, `libQnnHtpV68..V81Skel.so`,
+  ~190 MB), and it is the *only* QAIRT in the image - the base image builds on `python-slim`
+  and installs no QAIRT SDK, precisely because this runner would not use one.
+  `utils/onnx_ep.py` points `ADSP_LIBRARY_PATH` at the wheel's own skels: host library and
+  DSP skel must come from the same release or the backend fails with
+  `QNN_DEVICE_ERROR_INVALID_CONFIG`. That works with the FastRPC libraries the base image
+  installs (Debian's `libfastrpc1`, the same quic/fastrpc 1.0.6 `qairt-common-base` builds
+  from source): it reads `ADSP_LIBRARY_PATH` with `getenv()` at every file open, for the
+  CDSP domain too, and always appends the yaml-derived DSP payload path after it;
+  `CDSP_LIBRARY_PATH` is not referenced anywhere in its sources. The only system library the
+  backend takes is `libcdsprpc.so`, which is the point - everything else it loads by
+  absolute path from its own directory (`dladdr`), build ids checked. To see it on a board:
   `LD_DEBUG=libs python -c "import inference" 2>&1 | grep -E 'QnnHtp|QnnSystem|cdsprpc'`.
-  Using a system QAIRT instead of the wheel's (`EASYOCR_QNN_BACKEND_PATH=/usr/lib/libQnnHtp.so`)
-  only works if it is **at least as new** as the one the EP was built against: the EP picks
-  the backend's interface only when the QNN API major matches and minor/patch are >= its
-  own. Verified on the 21q: the host's QAIRT 2.46 (`qairt-libs`) is refused with
-  `QNN SetupBackend failed Unable to find a valid interface for /usr/lib/libQnnHtp.so`, and
-  so would be the base image's 2.45. A newer system QAIRT would load, but the context
-  binaries are tied to the QAIRT that compiled them and would need recompiling.
-* **Why the wheel's QAIRT and not the base image's** (measured on the 21q, EasyOCR
-  recognizer, one release of `onnxruntime-qnn` at a time, each with its bundled QAIRT):
+* **Why the wheel's QAIRT and not a system one** (measured on the 21q, EasyOCR recognizer,
+  one release of `onnxruntime-qnn` at a time, each with its bundled QAIRT):
 
   | onnxruntime-qnn | onnxruntime | QAIRT | recognizer on the HTP |
   | --- | --- | --- | --- |
-  | 2.1.1 | 1.24.4 | 2.45.41 (= base image) | garbage, every confidence 0.00 |
+  | 2.1.1 | 1.24.4 | 2.45.41 | garbage, every confidence 0.00 |
   | 2.2.0 | 1.24.4 | 2.46.0 | garbage |
   | 2.3.0 | 1.29.0 | 2.47.0 | digits misread, detector no longer on the NPU |
   | 2.4.0 | 1.29.0 | 2.48.40 | correct |
   | 2.5.0 | 1.29.0 | 2.49.40 | correct (pinned) |
 
   With 2.1.1 the same recognizer reads correctly on the CPU EP, so it is the HTP graph those
-  QAIRT releases produce that is wrong, not the model. Using the base image's QAIRT 2.45.41
-  is therefore not an option even though 2.1.1 loads it fine. To use a single, system QAIRT
-  and drop the wheel's copy (~190 MB), `QNP_VER` in `qairt-common-base` has to move to the
-  QAIRT of the pinned wheel; the Dockerfile has the two lines to enable then (`ENV
-  EASYOCR_QNN_BACKEND_PATH=/usr/lib/libQnnHtp.so` plus deleting the wheel's `libQnn*.so`),
-  `utils/onnx_ep.py` already resolves the backend either way and warns when the backend's
-  QAIRT (`AISW_VERSION` string in the library) is not the plugin's, and
-  `test_plugin_qairt_matches_the_base_image_qairt` starts enforcing the lockstep as soon as
-  that `ENV` line is present.
+  QAIRT releases produce that is wrong, not the model. 2.45.41 is what `qairt-common-base`
+  ships, which is one reason this runner no longer builds on it - the other being that a
+  QAIRT SDK it cannot use is over a GB of image. Pointing the EP at a system QAIRT with
+  `EASYOCR_QNN_BACKEND_PATH` only works if that QAIRT is **at least as new** as the one the
+  EP was built against: the EP takes the backend's interface only when the QNN API major
+  matches and minor/patch are >= its own. Verified on the 21q, where the host's QAIRT 2.46
+  (`qairt-libs`) is refused with `QNN SetupBackend failed Unable to find a valid interface
+  for /usr/lib/libQnnHtp.so`. A newer system QAIRT would load, but the context binaries are
+  tied to the QAIRT that compiled them and would need recompiling; `utils/onnx_ep.py` warns
+  when the backend's QAIRT (`AISW_VERSION` string in the library) is not the plugin's.
 * **Compile options**: `DEFAULT_QNN_OPTIONS` in `utils/onnx_ep.py`. The ones that shape the
   binary (`htp_graph_finalization_optimization_mode`, `enable_htp_fp16_precision`,
   `offload_graph_io_quantization`, `soc_model`, `htp_arch`, `vtcm_mb`) are part of its
   fingerprint.
 
-To bump any of them, edit `requirements.in` and regenerate (command in the file header),
-or replace the model files, and then **recompile the context binaries**.
+To bump any of them, edit the base image's `requirements.in` and regenerate - the command
+is in the file's header - or replace the model files, and then **recompile the context
+binaries**.
 
 CI enforces it: `tests/containers/ai/test_ocr_runner_context_binaries.py` compares every
-committed `*.qnn_ctx.json` with the `==` pins in `requirements.txt`, the `# qairt-version:`
-line in `requirements.in`, the compile-time subset of `DEFAULT_QNN_OPTIONS` and the size of
-the `.onnx` it was compiled from, and checks they were compiled on the supported SoC
-(`soc_id` 675, QCS8275). A wheel bump, a model swap or an option change without recompiled
-binaries fails the test suite with the recompile command in the message. What CI cannot
-check is whether the binaries actually run on a board: that is the runtime `soc_id` check.
+committed `*.qnn_ctx.json` with the `==` pins in the base image's `requirements.txt`,
+the `# qairt-version:` line in its `requirements.in`, the compile-time subset of
+`DEFAULT_QNN_OPTIONS` and the size of the `.onnx` it was compiled from, and checks they were
+compiled on the supported SoC (`soc_id` 675, QCS8275). It also fails if any runner on this
+base starts installing an `onnxruntime`/`onnxruntime-qnn`/`numpy`/OpenCV of its own on top
+of the base's, which would let the two drift apart. A wheel bump, a model swap or an option change without
+recompiled binaries fails the test suite with the recompile command in the message. What CI
+cannot check is whether the binaries actually run on a board: that is the runtime `soc_id`
+check.
 
 ## HTP context binaries (the 7-minute problem)
 
@@ -180,7 +181,7 @@ invalidates the binaries.
 
 ```bash
 uv venv .venv --python 3.13 && source .venv/bin/activate
-uv pip install --require-hashes -r requirements.txt   # aarch64 only; on x86_64 use requirements.in (CPU)
+uv pip install --require-hashes -r ../aihub-onnx-models-runner/requirements.txt  # aarch64 only; on x86_64 use the .in file (CPU)
 python tools/compile_htp_context.py                    # compiles, then reports the measured NPU/CPU split
 EASYOCR_QNN_VERIFY=1 python -c "import inference"      # loads both models like the runner and reports the placement
 ```
@@ -191,8 +192,10 @@ partitions are not. If the backend does not come up at all
 are: an `ADSP_LIBRARY_PATH` that does not hold the skels matching `libQnnHtp.so` (ORT's own
 warning `Using existing ADSP_LIBRARY_PATH setting of ...` names the directory in use; the
 runner switches to the wheel's silently), FastRPC permissions (`/dev/fastrpc-cdsp`
-and `/dev/dma_heap/system` not passed to the container), and an `htp_arch` / `soc_model`
-forced through the environment that the SoC does not have. `EASYOCR_ORT_LOG_LEVEL=0` makes
+and `/dev/dma_heap/system` not passed to the container), a missing DSP payload (the host's
+`/usr/share/qcom` has to be bind-mounted at `/run/host-qcom`, from where
+`/aihub-onnx-entrypoint.sh` merges it into `/usr/share/hexagon-dsp`), and an `htp_arch` /
+`soc_model` forced through the environment that the SoC does not have. `EASYOCR_ORT_LOG_LEVEL=0` makes
 ORT print the QNN error verbatim.
 
 ## Environment variables
@@ -227,7 +230,8 @@ ORT print the QNN error verbatim.
 
 `htp_performance_mode=burst` is the QNN mode with the highest clocks, but with `burst` ORT
 also asks fastrpc for RPC polling QoS (`rpc_polling_time=9999`, i.e. `RPC_POLL_QOS`). The
-container ships its own fastrpc 1.0.6, built from source in `qairt-common-base`, and there
+container ships fastrpc 1.0.6 (Debian's `libfastrpc1`, installed by the base image;
+`qairt-common-base` builds the same upstream version from source), and there
 `manage_poll_qos` fails; QNN rejects the **whole** power configuration, DCVS included, ORT
 logs `Unable to set HTP power configurations` and the HTP stays at default clocks. Measured
 in the container on the 21q: detector invoke 103 ms and 65 ms per recognizer call with

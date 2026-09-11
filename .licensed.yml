@@ -15,26 +15,23 @@ apps:
     python:
       virtual_env_dir: "containers/base/python-base/.licensed-venv"
 
+  # The framework's own runtime dependencies (websockets, flask, waitress) live with the
+  # shared sources in containers/ai/aihub-framework; both runner bases install them.
+  - name: aihub-framework
+    source_path: .
+    sources:
+      pip: true
+    python:
+      virtual_env_dir: "containers/ai/aihub-framework/.licensed-venv"
+
+  # OpenCV and ai-edge-litert, shared by every runner built on this base
+  # (gesture-recognition-runner, pose-estimation-runner) and installed here once.
   - name: aihub-models-runner
     source_path: .
     sources:
       pip: true
     python:
       virtual_env_dir: "containers/ai/aihub-models-runner/.licensed-venv"
-
-  - name: gesture-recognition-runner
-    source_path: .
-    sources:
-      pip: true
-    python:
-      virtual_env_dir: "containers/ai/gesture-recognition-runner/.licensed-venv"
-
-  - name: pose-estimation-runner
-    source_path: .
-    sources:
-      pip: true
-    python:
-      virtual_env_dir: "containers/ai/pose-estimation-runner/.licensed-venv"
 
   - name: models-downloader
     source_path: .

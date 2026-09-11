@@ -3,7 +3,7 @@ services:
     image: ${DOCKER_REGISTRY_BASE:-ghcr.io/arduino/}app-bricks/ocr-runner:0.1.0
     # No video feed: the pipeline produces text metadata only, so the MJPEG output
     # (and its port) is not enabled at all.
-    entrypoint: [ "/qairt-entrypoint.sh", "python", "main.py", "--input", "websocket", "--output", "websocket" ]
+    entrypoint: [ "/aihub-onnx-entrypoint.sh", "python", "main.py", "--input", "websocket", "--output", "websocket" ]
     logging:
       driver: "json-file"
       options:
@@ -13,9 +13,10 @@ services:
       - /dev/dma_heap/system
       - /dev/fastrpc-cdsp
     volumes:
-      # Mount hexagon firmware
-      - /sys/firmware/devicetree/base/model:/run/device-model
-      # Read-only: /qairt-entrypoint.sh merges it into /usr/share/qcom in the container layer
+      # Host DSP installation, read-only: /aihub-onnx-entrypoint.sh merges it into
+      # /usr/share/hexagon-dsp in the container layer. No /run/device-model bind mount
+      # here: this runner ships Debian's libfastrpc, which reads the machine name from
+      # /sys/firmware/devicetree/base/model directly.
       - ${HOST_DSP_INSTALLATION_PATH:-/usr/share/qcom}:/run/host-qcom:ro
       # SoC identity (soc_id, machine): the runner refuses a pre-compiled HTP context
       # binary that was built for a different SoC than the one it is running on.

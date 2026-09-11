@@ -3,10 +3,9 @@
 # SPDX-License-Identifier: MPL-2.0
 
 # Development-only material that must not end up in the image.
-.venv/
 **/__pycache__
 **/*.pyc
-sbom-delta/
+tests/
 README.md
 .dockerignore
 ci.json
