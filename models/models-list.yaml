@@ -2125,16 +2125,7 @@ models:
       - id: "arduino:tts"
     deployment:
       handler: "ai-hub-handler"
-      platforms:
-        - ventunoq:
-            variables:
-              model_type: "voice_ai"
-              model_name: "pipertts_de"
-              models_repository: "audio-analytics/tts"
-              model_directory: "pipertts_de-voice_ai-float-qualcomm_qcs8275"
-              quantization: "float"
-              chipset: "qualcomm-qcs8275"
-              version: "0.57.1"
+      pre-loaded: true
     metadata:
       model_size_mb: 79
       source: "qualcomm-ai-hub"
@@ -2149,16 +2140,7 @@ models:
       - id: "arduino:tts"
     deployment:
       handler: "ai-hub-handler"
-      platforms:
-        - ventunoq:
-            variables:
-              model_type: "voice_ai"
-              model_name: "pipertts_de"
-              models_repository: "audio-analytics/tts"
-              model_directory: "pipertts_de-voice_ai-float-qualcomm_qcs8275"
-              quantization: "float"
-              chipset: "qualcomm-qcs8275"
-              version: "0.57.1"
+      pre-loaded: true
     metadata:
       model_size_mb: 79
       source: "qualcomm-ai-hub"
