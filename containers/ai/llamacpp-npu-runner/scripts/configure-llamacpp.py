@@ -302,18 +302,29 @@ def read_gguf(path: Path):
 # Before resizing anything over such a failure, check the board's free RAM: the DSP
 # buffers come from plain system memory (/dev/dma_heap/system), so the same message
 # also appears when the board is simply out of it. Measured: a loaded model
-# costs about 1.6x its GGUF size in RAM.
+# costs about 1.6x its GGUF size in RAM. The third thing that message can mean is a single
+# tensor too big for one chunk, which no session count fixes — see oversized_tensor().
 # --------------------------------------------------------------------------- #
 
 MIB = 1024 * 1024
 
+# The largest buffer the Hexagon backend maps at once, in MiB, as GGML_HEXAGON_MBUF sets it
+# (service_compose.yaml, 1024 since the models grew an mmproj). It does not change what a
+# session can hold — that is the address space below — but the granularity the backend gets
+# there in: an allocation is cut into chunks of this size, so a load fails on a whole chunk
+# rather than on the byte that overflowed. A tensor is never cut across chunks, so this is
+# also a ceiling on one tensor, and the only limit here that more sessions cannot work
+# around. Read through mbuf_bytes(), which takes the value the server will see.
+DEFAULT_MBUF_MIB = 1024
+
 # DSP address space one Hexagon session offers, in bytes, as the backend prints it when
 # the session opens ("ggml-hex: HTP0 op batching: ... vmem 3285696512", about 3134 MiB).
-# With GGML_HEXAGON_MBUF=256 (service_compose.yaml) this is the limit, and a hard one: a
-# session that stays under it loads and one that does not fails, every time. At MBUF 512 it
-# was not: mapping a 512 MiB chunk failed at random (3 loads in 5 for gemma-4-E4B, 0 in 9
-# once MBUF was 256), which is what made loads succeed holding 2.9 GiB and fail holding
-# 1.8 GiB — see ../SESSION_ALLOCATION.md.
+# This is what a session holds whatever GGML_HEXAGON_MBUF is; what MBUF changed was how
+# reliably the backend reached it. At 256 the limit was deterministic — a session that
+# stayed under it loaded and one that did not failed, every time — where at 512 mapping a
+# 512 MiB chunk failed at random (3 loads in 5 for gemma-4-E4B, 0 in 9 once MBUF was 256),
+# which is what made loads succeed holding 2.9 GiB and fail holding 1.8 GiB. The service
+# runs at 1024 now, and nothing has been re-measured there — see ../SESSION_ALLOCATION.md.
 SESSION_VMEM = 3285696512
 
 # Fraction of it the sizing may fill, 2726 MiB. What is left over covers what the estimate
@@ -322,7 +333,7 @@ SESSION_VMEM = 3285696512
 # sessions than any load ever observed in two places — Qwen3-8B and DeepSeek-R1-Distill-
 # Llama-8B at 16k on three sessions (99% of that budget, where the context used to be
 # capped to 8k instead), Nemotron-Mini-4B at 8k on one (97%) — and neither has been tried on
-# the board with MBUF 256. At 0.87 every count the rule asks for is one a load was seen to
+# the board since, at any MBUF. At 0.87 every count the rule asks for is one a load was seen to
 # succeed on. Raising it back is a matter of running those trials (see ../SESSION_ALLOCATION.md).
 SESSION_BUDGET_FRACTION = 0.87
 SESSION_BUDGET = int(SESSION_VMEM * SESSION_BUDGET_FRACTION)
@@ -393,6 +404,11 @@ def n_ubatch() -> int:
     return env_int("LLAMA_ARG_UBATCH", DEFAULT_N_UBATCH)
 
 
+def mbuf_bytes() -> int:
+    """The largest buffer the Hexagon backend maps at once, in bytes."""
+    return env_int("GGML_HEXAGON_MBUF", DEFAULT_MBUF_MIB) * MIB
+
+
 def compute_buffer_bytes(sessions: int) -> int:
     """Bytes of compute buffers one of *sessions* sessions maps.
 
@@ -412,7 +428,11 @@ def compute_buffer_bytes(sessions: int) -> int:
 # logs at 16k, on the busiest session: gemma-4-E4B 145 MiB at n_ubatch 256 and 554 at 1024
 # (0.54 MiB a token), gemma-4-E2B 66 and 265 (0.26). A flat allowance over the larger of the
 # two, until there is a formula from the tensor shapes; recalibrate it against those lines
-# after a llama.cpp bump.
+# after a llama.cpp bump. One is due: gemma-4-E2B reserved 552 MiB on HTP0 at n_ubatch 512
+# (1.08 MiB a token) once an mmproj was attached to it, against the 265 MiB it reserved at
+# n_ubatch 1024 without one. A vision encoder's buffer follows the image rather than the
+# micro-batch, so that is an allowance of its own and not a bigger constant here; both are
+# waiting on the board measurement that separates them.
 COMPUTE_BYTES_PER_UBATCH_TOKEN = int(0.6 * MIB)
 
 # Tensor types the Hexagon backend does not repack, so tensors of these types stay on the
@@ -427,7 +447,7 @@ CPU_ONLY_TYPES = frozenset({"q2_K", "q3_K"})
 # whatever their type: the per-layer embeddings of the matformer gemmas, where gemma-4-E2B
 # keeps two thirds of its bytes — the whole of its apparent size problem. token_embd.weight
 # is the same case, but only when the model has a separate output projection, see
-# npu_weight_bytes().
+# npu_tensors().
 GET_ROWS_ONLY_TENSORS = frozenset({"per_layer_token_embd.weight"})
 
 # A hybrid model (Qwen3.5, LFM2) keeps a recurrent state per sequence on the NPU next to
@@ -467,6 +487,9 @@ class ModelShape(NamedTuple):
     kv_layers: tuple[KvLayer, ...]
     state_bytes: int
 
+    largest_npu_tensor: Tensor | None = None
+    """The biggest single tensor the backend puts on the NPU, None when it was not read."""
+
     def kv_cache_bytes(self, ctx_size: int) -> int:
         return sum(layer.bytes(ctx_size) for layer in self.kv_layers)
 
@@ -497,6 +520,20 @@ class ModelShape(NamedTuple):
     def fits(self, ctx_size: int) -> bool:
         """Whether the model fits the budget on any number of sessions at all."""
         return self.session_bytes(ctx_size, MAX_SESSIONS) <= SESSION_BUDGET
+
+    def oversized_tensor(self) -> Tensor | None:
+        """The largest NPU tensor when it is bigger than one chunk, None otherwise.
+
+        The backend cuts an allocation into chunks of GGML_HEXAGON_MBUF and never cuts a
+        tensor, so a tensor bigger than a chunk is the one thing splitting the model over
+        more sessions cannot help with: whichever session holds that layer has to map it
+        whole. It is reported rather than sized around — the script does not set MBUF, and
+        how hard that ceiling really is has not been pinned down: gemma-4-E4B loaded 9
+        times in 9 at MBUF 256 holding a 560 MiB tied embedding on the NPU
+        (../SESSION_ALLOCATION.md), which a strict reading says should not have mapped.
+        """
+        tensor = self.largest_npu_tensor
+        return tensor if tensor is not None and tensor.bytes > mbuf_bytes() else None
 
     def describe(self, ctx_size: int) -> str:
         """How this model was sized, for the diagnostics."""
@@ -549,28 +586,33 @@ class FileSizeSizing(NamedTuple):
                 return count
         return 1
 
+    def oversized_tensor(self) -> None:
+        """Nothing can be said about the tensors of a file whose header would not parse."""
+        return None
+
     def describe(self, ctx_size: int) -> str:
         pinned = any(name in self.name for name, _ in FALLBACK_PINS)
         return f"{self.gguf_bytes / GB:.2f} GB on disk, {'pinned by name' if pinned else 'sized by file size'}"
 
 
-def npu_weight_bytes(tensors) -> int:
-    """Bytes of weights the Hexagon backend holds on the NPU.
+def npu_tensors(tensors) -> list[Tensor]:
+    """The tensors the Hexagon backend holds on the NPU.
 
     Every tensor but those of a type the backend does not repack (CPU_ONLY_TYPES), those
     only read by get_rows (GET_ROWS_ONLY_TENSORS), and the token embeddings of a model that
     has a separate output projection, which are get_rows-only too. A model with tied
     embeddings uses that same tensor as its output projection, and it does go to the NPU:
-    gemma-4-E4B puts its 560 MiB of q6_K token embeddings there. Reproduced the "HTP model
-    buffer size" llama-server logs to within a MiB on 18 of the 19 models measured under
-    the build that kept every K-quant on the CPU, and on gemma-4-E4B (2731 MiB) under the
-    one that repacks them.
+    gemma-4-E4B puts its 560 MiB of q6_K token embeddings there.
+
+    Their total reproduced the "HTP model buffer size" llama-server logs to within a MiB on
+    18 of the 19 models measured under the build that kept every K-quant on the CPU, and on
+    gemma-4-E4B (2731 MiB) under the one that repacks them.
     """
     names = {tensor.name for tensor in tensors}
     dropped = set(GET_ROWS_ONLY_TENSORS)
     if {"output.weight", "token_embd.weight"} <= names:
         dropped.add("token_embd.weight")
-    return sum(tensor.bytes for tensor in tensors if tensor.type not in CPU_ONLY_TYPES and tensor.name not in dropped)
+    return [tensor for tensor in tensors if tensor.type not in CPU_ONLY_TYPES and tensor.name not in dropped]
 
 
 K_PROJECTION = re.compile(r"^blk\.(\d+)\.attn_k(?:_b)?\.weight$")
@@ -659,11 +701,13 @@ def read_model_shape(path: Path) -> ModelShape:
     # A layer that caches nothing is either recurrent, which costs a state, or sharing
     # another layer's cache, which costs nothing: the tensor names tell the two apart.
     recurrent = any(RECURRENT_TENSOR.search(tensor.name) for tensor in tensors)
+    on_npu = npu_tensors(tensors)
     return ModelShape(
         n_layer=max(block_count(metadata), len(layers), 1),
-        npu_weight_bytes=npu_weight_bytes(tensors),
+        npu_weight_bytes=sum(tensor.bytes for tensor in on_npu),
         kv_layers=layers,
         state_bytes=RECURRENT_STATE_ALLOWANCE if recurrent else 0,
+        largest_npu_tensor=max(on_npu, key=lambda tensor: tensor.bytes, default=None),
     )
 
 
@@ -727,6 +771,14 @@ def detect_hexagon_sessions(models, ctx_size: int) -> int:
         required = sizing.sessions_needed(ctx_size)
         verdict = "fits 1 session" if required == 1 else f"requires {sessions(required)}"
         print(f"  {name}: {sizing.describe(ctx_size)}, {verdict}", file=sys.stderr)
+        oversized = sizing.oversized_tensor()
+        if oversized is not None:
+            print(
+                f"  {name}: WARNING {oversized.name} is one {oversized.bytes / MIB:.0f} MiB {oversized.type} tensor,"
+                f" more than the {mbuf_bytes() / MIB:.0f} MiB GGML_HEXAGON_MBUF maps at once;"
+                f" no session count splits a tensor, so raise GGML_HEXAGON_MBUF if the load fails",
+                file=sys.stderr,
+            )
         needed = max(needed, required)
 
     return needed

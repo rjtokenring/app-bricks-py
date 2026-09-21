@@ -5,8 +5,9 @@
 """Unit tests for the llama.cpp runners' configure-llamacpp.py scripts.
 
 Covers the Hexagon session sizing of the NPU runner — the GGUF header reading it is
-built on, the sizing itself, and a regression table of what the measured models were
-measured to need (containers/ai/llamacpp-npu-runner/SESSION_ALLOCATION.md) — and, for
+built on, the sizing itself, the ceiling GGML_HEXAGON_MBUF puts on a single tensor, and a
+regression table of what the measured models were measured to need
+(containers/ai/llamacpp-npu-runner/SESSION_ALLOCATION.md) — and, for
 both runners, whose scripts deliberately duplicate the code, the served model names,
 which are derived from the ".arduino_metadata.yaml" download records rather than from
 a catalog baked into the images.
@@ -20,10 +21,12 @@ import struct
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NPU_SCRIPT = REPO_ROOT / "containers" / "ai" / "llamacpp-npu-runner" / "scripts" / "configure-llamacpp.py"
 CPU_SCRIPT = REPO_ROOT / "containers" / "ai" / "llamacpp-runner" / "scripts" / "configure-llamacpp.py"
+COMPOSE = REPO_ROOT / "src" / "arduino" / "app_services" / "llamacpp" / "service_compose.yaml"
 
 
 def _load_script(script: Path, name: str):
@@ -190,6 +193,24 @@ def test_the_per_layer_embeddings_of_a_matformer_gemma_stay_on_the_cpu(tmp_path)
     gguf = write_gguf(tmp_path / "m.gguf", {"general.architecture": "gemma4", "gemma4.block_count": 1}, tensors)
 
     assert read_model_shape(gguf).npu_weight_bytes == pytest.approx(310 * MIB, rel=1e-3)
+
+
+def test_the_largest_tensor_on_the_npu_is_recorded(tmp_path):
+    """Only what the NPU holds can be the tensor that fails to map: a bigger one the CPU
+    keeps, whether by its type or because get_rows is all that reads it, does not count."""
+    tensors = [
+        ("token_embd.weight", (q4_0_elements(300),), Q4_0),
+        ("output.weight", (q4_0_elements(400),), Q4_0),
+        ("per_layer_token_embd.weight", (q4_0_elements(2000),), Q4_0),
+        ("blk.0.ffn_up.weight", (600 * MIB // 110 * 256,), Q3_K),
+        ("blk.0.attn_k.weight", (q4_0_elements(10),), Q4_0),
+    ]
+    gguf = write_gguf(tmp_path / "m.gguf", {"general.architecture": "llama", "llama.block_count": 1}, tensors)
+
+    largest = read_model_shape(gguf).largest_npu_tensor
+
+    assert largest.name == "output.weight"
+    assert largest.bytes == pytest.approx(400 * MIB, rel=1e-3)
 
 
 # --------------------------------------------------------------------------- #
@@ -719,6 +740,93 @@ def test_a_model_too_big_for_every_session_asks_for_them_all():
     huge = shape_of(npu_weight_mib=40000, n_layer=32, kv_layers=1, bytes_per_cell=0)
 
     assert huge.sessions_needed(16384) == configure_llamacpp.MAX_SESSIONS
+
+
+# --------------------------------------------------------------------------- #
+# The chunk the backend maps at once
+#
+# GGML_HEXAGON_MBUF is the granularity an allocation is cut into, not a second budget: it
+# is why a load fails on a whole chunk rather than on the byte that overflowed. What it
+# constrains by itself is the largest single tensor, which is never cut across chunks and
+# so is the one thing more sessions cannot work around.
+# --------------------------------------------------------------------------- #
+
+
+def service_environment() -> dict:
+    """The environment service_compose.yaml gives the runner."""
+    environment = yaml.safe_load(COMPOSE.read_text())["services"]["llamacpp-models-runner"]["environment"]
+    return dict(item.split("=", 1) for item in environment)
+
+
+def test_the_defaults_are_the_ones_the_service_configures():
+    """Both are read from the environment the server will see, with a default behind them,
+    and that default has to be what the service sets: sizing for a chunk or a micro-batch
+    the server is not running at is how the rule goes quietly wrong."""
+    environment = service_environment()
+
+    assert int(environment["GGML_HEXAGON_MBUF"]) == configure_llamacpp.DEFAULT_MBUF_MIB
+    assert int(environment["LLAMA_ARG_UBATCH"]) == configure_llamacpp.DEFAULT_N_UBATCH
+
+
+def test_the_chunk_size_is_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("GGML_HEXAGON_MBUF", "256")
+    assert configure_llamacpp.mbuf_bytes() == 256 * MIB
+
+    # Unset, or not a positive number, means what the service configures.
+    monkeypatch.delenv("GGML_HEXAGON_MBUF")
+    assert configure_llamacpp.mbuf_bytes() == configure_llamacpp.DEFAULT_MBUF_MIB * MIB
+
+
+def gemma_e2b_embedding(path: Path) -> Path:
+    """gemma-4-E2B as its header describes it: 330 MiB of tied q6_K token embeddings, which
+    the build that repacks the K-quants puts on the NPU as one tensor."""
+    return write_gguf(
+        path,
+        {"general.architecture": "gemma4", "gemma4.block_count": 1},
+        [
+            ("token_embd.weight", (330 * MIB // 210 * 256,), Q6_K),
+            ("blk.0.attn_k.weight", (q4_0_elements(10),), Q4_0),
+        ],
+    )
+
+
+def test_a_tensor_bigger_than_the_chunk_is_reported_and_a_smaller_one_is_not(tmp_path, monkeypatch):
+    """The 256 MiB the service ran at is below E2B's tied embedding; the 1024 it runs at
+    now leaves it room."""
+    shape = read_model_shape(gemma_e2b_embedding(tmp_path / "gemma-4-E2B.gguf"))
+
+    monkeypatch.setenv("GGML_HEXAGON_MBUF", "1024")
+    assert shape.oversized_tensor() is None
+
+    monkeypatch.setenv("GGML_HEXAGON_MBUF", "256")
+    oversized = shape.oversized_tensor()
+    assert oversized.name == "token_embd.weight"
+    assert oversized.bytes == pytest.approx(330 * MIB, rel=1e-3)
+
+
+def test_the_sizing_warns_about_a_tensor_no_session_count_can_split(tmp_path, monkeypatch, capsys):
+    """Sessions split the layers, never a tensor, so this one is reported rather than sized
+    around: the script does not set GGML_HEXAGON_MBUF, the service does."""
+    monkeypatch.setenv("GGML_HEXAGON_MBUF", "256")
+    gemma_e2b_embedding(tmp_path / "gemma-4-E2B.gguf")
+    models = configure_llamacpp.find_models(tmp_path)
+
+    assert detect_hexagon_sessions(models, 16384) == 1
+
+    diagnostics = capsys.readouterr().err
+    assert "WARNING token_embd.weight is one 330 MiB q6_K tensor" in diagnostics
+    assert "more than the 256 MiB GGML_HEXAGON_MBUF maps at once" in diagnostics
+
+
+def test_a_model_sized_by_its_file_reports_no_tensor(tmp_path, monkeypatch, capsys):
+    """A header that would not parse says nothing about tensors, so the warning stays quiet
+    rather than guessing at one."""
+    monkeypatch.setenv("GGML_HEXAGON_MBUF", "256")
+    (tmp_path / "gemma-4-E4B_q4_0-it.gguf").write_bytes(b"GGUF" + bytes(64))
+    models = configure_llamacpp.find_models(tmp_path)
+
+    assert detect_hexagon_sessions(models, 16384) == 2
+    assert "WARNING" not in capsys.readouterr().err
 
 
 # gemma-4-E4B and E2B at 16k as measured on the board under this build — the one that

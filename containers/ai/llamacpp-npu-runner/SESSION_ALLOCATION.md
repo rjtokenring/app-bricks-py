@@ -28,10 +28,17 @@ on disk alone.
   now reads the GGUF header instead: which tensors land on the NPU, and how big the KV
   cache is at the context the server runs at. Both reproduce what `llama-server` logs to
   within a MiB.
-- **The limit is the DSP address space of a session, about 3134 MiB, and it is a hard one
-  once `GGML_HEXAGON_MBUF` is 256.** At 512 it was not: mapping a 512 MiB chunk failed at
-  random, which made loads succeed holding 2.9 GiB and fail holding 1.8 GiB. That is what
-  the matrix below measured, and why its verdicts near the edge were not reproducible.
+- **The limit is the DSP address space of a session, about 3134 MiB**, whatever
+  `GGML_HEXAGON_MBUF` is. What MBUF changed was how reliably the backend got there: at 256
+  the limit was hard — under it a session loaded, over it it failed, every time — while at
+  512 mapping a 512 MiB chunk failed at random, which made loads succeed holding 2.9 GiB
+  and fail holding 1.8 GiB. That is what the matrix below measured, and why its verdicts
+  near the edge were not reproducible. **The service runs at 1024 now and nothing has been
+  measured there** ([Running it again](#running-it-again)).
+- **What MBUF does constrain on its own is one tensor**, since a tensor is never cut across
+  chunks and no session count splits one. `configure-llamacpp.py` reports a model whose
+  largest NPU tensor is over the chunk; how hard that ceiling is has not been pinned down
+  ([The ceiling on one tensor](#the-ceiling-on-one-tensor)).
 - **What a session holds is weights, KV cache and compute buffers** — its own, sized by the
   micro-batch rather than the context, and from two sessions up a copy of the buffer of the
   session feeding it. At `n_ubatch` 1024 that is up to a GiB a session. The first rule left
@@ -199,7 +206,7 @@ llama_init_from_model: failed to initialize the context: failed to allocate buff
 ```
 
 The size is `GGML_HEXAGON_MBUF`, the largest buffer the backend maps at once — 512 MiB when
-this was logged, 256 now — so the failure lands on a whole chunk rather than on the byte
+this was logged, 1024 now — so the failure lands on a whole chunk rather than on the byte
 that overflowed.
 
 The DSP buffers come from plain system memory (`/dev/dma_heap/system`), so **the same
@@ -215,10 +222,30 @@ The backend prints what one session can map when it opens it:
 ggml-hex: HTP0 op batching: ... vmem 3285696512
 ```
 
-3134 MiB. With `GGML_HEXAGON_MBUF=256` that is the limit, and a deterministic one: a
-session whose weights, KV cache and compute buffers stay under it loads, one whose do not
-fails. gemma-4-E4B over two sessions at 16k and `n_ubatch` 1024, HTP1 holding 2600 MiB,
-loaded on 9 attempts in 9.
+3134 MiB, and it does not move with `GGML_HEXAGON_MBUF`. At `GGML_HEXAGON_MBUF=256` it
+was the limit and a deterministic one: a session whose weights, KV cache and compute
+buffers stayed under it loaded, one whose did not failed. gemma-4-E4B over two sessions at
+16k and `n_ubatch` 1024, HTP1 holding 2600 MiB, loaded on 9 attempts in 9. The service has
+since moved to 1024 and that has not been repeated, so what is known about determinism is
+known at 256.
+
+### The ceiling on one tensor
+
+An allocation is cut into chunks of `GGML_HEXAGON_MBUF`; a tensor is not. Whichever session
+holds a layer has to map that layer's tensors whole, so a tensor larger than a chunk is the
+one thing adding sessions cannot help with, and the only reason the chunk size belongs in
+the sizing at all. `configure-llamacpp.py` records the largest tensor it puts on the NPU
+(`ModelShape.oversized_tensor()`) and prints a warning when it is over the chunk, naming the
+tensor and the `GGML_HEXAGON_MBUF` that would hold it. It warns rather than resizing,
+because nothing it can change fixes it — the service sets MBUF, not the script.
+
+**How hard this ceiling is has not been established.** Two observations pull in opposite
+directions: the gemmas' tied token embeddings are one tensor of 330 MiB (E2B) and 560 MiB
+(E4B) once the build repacks the K-quants onto the NPU, and E4B nonetheless loaded 9 times
+in 9 at MBUF 256, which a strict reading of the ceiling says should not have mapped; but
+with the mmproj attached, at MBUF 256, no model loaded at all. The mmproj is the variable
+those two have between them, so the ceiling is a hypothesis until a trial separates them:
+the same models at MBUF 256 with and without the mmproj in `models.ini`.
 
 ### What the matrix saw instead
 
@@ -316,8 +343,8 @@ was seen to succeed on**, under either MBUF. At 90% it would, in two cells that 
 on any attempt — Nemotron-Mini-4B at 8k on one session (2743 MiB, 97% of that budget) and
 DeepSeek-R1-Distill-Llama-8B at 16k on three (2792 MiB, 99%), the latter also taking
 Qwen3-8B to 16k on three where the context has always been capped to 8k. Both are inside the
-address space and may well load under MBUF 256, but nobody has tried, and 87% is the largest
-fraction that keeps the rule within what was observed. `tests/scripts/test_configure_llamacpp.py`
+address space and may well load at a chunk size that does not fail at random, but nobody has
+tried, and 87% is the largest fraction that keeps the rule within what was observed. `tests/scripts/test_configure_llamacpp.py`
 holds the condition (`test_the_measured_models_never_get_fewer_sessions_than_they_were_seen_to_load_on`),
 so raising the fraction is a matter of running those two trials and, if they pass, adding
 them to `LOADED_ON_SOME_ATTEMPTS`.
@@ -448,7 +475,7 @@ gives the container and the arguments [`run-model-router.sh`](scripts/run-model-
 builds (`--device HTP0[,HTP1...] -ngl 100 --load-mode none`), so that what is measured is
 what the service will do. The matrix above ran with the compose of its day
 (`LLAMA_ARG_UBATCH=256`, `GGML_HEXAGON_MBUF=512`, `LLAMA_ARG_POLL=1000`); `session-trial.sh`
-exports the current one (`LLAMA_ARG_UBATCH=512`, `GGML_HEXAGON_MBUF=256`, `LLAMA_ARG_POLL=0`,
+exports the current one (`LLAMA_ARG_UBATCH=512`, `GGML_HEXAGON_MBUF=1024`, `LLAMA_ARG_POLL=0`,
 with `LLAMA_ARG_BATCH=1024`, `LLAMA_ARG_FLASH_ATTN=on`, `LLAMA_ARG_THREADS=4`,
 `LLAMA_ARG_CPU_MASK=0x0f`, `GGML_HEXAGON_OPBATCH=2048` unchanged), so a re-run measures the
 envelope the service runs in now.
@@ -483,8 +510,9 @@ common_memory_breakdown_print: | - HTP0 (Hexagon) | 0 = 0 + (2361 = 1688 + 640 +
 Worth redoing after a llama.cpp bump, a DSP firmware change, or a change to
 `GGML_HEXAGON_MBUF` or `LLAMA_ARG_UBATCH` — any of them can move the envelope — and after any
 change to which tensor types the Hexagon backend keeps on the NPU. All of those have
-happened since the matrix was measured, so it is due. The trials worth running first, with
-`repro.sh` so that a verdict is repeated rather than sampled:
+happened since the matrix was measured, and `GGML_HEXAGON_MBUF` has moved twice (512, then
+256, then 1024 when the gemmas grew an mmproj), so it is due. The trials worth running
+first, with `repro.sh` so that a verdict is repeated rather than sampled:
 
 - Nemotron-Mini-4B at 8k on one session and DeepSeek-R1-Distill-Llama-8B and Qwen3-8B at
   16k on three — the cells that hold the budget at 87% ([The budget](#the-budget)). If they
@@ -494,7 +522,13 @@ happened since the matrix was measured, so it is due. The trials worth running f
   Phi-4-mini and Nemotron-Mini-4B at 16k on two.
 - LFM2.5-8B at 16k on three, whose compute buffer was the outlier of the first matrix.
 - The `sched_reserve: HTPn compute buffer size` lines of every model, to replace the flat
-  compute allowance with a fit, or confirm it covers them.
+  compute allowance with a fit, or confirm it covers them. It is known not to: gemma-4-E2B
+  reserved 552 MiB at `n_ubatch` 512 with an mmproj attached, against 265 MiB at
+  `n_ubatch` 1024 without one, so a vision encoder wants an allowance of its own rather
+  than a larger per-token constant.
+- The gemmas at MBUF 256 with and without the mmproj in `models.ini`, which is what
+  separates the tensor ceiling from the mmproj as the reason nothing loaded there
+  ([The ceiling on one tensor](#the-ceiling-on-one-tensor)).
 
 [`tools/`](tools/) holds the harness: `session-trial.sh` runs one (model, context, sessions)
 trial, `session-matrix.sh` walks the matrix, `repro.sh` repeats a configuration to test
