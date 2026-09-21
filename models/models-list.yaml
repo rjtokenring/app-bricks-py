@@ -1911,16 +1911,20 @@ models:
       - id: "arduino:llm"
         model_configuration:
           GGML_HEXAGON_DEVICES: 1
+      - id: "arduino:vlm"
+        model_configuration:
+          GGML_HEXAGON_DEVICES: 1          
     deployment:
       handler: "hf-handler"
       platforms:
         - ventunoq:
             variables:
               model_url: "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/blob/347eef722ec7f151f37d1ef0b5c7c77d8de4efcb/gemma-4-E2B_q4_0-it.gguf"
+              model_mmproj_url: "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/blob/675cff42a74c774d6cb76f76d8eacb49b48c9b93/gemma-4-E2B-it-mmproj.gguf"
               models_repository: "llamacpp"
               model_directory: "google/gemma-4-E2B-it-qat-q4_0-gguf"
     metadata:
-      model_size_mb: 3430
+      model_size_mb: 4417
       source: "huggingface"
       source-model-id: "gemma-4-E2B-it-qat-q4_0-gguf"
       source-model-url: "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf"
@@ -1935,16 +1939,20 @@ models:
       - id: "arduino:llm"
         model_configuration:
           GGML_HEXAGON_DEVICES: 2
+      - id: "arduino:vlm"
+        model_configuration:
+          GGML_HEXAGON_DEVICES: 2          
     deployment:
       handler: "hf-handler"
       platforms:
         - ventunoq:
             variables:
               model_url: "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/blob/e998672c8018dd704e347d3b6843c112547244d1/gemma-4-E4B_q4_0-it.gguf"
+              model_mmproj_url: "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/blob/4b4a2c1d584be7264f87aac328a1bc739ce81b6c/gemma-4-E4B-it-mmproj.gguf"
               models_repository: "llamacpp"
               model_directory: "google/gemma-4-E4B-it-qat-q4_0-gguf"
     metadata:
-      model_size_mb: 5273
+      model_size_mb: 6265
       source: "huggingface"
       source-model-id: "gemma-4-E4B-it-qat-q4_0-gguf"
       source-model-url: "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf"
