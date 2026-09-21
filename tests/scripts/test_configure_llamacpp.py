@@ -697,12 +697,21 @@ def test_the_busiest_session_holds_one_layer_more_than_an_even_share():
     assert granite.session_bytes(16384, 1) == granite.npu_bytes(16384) + compute(1)
 
 
-def test_the_budget_is_87_percent_of_the_address_space_a_session_offers():
-    """3134 MiB of DSP address space, as the backend prints it at start-up, with 13% kept
+def test_the_budget_is_85_percent_of_the_address_space_a_session_offers():
+    """3134 MiB of DSP address space, as the backend prints it at start-up, with 15% kept
     back for what the flat compute and state allowances get wrong — and so that no count
     the rule asks for is below one a load was seen to succeed on (see MEASURED_MODELS)."""
-    assert configure_llamacpp.SESSION_BUDGET == int(3285696512 * 0.87)
-    assert configure_llamacpp.SESSION_BUDGET / MIB == pytest.approx(2726, abs=1)
+    assert configure_llamacpp.SESSION_BUDGET == int(3285696512 * 0.85)
+    assert configure_llamacpp.SESSION_BUDGET / MIB == pytest.approx(2664, abs=1)
+
+
+def test_the_budget_excludes_the_one_figure_that_was_never_seen_to_load():
+    """What brought the fraction down from 0.87: bar-Qwen3.5-9B sizes to 2706 MiB a session
+    on three, which never loaded in four attempts, where four sessions load and generate
+    (board, 2026-09-21, MBUF 1024, n_ubatch 512). The budget has to sit below that figure
+    for the rule to give the model the fourth session, and above the 2583 MiB that
+    granite-4.2-8b holds on the four it loads on."""
+    assert 2583 * MIB < configure_llamacpp.SESSION_BUDGET < 2706 * MIB
 
 
 def test_every_session_reserves_a_compute_buffer_and_a_copy_of_the_one_feeding_it(monkeypatch):
@@ -900,7 +909,8 @@ def test_the_measured_models_never_get_fewer_sessions_than_they_were_seen_to_loa
     """The sizing may ask for more than was measured — over-allocating costs a little
     throughput, under-allocating fails the load — but never for fewer than a load was seen
     to succeed on. This is what SESSION_BUDGET_FRACTION is set by: at 0.9 it breaks in two
-    cells (Nemotron-Mini-4B at 8k, DeepSeek-R1-Distill-Llama-8B at 16k), at 0.87 it holds."""
+    cells (Nemotron-Mini-4B at 8k, DeepSeek-R1-Distill-Llama-8B at 16k), and at 0.87 it broke
+    on bar-Qwen3.5-9B, which is why the fraction is 0.85."""
     shape, _ = MEASURED_MODELS[name]
 
     for ctx_size in CTX_SIZES:
@@ -923,6 +933,113 @@ def test_the_measured_models_are_not_over_allocated_by_more_than_a_session():
             if needed is None:
                 continue
             assert shape.sessions_needed(ctx_size) - needed <= 1, f"{name} at {ctx_size}"
+
+
+# --------------------------------------------------------------------------- #
+# The board run of 2026-09-21
+#
+# Every model installed on the 21q board, at 16k, on the session count the rule asks for,
+# under the environment the service runs now: GGML_HEXAGON_MBUF 1024, n_ubatch 512,
+# LLAMA_ARG_BATCH 1024, and the build that repacks the K-quants. Two runs of the whole
+# set: 18 models, all of which loaded and generated on the count below.
+#
+# The shapes are what read_model_shape() reads from those files on the board, so the table
+# pins the header reading and the rule together against what the hardware did. Unlike
+# MEASURED_MODELS this is not a search for the smallest count that works — only the count
+# the rule asked for was tried — so it says "this count loads", not "no smaller one does".
+# The exception is bar-Qwen3.5-9B, which is why SESSION_BUDGET_FRACTION came down to 0.85:
+# see test_the_9b_is_kept_off_the_three_sessions_that_never_loaded.
+#
+# Refresh it by running, on the board, with LD_LIBRARY_PATH pointing at the package's lib:
+#   python3 configure-llamacpp.py /path/to/models --print-ndev --ctx 16384
+# and containers/ai/llamacpp-npu-runner/tools/session-trial.sh for the verdicts.
+# --------------------------------------------------------------------------- #
+
+
+def board_shape(*, npu_weight_mib: float, n_layer: int, kv: tuple, largest: tuple, recurrent: bool = False) -> ModelShape:
+    """A shape as the board's headers give it.
+
+    *kv* is (bytes per cell, window, layers) per group of layers, *largest* the biggest
+    tensor the model puts on the NPU as (name, type, MiB).
+    """
+    layers = tuple(KvLayer(cell, window) for cell, window, count in kv for _ in range(count))
+    name, type_name, mib = largest
+    return ModelShape(
+        n_layer=n_layer,
+        npu_weight_bytes=int(npu_weight_mib * MIB),
+        kv_layers=layers,
+        state_bytes=configure_llamacpp.RECURRENT_STATE_ALLOWANCE if recurrent else 0,
+        largest_npu_tensor=configure_llamacpp.Tensor(name, type_name, int(mib * MIB)),
+    )
+
+
+EMBD, OUT = "token_embd.weight", "output.weight"
+
+BOARD_2026_09_21 = {
+    "DeepSeek-R1-0528-Qwen3-8B-Q4_0": (board_shape(npu_weight_mib=4226, n_layer=36, kv=((4096, 0, 36),), largest=(OUT, "q6_K", 487)), 4),
+    "DeepSeek-R1-Distill-Llama-8B-Q4_0": (board_shape(npu_weight_mib=4170, n_layer=32, kv=((4096, 0, 32),), largest=(OUT, "q6_K", 411)), 4),
+    "LFM2.5-8B-A1B-Q4_0": (board_shape(npu_weight_mib=4612, n_layer=24, kv=((2048, 0, 6),), largest=(EMBD, "q6_K", 205), recurrent=True), 3),
+    "Nemotron-Mini-4B-Instruct-Q4_0": (board_shape(npu_weight_mib=2028, n_layer=32, kv=((4096, 0, 32),), largest=(OUT, "q6_K", 615)), 3),
+    "Qwen3-4B-Instruct-2507-Q4_0": (board_shape(npu_weight_mib=2260, n_layer=36, kv=((4096, 0, 36),), largest=(EMBD, "q6_K", 304)), 3),
+    "Qwen3.5-0.8B-Q4_0": (board_shape(npu_weight_mib=473, n_layer=24, kv=((2048, 0, 6),), largest=(EMBD, "q6_K", 199), recurrent=True), 1),
+    "Qwen3.5-4B-Q4_0": (board_shape(npu_weight_mib=2453, n_layer=32, kv=((4096, 0, 8),), largest=(EMBD, "q6_K", 497), recurrent=True), 2),
+    "Qwen3.5-4B-Q4_0-pure": (board_shape(npu_weight_mib=2259, n_layer=32, kv=((4096, 0, 8),), largest=(EMBD, "q4_0", 341), recurrent=True), 2),
+    "Qwen3.5-4B-Q8_0": (board_shape(npu_weight_mib=4264, n_layer=32, kv=((4096, 0, 8),), largest=(EMBD, "q8_0", 644), recurrent=True), 3),
+    "Qwen_Qwen3-8B-Q4_0": (board_shape(npu_weight_mib=4226, n_layer=36, kv=((4096, 0, 36),), largest=(OUT, "q6_K", 487)), 4),
+    "SmolVLM2-500M-Video-Instruct-Q8_0": (board_shape(npu_weight_mib=367, n_layer=32, kv=((1280, 0, 32),), largest=(OUT, "q8_0", 48)), 1),
+    "bar-Qwen_Qwen3.5-9B-Q4_0": (board_shape(npu_weight_mib=4919, n_layer=33, kv=((4096, 0, 9),), largest=(OUT, "q6_K", 796), recurrent=True), 4),
+    "gemma-3-1b-it-Q4_0": (board_shape(npu_weight_mib=682, n_layer=26, kv=((1024, 0, 26),), largest=(EMBD, "q8_0", 306)), 1),
+    "gemma-4-12b-it-qat-q4_0": (board_shape(npu_weight_mib=6638, n_layer=48, kv=((8192, 1024, 40), (2048, 0, 8)), largest=(EMBD, "q6_K", 788)), 4),
+    "gemma-4-E4B_q4_0-it": (board_shape(npu_weight_mib=2696, n_layer=42, kv=((2048, 512, 20), (4096, 0, 4)), largest=(EMBD, "q6_K", 525)), 2),
+    "granite-4.2-3b-Q4_0": (board_shape(npu_weight_mib=1889, n_layer=40, kv=((2048, 0, 40),), largest=(OUT, "q6_K", 201)), 2),
+    "granite-4.2-8b-Q4_0": (board_shape(npu_weight_mib=4598, n_layer=40, kv=((4096, 0, 40),), largest=(OUT, "q6_K", 322)), 4),
+    "microsoft_Phi-4-mini-instruct-Q4_0": (board_shape(npu_weight_mib=2216, n_layer=32, kv=((4096, 0, 32),), largest=(EMBD, "q6_K", 481)), 3),
+}
+
+
+@pytest.mark.parametrize("name", sorted(BOARD_2026_09_21))
+def test_the_rule_asks_for_the_count_the_board_loaded_on(name, monkeypatch):
+    """The whole rule against the hardware: every one of the 18 models loaded and
+    generated at 16k on exactly this count."""
+    monkeypatch.delenv("LLAMA_ARG_UBATCH", raising=False)
+    shape, loaded = BOARD_2026_09_21[name]
+
+    assert shape.sessions_needed(16384) == loaded
+
+
+def test_the_9b_is_kept_off_the_three_sessions_that_never_loaded(monkeypatch):
+    """The one model the rule got wrong at SESSION_BUDGET_FRACTION 0.87. Three sessions
+    size to 2706 MiB, 99% of that budget, and failed on 4 attempts of 4 with
+    "fastrpc_mmap failed" while the board had 14 GB free; four load and generate on 3 of 3,
+    the busiest session holding 1984 MiB of the 2357 the rule allows it."""
+    monkeypatch.delenv("LLAMA_ARG_UBATCH", raising=False)
+    shape, _ = BOARD_2026_09_21["bar-Qwen_Qwen3.5-9B-Q4_0"]
+
+    assert shape.session_bytes(16384, 3) / MIB == pytest.approx(2706, abs=1)
+    assert shape.session_bytes(16384, 3) > configure_llamacpp.SESSION_BUDGET
+    assert shape.session_bytes(16384, 4) / MIB == pytest.approx(2357, abs=1)
+    assert shape.sessions_needed(16384) == 4
+
+
+def test_no_model_on_the_board_has_a_tensor_over_the_chunk(monkeypatch):
+    """Which is why they all load at MBUF 1024. The largest is bar-Qwen3.5-9B's 796 MiB
+    output projection, and gemma-4-12b's tied embedding is 788."""
+    monkeypatch.setenv("GGML_HEXAGON_MBUF", "1024")
+
+    assert [name for name, (shape, _) in BOARD_2026_09_21.items() if shape.oversized_tensor()] == []
+    assert max(shape.largest_npu_tensor.bytes for shape, _ in BOARD_2026_09_21.values()) / MIB == pytest.approx(796, abs=1)
+
+
+def test_most_of_the_board_would_be_refused_at_the_chunk_size_the_service_used_to_run(monkeypatch):
+    """What #29197 did to MBUF 256: 14 of the 18 carry one tensor bigger than that, so the
+    backend refuses them outright however many sessions they are given. Only the four
+    smallest — SmolVLM2 and the models whose embedding stays near 200 MiB — survive."""
+    monkeypatch.setenv("GGML_HEXAGON_MBUF", "256")
+    refused = [name for name, (shape, _) in BOARD_2026_09_21.items() if shape.oversized_tensor()]
+
+    assert len(refused) == 14
+    assert "gemma-4-12b-it-qat-q4_0" in refused
+    assert "SmolVLM2-500M-Video-Instruct-Q8_0" not in refused
 
 
 # --------------------------------------------------------------------------- #

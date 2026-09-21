@@ -309,7 +309,7 @@ def read_gguf(path: Path):
 MIB = 1024 * 1024
 
 # The largest buffer the Hexagon backend maps at once, in MiB, as GGML_HEXAGON_MBUF sets it
-# (service_compose.yaml, 1024 since the models grew an mmproj). It does not change what a
+# (service_compose.yaml, 1024 since llama.cpp #29197; it is llama.cpp's own default). It does not change what a
 # session can hold — that is the address space below — but the granularity the backend gets
 # there in: an allocation is cut into chunks of this size, so a load fails on a whole chunk
 # rather than on the byte that overflowed. A tensor is never cut across chunks, so this is
@@ -327,15 +327,15 @@ DEFAULT_MBUF_MIB = 1024
 # runs at 1024 now, and nothing has been re-measured there — see ../SESSION_ALLOCATION.md.
 SESSION_VMEM = 3285696512
 
-# Fraction of it the sizing may fill, 2726 MiB. What is left over covers what the estimate
+# Fraction of it the sizing may fill, 2664 MiB. What is left over covers what the estimate
 # does not see: the compute buffer is a flat allowance rather than a per-model figure, and so
-# is the recurrent state. 0.87 rather than 0.9 because at 0.9 the rule asks for fewer
-# sessions than any load ever observed in two places — Qwen3-8B and DeepSeek-R1-Distill-
-# Llama-8B at 16k on three sessions (99% of that budget, where the context used to be
-# capped to 8k instead), Nemotron-Mini-4B at 8k on one (97%) — and neither has been tried on
-# the board since, at any MBUF. At 0.87 every count the rule asks for is one a load was seen to
-# succeed on. Raising it back is a matter of running those trials (see ../SESSION_ALLOCATION.md).
-SESSION_BUDGET_FRACTION = 0.87
+# is the recurrent state. It is set by the one condition the rule has to meet — never ask for
+# fewer sessions than a load was seen to succeed on — against the models measured on the
+# board, and 0.85 is the largest fraction that still meets it. At 0.87 it did not:
+# bar-Qwen3.5-9B sized to 2706 MiB a session, 99% of that budget, and three sessions failed
+# to load on every attempt where four load and generate (measured 2026-09-21 at MBUF 1024,
+# n_ubatch 512). Nothing else moves between the two fractions. See ../SESSION_ALLOCATION.md.
+SESSION_BUDGET_FRACTION = 0.85
 SESSION_BUDGET = int(SESSION_VMEM * SESSION_BUDGET_FRACTION)
 
 # HTP0..HTP3: the Hexagon sessions the cDSP firmware gives one process.
@@ -525,12 +525,12 @@ class ModelShape(NamedTuple):
         """The largest NPU tensor when it is bigger than one chunk, None otherwise.
 
         The backend cuts an allocation into chunks of GGML_HEXAGON_MBUF and never cuts a
-        tensor, so a tensor bigger than a chunk is the one thing splitting the model over
-        more sessions cannot help with: whichever session holds that layer has to map it
-        whole. It is reported rather than sized around — the script does not set MBUF, and
-        how hard that ceiling really is has not been pinned down: gemma-4-E4B loaded 9
-        times in 9 at MBUF 256 holding a 560 MiB tied embedding on the NPU
-        (../SESSION_ALLOCATION.md), which a strict reading says should not have mapped.
+        tensor, so a tensor bigger than a chunk cannot be placed at all, and no session
+        count helps: whichever session holds that layer has to map it whole. Since
+        llama.cpp #29197 alloc_buffer refuses such a tensor outright rather than leaving
+        it to ggml, which is what made MBUF 256 unusable — gemma-4 keeps its tied token
+        embeddings in one tensor of 336 to 788 MiB across the family. Reported rather than
+        sized around: the service sets MBUF, this script only reads it.
         """
         tensor = self.largest_npu_tensor
         return tensor if tensor is not None and tensor.bytes > mbuf_bytes() else None
@@ -602,7 +602,7 @@ def npu_tensors(tensors) -> list[Tensor]:
     only read by get_rows (GET_ROWS_ONLY_TENSORS), and the token embeddings of a model that
     has a separate output projection, which are get_rows-only too. A model with tied
     embeddings uses that same tensor as its output projection, and it does go to the NPU:
-    gemma-4-E4B puts its 560 MiB of q6_K token embeddings there.
+    gemma-4-E4B puts its 525 MiB of q6_K token embeddings there, the 12b its 788 MiB.
 
     Their total reproduced the "HTP model buffer size" llama-server logs to within a MiB on
     18 of the 19 models measured under the build that kept every K-quant on the CPU, and on
