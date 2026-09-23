@@ -12,7 +12,9 @@ COPY ./streamlit/config.toml /home/app/.streamlit/config.toml
 COPY ./scripts/*.sh /
 COPY ./arduino*.whl /app/
 RUN bash -c 'WHL_FILES=(/app/*.whl) && uv pip install --system --no-cache-dir "${WHL_FILES[@]}"[all]'; \
-    rm /app/*.whl; \    
+    rm /app/*.whl; \
+    # ALSA dsnoop/dmix wrappers: the file is static, generate it once here instead of at every app start
+    HOME=/home/app bash /provision-alsa-devices.sh; \
     # fix permissions for /home/app
     chown arduino:arduino -R /home/app; \
     chmod 777 -R /home/app; \

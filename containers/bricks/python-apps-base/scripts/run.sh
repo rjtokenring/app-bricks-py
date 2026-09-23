@@ -141,8 +141,9 @@ if [ -d "$BASE_DIR/bricks" ]; then
   uv cache clean
 fi
 
-# Pre-provision ALSA wrapped devices
-bash /provision-alsa-devices.sh
+# Pre-provision ALSA wrapped devices. The image bakes the file at build time;
+# generate it only when missing (e.g. HOME overridden).
+[ -f "$HOME/.asoundrc" ] || bash /provision-alsa-devices.sh
 
 # Merge the host DSP payload and yaml config into /usr/share/hexagon-dsp,
 # where the fastrpc client libraries look for them. The script ships with the

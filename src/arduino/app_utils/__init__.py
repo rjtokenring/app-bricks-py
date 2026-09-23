@@ -2,21 +2,43 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
+from typing import TYPE_CHECKING
+
+from ._lazy_exports import lazy_exports as _lazy_exports
 from .app import *
 from .bridge import *
 from .logger import _configure_library_logger
-from .audio import *
 from .brick import *
 from .errors import *
 from .errors import install_excepthook as _install_excepthook
-from .folderwatch import *
-from .httprequest import *
 from .jsonparser import *
-from .ledmatrix import *
 from .logger import *
 from .peripheral import *
-from .slidingwindowbuffer import *
 from .leds import *
+
+if TYPE_CHECKING:
+    from .audio import SineGenerator
+    from .folderwatch import FolderEventHandler as FolderEventHandler, FolderWatcher
+    from .httprequest import HttpClient
+    from .ledmatrix import Frame, FrameDesigner
+    from .slidingwindowbuffer import SlidingWindowBuffer
+
+# Loaded on first access: these pull in numpy, requests or watchdog, which cost
+# about a second of app start time on the board even when the app never uses them.
+_LAZY_EXPORTS = {
+    "SineGenerator": "audio",
+    "FolderWatcher": "folderwatch",
+    "FolderEventHandler": "folderwatch",
+    "HttpClient": "httprequest",
+    "Frame": "ledmatrix",
+    "FrameDesigner": "ledmatrix",
+    "SlidingWindowBuffer": "slidingwindowbuffer",
+}
+
+
+if not TYPE_CHECKING:  # Type checkers resolve the names through the imports above
+    __getattr__, __dir__ = _lazy_exports(__name__, globals(), _LAZY_EXPORTS)
+
 
 __all__ = [
     "App",

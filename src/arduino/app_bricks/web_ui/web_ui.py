@@ -6,17 +6,26 @@ import os
 import asyncio
 import threading
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from collections.abc import AsyncIterator, Callable, Iterator
 
-import uvicorn
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from fastapi_socketio import SocketManager
-
-from arduino.app_peripherals.camera.base_camera import BaseCamera
 from arduino.app_utils import brick, Logger
+
+from ._fast_imports import defer_pydantic_model_builds, defer_socketio_client_dependencies, gc_paused
+
+# The web stack is most of an app's start time on the board: import it without the work WebUI never needs
+with gc_paused(), defer_pydantic_model_builds():
+    import uvicorn
+    from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import FileResponse
+
+    with defer_socketio_client_dependencies():
+        from fastapi_socketio import SocketManager
+
+if TYPE_CHECKING:
+    # Type hint only: importing the camera package at runtime would load cv2 in every app using WebUI
+    from arduino.app_peripherals.camera.base_camera import BaseCamera
 
 logger = Logger("WebUI")
 
@@ -238,7 +247,7 @@ class WebUI:
         """
         self.app.add_api_route(self._api_path_prefix + path, function, methods=[method])
 
-    def expose_camera(self, path: str, camera: BaseCamera, jpeg_quality: int = 80) -> None:
+    def expose_camera(self, path: str, camera: "BaseCamera", jpeg_quality: int = 80) -> None:
         """
         Expose a camera stream at the specified URL path in MJPEG format.
 
