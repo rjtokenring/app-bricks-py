@@ -35,8 +35,8 @@ RUN set -ex && apt-get update && \
 FROM base AS native-libs
 
 # QAIRT version to download and install
-ENV QNP_VER=2.45.41.260507
-ENV QNP_SDK_SHA256=8a4afa4e87d6653ba227fd0988f8ee51651e800669654a94d09cbc0a6fe9f9b2
+ENV QNP_VER=2.50.40.260831
+ENV QNP_SDK_SHA256=e821833cff67b0c55a413c920658cf9132a92e06309b6c26900149fd1a8809da
 
 # Tools for download/unzip
 RUN set -ex && apt-get update && \
