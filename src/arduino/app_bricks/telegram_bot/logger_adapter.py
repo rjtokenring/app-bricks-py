@@ -1,9 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
 import logging
-from typing import Optional
+from collections.abc import MutableMapping
+from typing import Any
 
 
 class TelegramLoggerAdapter(logging.LoggerAdapter):
@@ -34,10 +35,10 @@ class TelegramLoggerAdapter(logging.LoggerAdapter):
     def __init__(
         self,
         logger: logging.Logger,
-        user_id: Optional[int] = None,
-        message_id: Optional[int] = None,
-        chat_id: Optional[int] = None,
-    ):
+        user_id: int | None = None,
+        message_id: int | None = None,
+        chat_id: int | None = None,
+    ) -> None:
         extra = {}
         if user_id is not None:
             extra["user"] = user_id
@@ -48,7 +49,7 @@ class TelegramLoggerAdapter(logging.LoggerAdapter):
 
         super().__init__(logger, extra)
 
-    def process(self, msg, kwargs):
+    def process(self, msg: Any, kwargs: MutableMapping[str, Any]) -> tuple[str, MutableMapping[str, Any]]:  # noqa: ANN401
         """Prepend context information to log message.
 
         Args:

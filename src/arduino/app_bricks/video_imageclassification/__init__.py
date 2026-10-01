@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
@@ -9,14 +9,15 @@ import threading
 import socket
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
-from typing import Callable
+from collections.abc import Callable
 
 from websockets.sync.client import connect
 from websockets.sync.connection import Connection
-from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
+from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError, InvalidHandshake
 
 from arduino.app_peripherals.camera import Camera, BaseCamera
-from arduino.app_internal.core import load_brick_compose_file, resolve_address
+from arduino.app_internal.core.module import load_brick_compose_file, resolve_address
+from arduino.app_internal.core.ei import brick_model_requires_softmax, compute_softmax_over_ei_classification
 from arduino.app_internal.core import EdgeImpulseRunnerFacade
 from arduino.app_utils.image.adjustments import compress_to_jpeg
 from arduino.app_utils import brick, Logger
@@ -35,7 +36,10 @@ class VideoImageClassification:
 
     _DETECTION_LOCK_TO = 0.01  # Seconds to wait for a detection lock before discarding the detection signal
 
-    def __init__(self, camera: BaseCamera | None = None, confidence: float = 0.3, debounce_sec: float = 0.0):
+    _WS_CONNECT_RETRIES = 5  # Attempts to open a one-shot WebSocket connection to the model runner
+    _WS_CONNECT_RETRY_DELAY = 1.0  # Seconds between connection attempts
+
+    def __init__(self, camera: BaseCamera | None = None, confidence: float = 0.3, debounce_sec: float = 0.0) -> None:
         """Initialize the VideoImageClassification class.
 
         Args:
@@ -73,10 +77,14 @@ class VideoImageClassification:
         if not self._host:
             raise RuntimeError("Host address could not be resolved. Please check your configuration.")
 
+        # Some models (e.g. EfficientNet-B4) return raw logits: apply a softmax only when the
+        # configured model is flagged with `requires_softmax` in the models list.
+        self.apply_softmax = brick_model_requires_softmax(self.__class__)
+
         self._uri = f"ws://{self._host}:4912"
         logger.info(f"[{self.__class__.__name__}] Host: {self._host} - URL: {self._uri}")
 
-    def on_detect_all(self, callback: Callable[[dict], None]):
+    def on_detect_all(self, callback: Callable[[dict], None]) -> None:
         """Register a callback invoked for **every classification event**.
 
         This callback is useful if you want to process all classified labels in a single
@@ -101,7 +109,7 @@ class VideoImageClassification:
         with self._handlers_lock:
             self._handlers[self.ALL_HANDLERS_KEY] = callback
 
-    def on_detect(self, object: str, callback: Callable[[], None]):
+    def on_detect(self, object: str, callback: Callable[[], None]) -> None:
         """Register a callback invoked when a **specific label** is classified.
 
         The callback is triggered whenever the given label appears in the classification
@@ -132,19 +140,19 @@ class VideoImageClassification:
                 logger.warning(f"Handler for label '{object}' already exists. Overwriting.")
             self._handlers[object] = callback
 
-    def start(self):
+    def start(self) -> None:
         """Start the classification."""
         self._camera.start()
         self._is_running.set()
 
-    def stop(self):
+    def stop(self) -> None:
         """Stop the classification and release resources."""
         self._is_running.clear()
         self._camera.stop()
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     @brick.execute
-    def classification_loop(self):
+    def classification_loop(self) -> None:
         """Classification main loop.
 
         Maintains WebSocket connection to the model runner and processes classification messages.
@@ -181,7 +189,7 @@ class VideoImageClassification:
                 time.sleep(2)
 
     @brick.execute
-    def camera_loop(self):
+    def camera_loop(self) -> None:
         """Camera main loop.
 
         Captures images from the camera and forwards them over the TCP connection.
@@ -224,7 +232,7 @@ class VideoImageClassification:
                 logger.exception(f"Unexpected error in TCP loop: {e}")
                 time.sleep(2)
 
-    def _process_message(self, ws: Connection, message: str):
+    def _process_message(self, ws: Connection, message: str) -> None:
         jmsg = json.loads(message)
         if jmsg.get("type") == "hello":
             # Parse hello message to extract model info if needed
@@ -250,8 +258,11 @@ class VideoImageClassification:
             det_classifications = {}
             classifications = result.get("classification", [])
             if classifications:
+                if self.apply_softmax:
+                    # Softmax over the full logit vector; top_k just trims the returned classes.
+                    classifications = compute_softmax_over_ei_classification(classifications, top_k=5)
                 for classification in classifications:
-                    confidence = classifications[classification]
+                    confidence = float(classifications[classification])
                     if confidence < self._confidence:
                         continue
                     det_classifications[classification] = confidence
@@ -279,7 +290,7 @@ class VideoImageClassification:
                 self._detection_locks[classification] = threading.Lock()
             return self._detection_locks[classification]
 
-    def _execute_handler(self, classification: str, classifications: dict | None = None):
+    def _execute_handler(self, classification: str, classifications: dict | None = None) -> None:
         """Execute the handler for the detected object if it exists.
 
         Args:
@@ -309,7 +320,7 @@ class VideoImageClassification:
             classification_lock.release()
             return
 
-        def _run():
+        def _run() -> None:
             try:
                 logger.debug(f"Classification: {classification}, invoking handler.")
                 if classifications is None:
@@ -325,7 +336,34 @@ class VideoImageClassification:
             # Executor was shut down before the task could be submitted
             classification_lock.release()
 
-    def override_threshold(self, value: float):
+    def _connect_with_retry(self) -> Connection:
+        """Open a WebSocket connection to the model runner, retrying while it is still starting up.
+
+        The model runner accepts connections only once its inference pipeline is up, so a
+        connection opened right after the app starts can be refused. Retry a few times
+        before giving up.
+
+        Returns:
+            Connection: The established WebSocket connection.
+
+        Raises:
+            ConnectionError: If the connection could not be established after all attempts.
+        """
+        last_error: Exception | None = None
+        for attempt in range(1, self._WS_CONNECT_RETRIES + 1):
+            try:
+                return connect(self._uri)
+            except (OSError, InvalidHandshake) as e:
+                # OSError covers ConnectionRefusedError and TimeoutError: the model runner is
+                # not accepting connections yet. InvalidHandshake: listening, but not ready.
+                last_error = e
+                logger.debug(f"WebSocket connection to {self._uri} failed (attempt {attempt}/{self._WS_CONNECT_RETRIES}): {e}")
+                if attempt < self._WS_CONNECT_RETRIES:
+                    time.sleep(self._WS_CONNECT_RETRY_DELAY)
+
+        raise ConnectionError(f"Could not connect to the model runner at {self._uri} after {self._WS_CONNECT_RETRIES} attempts") from last_error
+
+    def override_threshold(self, value: float) -> None:
         """Override the threshold for image classification model.
 
         Args:
@@ -334,11 +372,12 @@ class VideoImageClassification:
         Raises:
             TypeError: If the value is not a number.
             RuntimeError: If the model information is not available or does not support threshold override.
+            ConnectionError: If the model runner could not be reached.
         """
-        with connect(self._uri) as ws:
+        with self._connect_with_retry() as ws:
             self._override_threshold(ws, value)
 
-    def _override_threshold(self, ws: Connection, value: float):
+    def _override_threshold(self, ws: Connection, value: float) -> None:
         """Override the threshold for image classification model.
 
         Args:
@@ -352,7 +391,11 @@ class VideoImageClassification:
         if not value or not isinstance(value, (int, float)):
             raise TypeError("Invalid types for value.")
 
-        if self._model_info is None or self._model_info.thresholds is None or len(self._model_info.thresholds) == 0:
+        if getattr(self, "_model_info", None) is None:
+            logger.warning("Model information is not available. Cannot override threshold.")
+            return  # Model info is not available, cannot override threshold
+
+        if self._model_info.thresholds is None or len(self._model_info.thresholds) == 0:
             raise RuntimeError("Model information is not available or does not support threshold override.")
 
         # Get first threshold and extract id. Then override it with the new confidence value.

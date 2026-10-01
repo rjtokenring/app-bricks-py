@@ -2,106 +2,202 @@
 
 ## Container Images
 
-The repo produces container images, each with its own Dockerfile under `containers/`. Each container is described by a `ci.json` file in its directory that drives CI behaviour — no workflow changes are needed when adding a new container.
+The repo produces container images, each with its own Dockerfile under `containers/<group>/<name>/` and a matching target in `docker-bake.hcl` at the repository root. The workflows build through `docker buildx bake`, so adding a container never means changing a workflow.
 
-| Image | Base | Purpose |
+### Layout
+
+Containers are filed under three groups, which document what they are for:
+
+| Group | Contains |
+|---|---|
+| `containers/ai/` | AI/ML model runners |
+| `containers/bricks/` | Images shipping the library itself and its supporting tooling |
+| `containers/base/` | Shared base images other containers derive `FROM` (`base_image: true`) |
+
+The group is **not** part of a container's identity: a container is always referred to by its leaf
+directory name, which is also its image name (`ghcr.io/arduino/app-bricks/<name>`), its bake target and
+the value used in the `containers` input of the dev workflow. CI locates a container by globbing
+`containers/*/<name>/Dockerfile`, so moving a container between groups only means updating the `context`
+of its bake target. Leaf names must stay unique across groups; `scripts/container.py` fails loudly
+if two groups declare the same name.
+
+The full list of images, with what each one builds from and what it is for, is the inventory in
+[containers/README.md](../containers/README.md#inventory).
+
+## Pull Request Checks
+
+Every pull request runs four workflows, named after the task they run so the status list reads like
+`task --list`. The jobs are the components.
+
+| Workflow | Job | Runs |
 |---|---|---|
-| **python-base** | `python:3.13-slim` | Foundation layer — system deps, user/group setup, fonts |
-| **python-apps-base** | `python-base` | App runtime — installs the Arduino App Bricks `.whl`, Streamlit config |
-| **ei-models-runner** | Edge Impulse inference image | AI/ML model inference with OOTB models |
+| `check.yml` (Check) | `code` | `task -t Taskfile.ci.yml check`: formatting, lint, SPDX headers and locks, in the Python container of the images |
+| | `containers` | `task check:containers:bake`: `docker-bake.hcl` agrees with the Dockerfiles |
+| `check-licenses.yml` (Check licenses) | `licenses` | the dependency license scan, see [scripts/licensed/README.md](../scripts/licensed/README.md); also runs on pushes to main to seed its caches |
+| `check-pyright.yml` (Pyright checks) | `pyright` | `task check:bricks:api` and `task check:bricks:typing` against the PR base and head, informative; `comment-pyright.yml` posts the report on the pull request |
+| `test.yml` (Test) | `bricks` | `task test:bricks` in the Python container of the images |
+| | `containers` | `task test:containers`, each container suite in its own venv |
 
-## Release Triggers (Tag-Based)
+Locally, `task check` runs every check including the Docker ones, and `task test` both test suites.
 
-A single workflow (`docker-github-publish.yml`) handles all container releases. It is triggered by any `prefix/X.Y.Z` tag. The prefix is matched against each container's `ci.json` to determine what to build.
+## Release Workflow
 
-| Tag pattern | Container | Extra behaviour |
-|---|---|---|
-| `base/X.Y.Z` | `python-base:X.Y.Z` + `:latest` | Automatically triggers a rebuild of downstream containers |
-| `release/X.Y.Z` | `python-apps-base:X.Y.Z` | Builds and uploads `.whl` to GitHub Release (displayed as `X.Y.Z`) |
-| `ai/X.Y.Z` | `ei-models-runner:X.Y.Z` | Auto-creates a PR to update compose file references |
+A release is started by hand: run `release.yml` from the branch to release, giving the version.
+**Every release publishes every container at `X.Y.Z`**, together with the Python `.whl` and `sboms.zip`
+on the GitHub Release. There is one release cycle: the library and the containers it runs always ship
+together. The version must be `X.Y.Z` with an optional `rcN`, `aN` or `bN` suffix, which marks a
+prerelease; anything else, or a version whose `release/X.Y.Z` tag already exists, fails the run before
+building.
 
-If the pushed tag prefix does not match any container's `ci.json`, the workflow exits cleanly with no build.
+Two jobs: `build` validates the version, builds the wheel with `task build:bricks` on the runner (the version
+injected into `src/arduino/version.py`, the project plus its `build` dependency group installed by uv),
+then bakes and pushes every image; `publish` derives the SBOM deltas from the published images, assembles `sboms.zip`
+and creates the GitHub Release with the wheel attached, which creates the `release/X.Y.Z` tag on the
+released commit. The tag therefore exists only for versions whose run succeeded; a failed run leaves
+images at that version in the registry, overwritten by the next attempt.
 
-## Downstream Cascade (Release)
+Containers flagged `base_image` are not release targets by themselves: they are rebuilt, and tagged with
+the release version, as the base of the images that derive from them.
 
-When a container is built or retagged, the workflow checks its `downstream` field in `ci.json`. For each downstream container listed, it finds the latest tag for that container and automatically dispatches a new release workflow run. This ensures dependent images are always rebuilt after their base image changes.
+### Tagging
 
-For example, pushing `base/X.Y.Z` builds `python-base` and then automatically triggers a new run for the latest `release/X.Y.Z` tag, rebuilding `python-apps-base` on top of the new base.
+Every released image receives a `:<version>` tag. A `:latest` tag is also applied unless the version
+contains `rc`, `alpha` or `beta`, which marks a prerelease.
 
-The dispatch only happens after the upstream build completes successfully.
+### Compose file versioning
+
+Bricks and services ship compose files describing the containers they need. Their image references carry
+the `__BRICKS_RELEASE_VERSION__` placeholder instead of a version, and so do the `models/models-*.yaml`
+files. `arduino-bricks-release` stamps the release version into the copies bundled in the wheel at build
+time, and `arduino-bricks-list-modules` does the same when it provisions the compose files at runtime. The
+version comes from `BRICKS_RELEASE_VERSION`, which `python-apps-base` sets to the tag it was built with,
+or from the installed library otherwise. Compose files therefore always reference the containers published
+by the same release. A version can still be written literally where a specific image is really needed.
+
+## Build Graph
+
+The base image of every container is declared exactly once, in the `FROM` of the final stage of its
+Dockerfile. A container deriving from another container of this repository writes it as
+`FROM ${REGISTRY}app-bricks/<parent>:${BASE_IMAGE_VERSION}`, and its `docker-bake.hcl` target links the
+same parent with `parent_context()`. Bake then builds the parent in-graph before the child, however deep
+the chain, with a single invocation and no hardcoded ordering: a release is `docker buildx bake --push`
+over the `default` group, which lists every container.
+
+`scripts/container.py` reads the same `FROM` lines to serve everything else that needs the graph:
+the dev workflow widens its selection with it, `scripts/sbom_delta.py` takes the base image to diff
+against from it, and `task show:containers` prints the hierarchy. The release checks that the
+Dockerfiles and the bake targets describe the same set of containers and link the same parents before
+building. Targets are listed parents first, each followed by the containers deriving from it.
 
 ## Adding a New Container
 
-1. Create `containers/my-container/Dockerfile`
-2. Create `containers/my-container/ci.json`:
+`task new:container -- my-container --group bricks --from python-slim --desc "What it does"` performs the steps
+below: it creates the directory with a starting `Dockerfile` and `pyproject.toml`, adds the bake target
+after its parent, the inventory row, the license scan and Dependabot entries, then runs
+`task check:containers:bake`. Pass an image reference to `--from` for an external base and `--no-python` for
+an image that installs no Python packages. What follows is what it does, for reference and for adjusting the result.
 
-```json
-{
-  "tag_prefix": "my-prefix",
-  "watch_paths": ["containers/my-container/"],
-  "tag_latest": false,
-  "build_whl": false,
-  "update_compose": false,
-  "build_args": {},
-  "downstream": []
+1. Create `containers/<group>/my-container/Dockerfile`, filing it under the group that describes what it
+   is for — see [Layout](#layout). To derive from another container of this repo, start it with:
+
+```dockerfile
+ARG REGISTRY
+ARG BASE_IMAGE_VERSION=latest
+FROM ${REGISTRY}app-bricks/python-slim:${BASE_IMAGE_VERSION}
+```
+
+2. Add a target to `docker-bake.hcl` and list it in the `default` group:
+
+```hcl
+target "my-container" {
+  inherits   = ["_downstream"]              # "_common" when the base image is external
+  context    = "containers/<group>/my-container"
+  tags       = image_tags("my-container")
+  cache-from = cache_from("my-container")
+  cache-to   = cache_to("my-container")
+  contexts   = parent_context("python-slim") # only when deriving from a container of this repo
 }
 ```
 
-3. Push a tag `my-prefix/X.Y.Z` — the workflow picks it up automatically.
+Build arguments specific to the image, such as download URLs and digests, are `ARG` defaults in its
+Dockerfile, so `docker build` of the directory works on its own; the bake target only carries the
+common `REGISTRY` and `BASE_IMAGE_VERSION`.
 
-To declare that another container depends on yours, add it to `downstream`:
+3. If the image installs Python packages, declare them in a `pyproject.toml` locked by `task deps:lock`
+   and register the container in the dependency license scan, see
+   [scripts/licensed/README.md](../scripts/licensed/README.md).
+4. Run the release workflow — it builds and publishes every target of the `default` group.
 
-```json
-"downstream": ["my-other-container"]
+Check the result with `docker buildx bake --print my-container` and `task show:containers`.
+
+## docker-bake.hcl Reference
+
+Variables the workflows set, all optional for local builds:
+
+| Variable | Default | Description |
+|---|---|---|
+| `REGISTRY` | `ghcr.io/arduino/` | Registry prefix the images are published under, with a trailing slash |
+| `IMAGE_TAG` | `local` | Tag applied to every built image: the release version or the dev tag |
+| `RUN_NUMBER` | empty | When set, images are additionally tagged `<IMAGE_TAG>-<RUN_NUMBER>` (dev builds) |
+| `TAG_LATEST` | `false` | When `true`, images are additionally tagged `latest` (non-prerelease releases) |
+| `BASE_IMAGE_VERSION` | `local` | Tag the downstream `FROM` lines reference; parents are built in-graph, CI sets it to `IMAGE_TAG` |
+| `CACHE_TAG` | empty | Tag of the per-image registry build cache, `buildcache` for releases and `<IMAGE_TAG>-buildcache` for dev builds; empty disables the cache |
+| `SKIP_CACHE` | `false` | When `true`, the cache is not imported but still exported |
+
+Two targets take extra named contexts: `python-apps-base` installs the wheel from `wheel` (`dist/`,
+filled by `task build:bricks` with the wheel, `pyproject.toml` and `uv.lock`) and `models-downloader` reads
+`models-list.yaml` from `models` (the repository's `models/` directory).
+
+## SBOMs
+
+Every image carries its SBOM: `docker-bake.hcl` asks BuildKit for a `type=sbom` attestation, generated
+while the image is built and pushed with it as part of the image index. Anyone can read it from the
+registry, no download needed:
+
+```sh
+docker buildx imagetools inspect ghcr.io/arduino/app-bricks/<name>:<version> --format '{{ json .SBOM }}'
 ```
 
-> **Note**: any container listed in `downstream` must declare `ARG BASE_IMAGE_VERSION` in its Dockerfile. The CI passes the upstream image's tag via this build arg so the downstream image pulls the freshly built version, not `latest`.
+`sboms.zip`, attached to every GitHub Release, covers every image the release publishes. The `publish`
+job reads the attestation of each image and computes its delta against the base image of its Dockerfile:
+a parent container of this repository, whose attestation is read the same way, or one of the three
+external base images, the only ones still scanned with Syft. `scripts/sbom_delta.py` writes
+`<name>-<version>/{base,full,delta}.spdx.json` per image; an image whose delta could not be produced is
+listed in `MISSING.txt` inside the archive and in the job summary, never blocking the release. Nothing
+SBOM-related lives in the tree.
 
-No workflow file changes required.
-
-## ci.json Reference
-
-| Field | Type | Description |
-|---|---|---|
-| `tag_prefix` | string | Tag namespace that triggers this container's release (e.g. `release`) |
-| `watch_paths` | string[] | Paths checked by the skip-rebuild logic and dev build change detection |
-| `tag_latest` | bool | Also push a `:latest` tag on release |
-| `build_whl` | bool | Build and upload the Python `.whl` before the Docker build |
-| `update_compose` | bool | After release, open a PR updating `brick_compose.yaml` references |
-| `build_args` | object | Docker build args passed to the Dockerfile (key/value pairs) |
-| `downstream` | string[] | Containers that depend on this one — rebuilt automatically after this container is built |
-
-## Skip-Rebuild Logic
-
-Every release checks whether the container's source files actually changed since the previous tag of the same prefix:
-
-- **Changed** → full Docker build and push
-- **Unchanged** → `crane copy` re-tags the existing image to the new version (instant, no rebuild)
-
-This means releasing a new `release/X.Y.Z` when only `ei-models-runner` sources changed will re-tag `python-apps-base` without rebuilding it.
+The dev workflow pushes the same attestations and, when its `sbom` input is set, computes the same deltas
+into a `sbom-delta-<tag>` run artifact.
 
 ## Dev Build Workflow
 
-`docker-github-build.yml` triggers on every push to non-`main` branches and builds only the containers whose `watch_paths` changed (detected via `git diff` against the previous commit). Images are tagged with the sanitized branch name (e.g. `feat/my-feature` → `feat-my-feature`) plus a run-number suffix (e.g. `feat-my-feature-42`).
+`dev-release.yml` ("Dev release") is triggered manually via `workflow_dispatch` with:
 
-**Dependency ordering**: the detect job splits containers into two groups:
-
-- **Base containers** (`build` job): containers with no upstream being built in the same run — these build in parallel.
-- **Downstream containers** (`build-downstream` job): containers whose upstream is also being built — these wait for the `build` job to complete before starting, and receive `BASE_IMAGE_VERSION=<branch-tag>` as a build arg so they use the freshly built upstream image.
-
-The grouping is driven entirely by the `downstream` field in ci.json — no hardcoded container names in the workflow.
-
-Can also be triggered manually via `workflow_dispatch` with:
-- `containers` — comma-separated list of containers to build, or `all`
+- `branch` — branch to build (defaults to the branch the workflow is run from)
+- `containers` — comma-separated list of containers to build, or `all` (default)
 - `tag` — optional custom image tag
+- `skip_cache` — rebuild without cache
+- `sbom` — also compute the delta SBOMs of the published images (off by default)
+
+Images are tagged `dev-<branch-name>` (branch name lowercased and sanitized, e.g. `feat/My-Feature` → `dev-feat-my-feature`), plus a run-number-suffixed alias (e.g. `dev-feat-my-feature-42`), unless a custom `tag` is provided.
+
+**Dependency ordering**: `scripts/container.py closure` widens the selection with the containers deriving from it and with its bases, so the published set stays consistent, then a single `docker buildx bake` builds the result in dependency order through the parent links of `docker-bake.hcl`. Nothing is hardcoded in the workflow.
+
+**Wheel**: when a selected target has a `wheel` context, the wheel is built first on the runner with `BRICKS_RELEASE_VERSION=<image-tag>`, so the compose files it bundles reference the dev images of the same run.
+
+## Image Cleanup
+
+`cleanup-containers.yml` runs two independent jobs:
+
+| Trigger | Job | What it does |
+|---|---|---|
+| Branch deletion | `cleanup` | Deletes every GHCR version tagged `dev-<deleted-branch>`, including the run-number aliases and the build cache |
+| Weekly (Sunday 03:00 UTC) or manual | `prune-untagged` | Deletes the untagged container versions no tagged manifest references, the leftovers of overwritten tags. A tagged image is an index holding the image and its SBOM attestation, a tagged build cache a manifest list: their children are untagged versions too and are kept. Each candidate is re-checked right before deletion. The manual run accepts a `dry_run` flag to only list what would be deleted. |
 
 ## Build Characteristics
 
 - **Single platform**: All images target `linux/arm64` only
 - **Registry**: `ghcr.io/arduino/app-bricks/`
-- **Caching**: GitHub Actions cache (`type=gha`, `mode=max`)
-- **Release assets**: The `release/*` workflow also uploads the `.whl` to the GitHub Release via `softprops/action-gh-release`
-
-## Image Size Monitoring
-
-`calculate-size-delta.yml` is a manual workflow that builds both `python-base` and `python-apps-base`, measures their sizes using a local Docker registry, and posts a comment on the associated PR. If no PR is found, it falls back to the GitHub Actions Job Summary.
+- **Attestations**: every image is pushed as an index holding the image and its SBOM attestation; provenance is disabled
+- **Caching**: Buildx registry cache per image, `<image>:buildcache` for releases and `<image>:<tag>-buildcache` for dev builds (`mode=max`), invalidated by content; `skip_cache` forces a cold rebuild
+- **Release assets**: The `.whl` and `sboms.zip` are uploaded to the GitHub Release via `softprops/action-gh-release`

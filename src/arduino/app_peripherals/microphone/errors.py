@@ -1,9 +1,12 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
 
-class MicrophoneError(Exception):
+from arduino.app_utils.errors import AppError
+
+
+class MicrophoneError(AppError):
     """Base exception for microphone-related errors."""
 
     pass

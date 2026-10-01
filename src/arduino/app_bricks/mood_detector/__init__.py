@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
@@ -27,7 +27,7 @@ class MoodDetector:
 
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the MoodDetector with a sentiment analyzer."""
         self._analyzer = SentimentIntensityAnalyzer()
 

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
@@ -34,7 +34,7 @@ class IPCamera(BaseCamera):
         fps: int = 10,
         adjustments: Callable[[np.ndarray], np.ndarray] | None = None,
         auto_reconnect: bool = True,
-    ):
+    ) -> None:
         """
         Initialize IP camera.
 
@@ -80,7 +80,7 @@ class IPCamera(BaseCamera):
             self._test_http_connectivity()
 
         try:
-            self._cap = cv2.VideoCapture(url)
+            self._cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
             if not self._cap.isOpened():
                 raise RuntimeError(f"Failed to open IP camera at {self.url}")
 

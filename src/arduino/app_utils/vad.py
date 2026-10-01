@@ -1,11 +1,11 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 
@@ -69,7 +69,7 @@ class VoiceActivityDetector:
         energy_threshold: float = ENERGY_THRESHOLD,
         silence_ms: float = SILENCE_MS,
         max_buffer_ms: float = MAX_BUFFER_MS,
-    ):
+    ) -> None:
         self._commit_callback = commit_callback
         self._min_buffer_ms = min_buffer_ms
         self._energy_threshold = energy_threshold

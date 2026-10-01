@@ -1,18 +1,19 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
 import time
 import threading
-from typing import Literal
+from types import TracebackType
+from typing import Literal, Self
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
 from .errors import MicrophoneConfigError, MicrophoneOpenError, MicrophoneReadError
-from arduino.app_utils import Logger
+from arduino.app_utils import Logger, peripheral
 
 logger = Logger("Microphone")
 
@@ -20,6 +21,7 @@ type FormatPlain = type | np.dtype | str
 type FormatPacked = tuple[FormatPlain, bool]
 
 
+@peripheral
 class BaseMicrophone(ABC):
     """
     Abstract base class for microphone implementations.
@@ -37,7 +39,7 @@ class BaseMicrophone(ABC):
         format: FormatPlain | FormatPacked,
         buffer_size: int,
         auto_reconnect: bool,
-    ):
+    ) -> None:
         """
         Initialize the microphone base.
 
@@ -120,7 +122,7 @@ class BaseMicrophone(ABC):
         return int(self._volume * 100)
 
     @volume.setter
-    def volume(self, volume: int):
+    def volume(self, volume: int) -> None:
         if not (0 <= volume <= 100):
             raise ValueError("Volume must be between 0 and 100.")
 
@@ -139,14 +141,14 @@ class BaseMicrophone(ABC):
     def start(self) -> None:
         """Start the microphone capture."""
         with self._mic_lock:
-            self.logger.info("Starting microphone...")
+            self.logger.debug("Starting microphone...")
 
             attempt = 0
             while not self.is_started():
                 try:
                     self._open_microphone()
                     self._is_started = True
-                    self.logger.info(f"Successfully started {self.name}")
+                    self.logger.debug(f"Successfully started {self.name}")
                 except MicrophoneOpenError as e:  # We consider this a fatal error so we don't retry
                     self.logger.error(f"Fatal error while starting {self.name}: {e}")
                     raise
@@ -172,13 +174,13 @@ class BaseMicrophone(ABC):
             if not self.is_started():
                 return
 
-            self.logger.info("Stopping microphone...")
+            self.logger.debug("Stopping microphone...")
 
             try:
                 self._close_microphone()
                 self._event_executor.shutdown()
                 self._is_started = False
-                self.logger.info(f"Successfully stopped {self.name}")
+                self.logger.debug(f"Successfully stopped {self.name}")
             except Exception as e:
                 self.logger.warning(f"Failed to stop microphone: {e}")
 
@@ -217,7 +219,7 @@ class BaseMicrophone(ABC):
 
             return audio_chunk
 
-    def stream(self):
+    def stream(self) -> Iterator[np.ndarray]:
         """
         Continuously capture audio chunks from the microphone.
 
@@ -238,7 +240,7 @@ class BaseMicrophone(ABC):
         """Check if the microphone is started."""
         return self._is_started
 
-    def on_status_changed(self, callback: Callable[[str, dict], None] | None):
+    def on_status_changed(self, callback: Callable[[str, dict], None] | None) -> None:
         """Registers or removes a callback to be triggered on microphone lifecycle events.
 
         When a microphone status changes, the provided callback function will be invoked.
@@ -267,7 +269,7 @@ class BaseMicrophone(ABC):
             self._on_status_changed_cb = None
         else:
 
-            def _callback_wrapper(new_status: str, data: dict):
+            def _callback_wrapper(new_status: str, data: dict) -> None:
                 try:
                     callback(new_status, data)
                 except Exception as e:
@@ -493,12 +495,12 @@ class BaseMicrophone(ABC):
             if self._on_status_changed_cb is not None:
                 self._event_executor.submit(self._on_status_changed_cb, new_status, data if data is not None else {})
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         """Context manager entry."""
         self.start()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None) -> None:
         """Context manager exit."""
         self.stop()
 

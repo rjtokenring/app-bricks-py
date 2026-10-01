@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
@@ -7,7 +7,7 @@ import math
 import inspect
 import threading
 
-from typing import Callable
+from collections.abc import Callable
 
 from arduino.app_internal.core import EdgeImpulseRunnerFacade
 from arduino.app_peripherals.microphone import Microphone, BaseMicrophone
@@ -19,7 +19,7 @@ logger = Logger("AudioDetector")
 class AudioDetector(EdgeImpulseRunnerFacade):
     """AudioDetector module for detecting sounds and classifying audio using a specified model."""
 
-    def __init__(self, mic: BaseMicrophone | None = None, confidence: float = 0.8, debounce_sec: float = 2.0):
+    def __init__(self, mic: BaseMicrophone | None = None, confidence: float = 0.8, debounce_sec: float = 2.0) -> None:
         """Initialize the AudioDetector class.
 
         Args:
@@ -47,7 +47,7 @@ class AudioDetector(EdgeImpulseRunnerFacade):
             raise ValueError("Model parameters are missing or incomplete in the retrieved model information.")
         self.model_info = model_info
 
-        self._mic = mic if mic else Microphone(sample_rate=model_info.frequency, channels=model_info.axis_count)
+        self._mic = mic if mic else Microphone(0, sample_rate=model_info.frequency, channels=model_info.axis_count)
 
         self._window_size = int(model_info.input_features_count / model_info.axis_count)
         self._duration = model_info.input_features_count / model_info.axis_count * model_info.interval_ms
@@ -56,7 +56,7 @@ class AudioDetector(EdgeImpulseRunnerFacade):
         self.handlers = {}  # Dictionary to hold handlers for different keywords
         self.handlers_lock = threading.Lock()
 
-    def on_detect(self, keyword: str, callback: Callable[[], None]):
+    def on_detect(self, keyword: str, callback: Callable[[], None]) -> None:
         """Register a callback function to be invoked when a specific keyword is detected.
 
         Args:
@@ -79,11 +79,11 @@ class AudioDetector(EdgeImpulseRunnerFacade):
                 logger.warning(f"Handler for keyword '{keyword}' already exists. Overwriting.")
             self.handlers[keyword] = callback
 
-    def start(self):
+    def start(self) -> None:
         self._buffer.flush()
         self._mic.start()
 
-    def stop(self):
+    def stop(self) -> None:
         self._mic.stop()
         self._buffer.flush()
 
@@ -122,7 +122,7 @@ class AudioDetector(EdgeImpulseRunnerFacade):
         return best_matched_keyword, best_matched_keyword_confidence
 
     @brick.loop
-    def _read_mic_loop(self):
+    def _read_mic_loop(self) -> None:
         try:
             for chunk in self._mic.stream():
                 if chunk is None:
@@ -135,7 +135,7 @@ class AudioDetector(EdgeImpulseRunnerFacade):
             raise
 
     @brick.loop
-    def _inference_loop(self):
+    def _inference_loop(self) -> None:
         now = time.time()
         # If in debounce period, skip the inference
         if hasattr(self, "_debounce_until") and now < self._debounce_until:
@@ -172,7 +172,7 @@ class AudioDetector(EdgeImpulseRunnerFacade):
             time.sleep(1)  # Sleep briefly to avoid tight loop in case of errors
 
 
-def _extract_classification(item, confidence: float) -> list | None:
+def _extract_classification(item: dict | None, confidence: float) -> list | None:
     if not item:
         return None
 

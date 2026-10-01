@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
@@ -9,10 +9,10 @@ logger = Logger("JSONParser")
 
 
 class JSONParser:
-    def __init__(self, silent: bool = False):
+    def __init__(self, silent: bool = False) -> None:
         self.silent = silent
 
-    def parse(self, item: str) -> dict:
+    def parse(self, item: str) -> dict | None:
         try:
             return json.loads(item)
         except Exception as e:
@@ -20,7 +20,7 @@ class JSONParser:
                 logger.error(f"Error parsing content: {e}")
             return None
 
-    def process(self, item):
+    def process(self, item: object) -> object:
         if isinstance(item, str):
             return self.parse(item)
 

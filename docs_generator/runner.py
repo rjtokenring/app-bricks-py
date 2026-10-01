@@ -1,7 +1,8 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
+import argparse
 import os
 from pathlib import Path
 from docs_generator.extractor import extract_docstrings_with_types
@@ -28,7 +29,7 @@ def _extract_all_exports(tree: ast.AST) -> list[str] | None:
 
 def get_brick_id_from_yaml(yaml_path):
     try:
-        with open(yaml_path + "/brick_config.yaml", "r", encoding="utf-8") as f:
+        with open(yaml_path + "/brick_config.yaml", encoding="utf-8") as f:
             config = yaml.safe_load(f)
         id = config.get("id", None)
         return id.split(":")[1] if id and ":" in id else None
@@ -68,7 +69,7 @@ def process_app_bricks(src_root: str, output_dir: str):
             init_tree = None
             if os.path.exists(init_path):
                 try:
-                    with open(init_path, "r", encoding="utf-8") as f:
+                    with open(init_path, encoding="utf-8") as f:
                         source = f.read()
                     tree = ast.parse(source)
                     init_tree = tree
@@ -168,7 +169,7 @@ def process_app_peripherals(src_root: str, output_dir: str):
             all_exports = None
             if os.path.exists(init_path):
                 try:
-                    with open(init_path, "r", encoding="utf-8") as f:
+                    with open(init_path, encoding="utf-8") as f:
                         source = f.read()
                     tree = ast.parse(source)
                     all_exports = _extract_all_exports(tree)
@@ -204,19 +205,11 @@ def process_app_peripherals(src_root: str, output_dir: str):
                 logging.info(f"No public docstrings found in folder: {folder_path}")
 
 
-def run_docs_generator():
-    """Entry point for the documentation generator CLI.
-
-    Sets up the source and output directories, then generates API and example documentation for all bricks
-    and peripherals.
-    The output directory structure will mirror the source tree under 'docs/'.
-
-    Returns:
-        None
-    """
+def run_docs_generator(output_directory: str | os.PathLike) -> None:
+    """Generate the API documentation of bricks and peripherals under output_directory, mirroring the source tree."""
     root_dir = Path(__file__).parent.parent
     source_root = root_dir / "src"
-    output_directory = root_dir / "docs"
+    output_directory = Path(output_directory)
     os.makedirs(output_directory, exist_ok=True)
     logger.info(f"Source root: {source_root}")
     logger.info(f"Output directory: {output_directory}")
@@ -225,5 +218,7 @@ def run_docs_generator():
 
 
 if __name__ == "__main__":
-    run_docs_generator()
+    parser = argparse.ArgumentParser(description="Generate the API documentation of bricks and peripherals.")
+    parser.add_argument("output_directory", help="Directory the documentation is written to.")
+    run_docs_generator(parser.parse_args().output_directory)
     logger.info("Documentation generation completed.")

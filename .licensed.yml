@@ -1,0 +1,135 @@
+cache_path: .licenses
+
+# venv.project is the uv project scripts/licensed/run.py installs into each app's virtual_env_dir
+apps:
+  - name: python-apps-base
+    source_path: .
+    sources:
+      pip: true
+    python:
+      virtual_env_dir: "/venvs/python-apps-base"
+    venv:
+      project: .
+      extras: [all]
+
+  - name: python-base
+    source_path: .
+    sources:
+      pip: true
+    python:
+      virtual_env_dir: "/venvs/python-base"
+    venv:
+      project: containers/base/python-base
+
+  - name: aihub-models-runner
+    source_path: .
+    sources:
+      pip: true
+    python:
+      virtual_env_dir: "/venvs/aihub-models-runner"
+    venv:
+      project: containers/ai/aihub-models-runner
+
+  - name: gesture-recognition-runner
+    source_path: .
+    sources:
+      pip: true
+    python:
+      virtual_env_dir: "/venvs/gesture-recognition-runner"
+    venv:
+      project: containers/ai/gesture-recognition-runner
+
+  - name: pose-estimation-runner
+    source_path: .
+    sources:
+      pip: true
+    python:
+      virtual_env_dir: "/venvs/pose-estimation-runner"
+    venv:
+      project: containers/ai/pose-estimation-runner
+
+  - name: models-downloader
+    source_path: .
+    sources:
+      pip: true
+    python:
+      virtual_env_dir: "/venvs/models-downloader"
+    venv:
+      project: containers/bricks/models-downloader
+
+  - name: tps
+    source_path: .
+    sources:
+      pip: true
+    python:
+      virtual_env_dir: "/venvs/tps"
+    venv:
+      project: containers/bricks/tps
+
+  - name: ei-qnn-models-runner
+    source_path: .
+    sources:
+      pip: true
+    python:
+      virtual_env_dir: "/venvs/ei-qnn-models-runner"
+    venv:
+      project: containers/ai/ei-qnn-models-runner
+
+  - name: llamacpp-runner
+    source_path: .
+    sources:
+      pip: true
+    python:
+      virtual_env_dir: "/venvs/llamacpp-runner"
+    venv:
+      project: containers/ai/llamacpp-runner
+
+  - name: llamacpp-npu-runner
+    source_path: .
+    sources:
+      pip: true
+    python:
+      virtual_env_dir: "/venvs/llamacpp-npu-runner"
+    venv:
+      project: containers/ai/llamacpp-npu-runner
+
+stale_records_action: error
+
+ignored:
+  pip:
+    - pip
+    - setuptools
+    - wheel
+    - uv
+    - arduino-app-bricks
+    - arduino_app_bricks
+
+# Packages whose wheel metadata licensee cannot classify (missing or
+# unrecognized license text in the distribution); licenses verified manually.
+reviewed:
+  pip:
+    - defusedxml        # PSF-2.0
+    - langchain-core    # MIT
+    - langsmith         # MIT
+    - ai-edge-litert    # Apache-2.0
+    - tzdata            # Apache-2.0
+    - pyalsaaudio       # PSF-2.0
+    - certifi           # MPL-2.0, modified ca-bundle notice not recognised by licensee 9.20
+    - backports.strenum # PSF-2.0, ships CPython's LICENSE file while its metadata says MIT
+    - typing_extensions # PSF-2.0, ships CPython's LICENSE file with its history preamble, not matched by newer licensee
+
+allowed:
+  - mpl-2.0
+  - apache-2.0
+  - mit
+  - mit-cmu
+  - bsd-2-clause
+  - bsd-3-clause
+  - cc0-1.0
+  - isc
+  - psf-2.0
+  - unlicense
+  - ofl-1.1
+  - lgpl-3.0-only
+  - epl-2.0
+  - zpl-2.1

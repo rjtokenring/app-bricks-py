@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
@@ -6,16 +6,19 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
-from typing import Literal, Optional, Callable
+from types import TracebackType
+from typing import Literal, Self
+from collections.abc import Callable, Iterator
 import numpy as np
 
-from arduino.app_utils import Logger
+from arduino.app_utils import Logger, peripheral
 
 from .errors import CameraOpenError, CameraReadError, CameraTransformError
 
 logger = Logger("Camera")
 
 
+@peripheral
 class BaseCamera(ABC):
     """
     Abstract base class for camera implementations.
@@ -30,7 +33,7 @@ class BaseCamera(ABC):
         fps: int = 10,
         adjustments: Callable[[np.ndarray], np.ndarray] | None = None,
         auto_reconnect: bool = True,
-    ):
+    ) -> None:
         """
         Initialize the camera base.
 
@@ -38,11 +41,11 @@ class BaseCamera(ABC):
             resolution (tuple, optional): Resolution as (width, height). None uses default resolution.
             fps (int): Frames per second to capture from the camera.
             adjustments (callable, optional): Function or function pipeline to adjust frames that takes
-                a numpy array and returns a numpy array. Default: None
+                a numpy array and returns a numpy array. Default: None.
             auto_reconnect (bool, optional): Enable automatic reconnection on failure. Default: True.
         """
         self.resolution = resolution
-        if fps <= 0:
+        if not fps or fps <= 0:
             raise ValueError("FPS must be a positive integer")
         self.fps = fps
         self.adjustments = adjustments
@@ -53,7 +56,9 @@ class BaseCamera(ABC):
         self._camera_lock = threading.Lock()
         self._is_started = False
         self._last_capture_time = time.monotonic()
-        self._desired_interval = 1.0 / fps if fps > 0 else 0
+        # Set before stop() takes the camera lock, so an in-flight capture() stops waiting out its
+        # FPS interval and hands the lock over instead of making the shutdown wait for it
+        self._stop_requested = threading.Event()
 
         # Auto-reconnection parameters
         self.auto_reconnect = auto_reconnect
@@ -73,6 +78,16 @@ class BaseCamera(ABC):
         return self._status
 
     @property
+    def fps(self) -> int:
+        """Frames per second the camera captures at."""
+        return self._fps
+
+    @fps.setter
+    def fps(self, value: int) -> None:
+        self._fps = value
+        self._desired_interval = 1.0 / value if value > 0 else 0
+
+    @property
     def _none_frame_threshold(self) -> int:
         """Heuristic: 750ms of empty frames based on current fps."""
         return int(0.75 * self.fps) if self.fps > 0 else 10
@@ -87,6 +102,7 @@ class BaseCamera(ABC):
         """
         with self._camera_lock:
             self.logger.info("Starting camera...")
+            self._stop_requested.clear()
 
             attempt = 0
             while not self.is_started():
@@ -116,6 +132,10 @@ class BaseCamera(ABC):
 
     def stop(self) -> None:
         """Stop the camera and release resources."""
+        # Signalled before acquiring the lock: capture() holds it while throttling to the target
+        # FPS, which at a low FPS is long enough to matter during a time-boxed app shutdown.
+        self._stop_requested.set()
+
         with self._camera_lock:
             if not self.is_started():
                 return
@@ -130,7 +150,7 @@ class BaseCamera(ABC):
             except Exception as e:
                 self.logger.warning(f"Failed to stop camera: {e}")
 
-    def capture(self) -> Optional[np.ndarray]:
+    def capture(self) -> np.ndarray | None:
         """
         Capture a frame from the camera, respecting the configured FPS.
 
@@ -142,15 +162,19 @@ class BaseCamera(ABC):
             Exception: If the underlying implementation fails to read a frame.
         """
         with self._camera_lock:
+            # This check has to stay ahead of _read_frame(): once the camera is stopped, a worker
+            # thread that outlived the shutdown must fail here rather than reach the
+            # auto-reconnect in _read_frame() and hand itself a freshly reopened device. On the
+            # CSI stack that would re-acquire a camera the app has already given back.
             if not self.is_started():
                 raise CameraReadError(f"Attempted to read from {self.name} before starting it.")
 
-            # Apply FPS throttling
+            # Apply FPS throttling, interruptible so that a pending stop() is not kept waiting
             if self._desired_interval > 0:
                 current_time = time.monotonic()
                 elapsed = current_time - self._last_capture_time
-                if elapsed < self._desired_interval:
-                    time.sleep(self._desired_interval - elapsed)
+                if elapsed < self._desired_interval and self._stop_requested.wait(self._desired_interval - elapsed):
+                    return None
 
             self._last_capture_time = time.monotonic()
 
@@ -173,7 +197,7 @@ class BaseCamera(ABC):
 
             return frame
 
-    def stream(self):
+    def stream(self) -> Iterator[np.ndarray]:
         """
         Continuously capture frames from the camera.
 
@@ -194,7 +218,7 @@ class BaseCamera(ABC):
             if frame is not None:
                 yield frame
 
-    def record(self, duration) -> np.ndarray:
+    def record(self, duration: float) -> np.ndarray:
         """
         Record video for a specified duration and return it as a numpy array of raw frames.
 
@@ -239,7 +263,7 @@ class BaseCamera(ABC):
 
         return frames[:count]
 
-    def record_avi(self, duration) -> np.ndarray:
+    def record_avi(self, duration: float) -> np.ndarray:
         """
         Record video for a specified duration and return as MJPEG in AVI container.
 
@@ -300,7 +324,7 @@ class BaseCamera(ABC):
         """Check if the camera has been started."""
         return self._is_started
 
-    def on_status_changed(self, callback: Callable[[str, dict], None] | None):
+    def on_status_changed(self, callback: Callable[[str, dict], None] | None) -> None:
         """Registers or removes a callback to be triggered on camera lifecycle events.
 
         When a camera status changes, the provided callback function will be invoked.
@@ -328,7 +352,7 @@ class BaseCamera(ABC):
             self._on_status_changed_cb = None
         else:
 
-            def _callback_wrapper(new_status: str, data: dict):
+            def _callback_wrapper(new_status: str, data: dict) -> None:
                 try:
                     callback(new_status, data)
                 except Exception as e:
@@ -355,7 +379,7 @@ class BaseCamera(ABC):
         pass
 
     @abstractmethod
-    def _read_frame(self) -> Optional[np.ndarray]:
+    def _read_frame(self) -> np.ndarray | None:
         """
         Read a single frame from the camera.
 
@@ -400,17 +424,17 @@ class BaseCamera(ABC):
             if self._on_status_changed_cb is not None:
                 self._event_executor.submit(self._on_status_changed_cb, new_status, data if data is not None else {})
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         """Context manager entry."""
         self.start()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None) -> None:
         """Context manager exit."""
         self.stop()
 
 
-def _to_uint8(frame) -> np.ndarray:
+def _to_uint8(frame: np.ndarray) -> np.ndarray:
     """Normalize and convert to uint8."""
     if np.issubdtype(frame.dtype, np.floating):
         # We adopt the OpenCV convention: float images are in [0, 1]

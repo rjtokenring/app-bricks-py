@@ -1,10 +1,15 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
+import math
+from typing import Any
+
 import requests
 import io
+from PIL import Image
 from arduino.app_internal.core import load_brick_compose_file, resolve_address
+from arduino.app_internal.core.module import get_brick_config, get_brick_configured_model, load_model_list
 from arduino.app_utils.image import get_image_bytes, get_image_type
 from arduino.app_utils import Logger, HttpClient
 
@@ -14,7 +19,7 @@ logger = Logger(__name__)
 class EdgeImpulseModelInfo:
     """Class to hold Edge Impulse model information."""
 
-    def __init__(self, model_info: dict):
+    def __init__(self, model_info: dict) -> None:
         """Initialize the EdgeImpulseModelInfo with model information."""
         if not model_info:
             raise ValueError("Model information cannot be empty.")
@@ -41,7 +46,7 @@ class EdgeImpulseModelInfo:
 class EdgeImpulseRunnerFacade:
     """Facade for Edge Impulse Object Detection and Classification."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the EdgeImpulseRunnerFacade with the API path.
 
         Raises:
@@ -60,9 +65,9 @@ class EdgeImpulseRunnerFacade:
                 logger.error(f"Error: {e}")
                 return None
 
-    def infer_from_image(self, image_bytes, image_type: str = "jpg") -> dict | None:
-        image_bytes = get_image_bytes(image_bytes)
-        if not image_bytes or not image_type:
+    def infer_from_image(self, image_bytes: bytes | Image.Image, image_type: str = "jpg") -> dict | None:
+        data = get_image_bytes(image_bytes)
+        if not data or not image_type:
             return None
 
         if image_type not in ["jpg", "jpeg", "png"]:
@@ -72,9 +77,9 @@ class EdgeImpulseRunnerFacade:
             image_type = "jpeg"
 
         try:
-            logger.debug(f"[{self.__class__.__name__}] Detecting image of type: {image_type} -> {len(image_bytes)} bytes")
+            logger.debug(f"[{self.__class__.__name__}] Detecting image of type: {image_type} -> {len(data)} bytes")
 
-            files = {"file": (f"image.{image_type}", io.BytesIO(image_bytes), f"image/{image_type}")}
+            files = {"file": (f"image.{image_type}", io.BytesIO(data), f"image/{image_type}")}
             response = requests.post(f"{self.url}/api/image", files=files)
 
         except Exception as e:
@@ -88,7 +93,7 @@ class EdgeImpulseRunnerFacade:
             logger.warning(f"[{self.__class__}] error: {response.status_code}. Message: {response.text}")
             return None
 
-    def process(self, item):
+    def process(self, item: str | dict) -> dict | None:
         """Process an item to detect objects in an image.
 
         Args:
@@ -187,7 +192,7 @@ class EdgeImpulseRunnerFacade:
         """
         return EdgeImpulseModelInfo(model_info)
 
-    def _extract_classification(self, item: dict, confidence: float = 0.0):
+    def _extract_classification(self, item: dict | None, confidence: float = 0.0) -> dict | None:
         """Extract classification results from the item.
 
         Args:
@@ -225,7 +230,7 @@ class EdgeImpulseRunnerFacade:
 
         return None
 
-    def _extract_anomaly_score(self, item: dict):
+    def _extract_anomaly_score(self, item: dict | None) -> float | None:
         """Extract anomaly score for anomaly detection use case.
 
         Args:
@@ -245,7 +250,7 @@ class EdgeImpulseRunnerFacade:
         return None
 
     @classmethod
-    def _get_ei_url(cls):
+    def _get_ei_url(cls) -> str:
         infra = load_brick_compose_file(cls)
         if not infra or "services" not in infra:
             raise RuntimeError("Cannot load Brick Compose file to resolve Edge Impulse runner address.")
@@ -259,3 +264,78 @@ class EdgeImpulseRunnerFacade:
         if not addr:
             raise RuntimeError("Host address resolution failed for Edge Impulse runner.")
         return f"http://{addr}:1337"
+
+
+def brick_model_requires_softmax(brick_cls: type) -> bool:
+    """Check whether the model configured for a brick requires a softmax on its classification output.
+
+    The model is resolved with the same rules used to provision it: the ``model`` entry of the
+    brick section in ``app.yaml`` first, then the default declared in the brick's ``brick_config.yaml``.
+    The resolved model is then looked up in the models list and its ``requires_softmax`` metadata
+    flag is returned. Any model without that flag (e.g. the default MobileNet, or custom models)
+    keeps its raw runner output untouched.
+
+    Args:
+        brick_cls: The brick class, used to locate its ``brick_config.yaml``.
+
+    Returns:
+        bool: True only if the configured model is listed with ``requires_softmax: true``.
+    """
+    brick_config: dict[str, Any] | None = get_brick_config(brick_cls)
+    if not brick_config:
+        return False
+    brick_id: str | None = brick_config.get("id")
+    if not brick_id:
+        return False
+
+    configured_model = get_brick_configured_model(brick_id, brick_config=brick_config)
+    if configured_model is None:
+        return False
+    logger.info(f"[{brick_cls.__name__}] Configured model: {configured_model}")
+
+    models_list = load_model_list()
+    if not models_list or configured_model not in models_list:
+        return False
+
+    model_entry = models_list[configured_model]
+    if model_entry.metadata and model_entry.metadata.get("requires_softmax"):
+        logger.info(f"[{brick_cls.__name__}] Model '{configured_model}' requires softmax: enabling it on the classification results.")
+        return True
+    return False
+
+
+def compute_softmax_over_ei_classification(det_classifications: dict[str, Any], top_k: int | None = None) -> dict[str, str]:
+    """Compute softmax over Edge Impulse classification results if required by the model.
+
+    The softmax is always computed over the *full* set of logits, so the resulting
+    probabilities preserve the calibration produced by the network (e.g. EfficientNet-B4
+    trained on ImageNet-1000). The optional ``top_k`` is applied *after* the softmax as
+    a pure output filter: it trims the returned dict to the K highest-probability classes
+    but does not alter their probability values.
+
+    det_classifications: A dictionary containing classification results from Edge Impulse,
+        in the form ``{class_name: logit}``.
+    top_k: If set to a positive integer, return only the K classes with the highest
+        probability. If None or <= 0, all classes are returned.
+
+    Returns:
+        dict: A dictionary with softmax-normalized confidence values, formatted as 4-decimal strings.
+    """
+
+    classes = list(det_classifications.keys())
+    logits = [float(det_classifications[cls]) for cls in classes]
+
+    if not logits:
+        return {}
+
+    max_logit = max(logits)
+    exp_logits = [math.exp(z - max_logit) for z in logits]
+    sum_exp = sum(exp_logits)
+    probs = [e / sum_exp for e in exp_logits] if sum_exp > 0 else [0.0] * len(logits)
+
+    if top_k is not None and top_k > 0 and top_k < len(classes):
+        top_indices = sorted(range(len(probs)), key=lambda i: probs[i], reverse=True)[:top_k]
+    else:
+        top_indices = range(len(classes))
+
+    return {classes[i]: f"{probs[i]:.4f}" for i in top_indices}

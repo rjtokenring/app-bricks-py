@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
@@ -7,7 +7,7 @@ import queue
 import inspect
 import numpy as np
 import time
-from typing import Iterable
+from collections.abc import Iterable
 from arduino.app_internal.core import EdgeImpulseRunnerFacade
 from arduino.app_utils import Logger, SlidingWindowBuffer, brick
 
@@ -33,20 +33,22 @@ class VibrationAnomalyDetection(EdgeImpulseRunnerFacade):
         - A single callback is supported at a time (thread-safe registration).
     """
 
-    def __init__(self, anomaly_detection_threshold: float = 1.0):
+    def __init__(self, anomaly_detection_threshold: float = 1.0) -> None:
         """Initialize the vibration anomaly detector.
 
         Args:
             anomaly_detection_threshold (float): Threshold applied to the model’s
                 anomaly score to decide whether to trigger the registered callback.
-                Typical starting point is 1.0; tune based on your dataset.
+                This is the raw anomaly score, not a normalized confidence value;
+                values above 1.0 are valid. Typical starting point is 1.0; tune
+                based on your dataset.
 
         Raises:
             ValueError: If the Edge Impulse runner is unreachable, or if the model
                 info is missing/invalid (e.g., non-positive `frequency` or
                 `input_features_count`).
         """
-        self._anomaly_detection_threshold = anomaly_detection_threshold
+        self._anomaly_detection_threshold = self._validate_anomaly_detection_threshold(anomaly_detection_threshold)
         super().__init__()
         model_info = self.get_model_info()
         if not model_info:
@@ -59,6 +61,33 @@ class VibrationAnomalyDetection(EdgeImpulseRunnerFacade):
         self._handler_lock = threading.Lock()
 
         self._buffer = SlidingWindowBuffer(window_size=model_info.input_features_count, slide_amount=int(model_info.input_features_count))
+
+    @property
+    def anomaly_detection_threshold(self) -> float:
+        """Raw anomaly score threshold used to decide when callbacks fire."""
+        return self._anomaly_detection_threshold
+
+    @anomaly_detection_threshold.setter
+    def anomaly_detection_threshold(self, value: float) -> None:
+        """Update the raw anomaly score threshold at runtime.
+
+        The value is intentionally not clamped to ``[0.0, 1.0]`` because Edge
+        Impulse anomaly scores are distances and can legitimately be greater
+        than 1.0.
+        """
+        self._anomaly_detection_threshold = self._validate_anomaly_detection_threshold(value)
+
+    @staticmethod
+    def _validate_anomaly_detection_threshold(value: float) -> float:
+        try:
+            threshold = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Anomaly detection threshold must be a finite non-negative number.") from exc
+
+        if not np.isfinite(threshold) or threshold < 0.0:
+            raise ValueError("Anomaly detection threshold must be a finite non-negative number.")
+
+        return threshold
 
     def accumulate_samples(self, sensor_samples: Iterable[float]) -> None:
         """Append one or more accelerometer samples to the sliding window buffer.
@@ -86,7 +115,7 @@ class VibrationAnomalyDetection(EdgeImpulseRunnerFacade):
         if not self._buffer.push(chunk):
             logger.debug(f"Samples not pushed to the buffer. Buffer is full or has insufficient capacity.")
 
-    def on_anomaly(self, callback: callable):
+    def on_anomaly(self, callback: callable) -> None:
         """Register a handler to be invoked when an anomaly is detected.
 
         The callback signature can be one of:
@@ -110,7 +139,7 @@ class VibrationAnomalyDetection(EdgeImpulseRunnerFacade):
         finally:
             self._handler_lock.release()
 
-    def loop(self):
+    def loop(self) -> None:
         """Non-blocking processing step; run this periodically.
 
         Behavior:
@@ -167,7 +196,7 @@ class VibrationAnomalyDetection(EdgeImpulseRunnerFacade):
             logger.error(f"Error {e}")
             time.sleep(1)  # Sleep briefly to avoid tight loop in case of errors
 
-    def start(self):
+    def start(self) -> None:
         """Prepare the detector for a new session.
 
         Notes:
@@ -176,7 +205,7 @@ class VibrationAnomalyDetection(EdgeImpulseRunnerFacade):
         """
         self._buffer.flush()
 
-    def stop(self):
+    def stop(self) -> None:
         """Stop the detector and release transient resources.
 
         Notes:
@@ -184,7 +213,7 @@ class VibrationAnomalyDetection(EdgeImpulseRunnerFacade):
         """
         self._clear()
 
-    def _clear(self):
+    def _clear(self) -> None:
         """Internal helper: flush the sensor data buffer and log the action.
 
         Notes:

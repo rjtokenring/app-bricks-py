@@ -1,11 +1,12 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
 import inspect
+import os
 
 
-def _has_callable_method(obj_or_cls, method_name):
+def _has_callable_method(obj_or_cls: object, method_name: str) -> bool:
     """Checks if an object or class has a callable method with the correct signature.
     The method must only accept the `self` parameter.
     This function correctly handles both bound methods (on instances) and
@@ -65,5 +66,15 @@ def _has_callable_method(obj_or_cls, method_name):
         )
 
 
-def _brick_name(brick) -> str:
+def _brick_name(brick: object) -> str:
     return type(brick).__name__
+
+
+def get_board_name() -> str:
+    """Returns the name of the board currently running the code.
+
+    Returns:
+        str: The name of the board, in lowercase (e.g.: unoq, ventunoq, etc.).
+            If the board name cannot be determined, returns "unknown".
+    """
+    return os.environ.get("BOARD_NAME", "unknown").lower()

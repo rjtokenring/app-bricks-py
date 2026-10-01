@@ -1,7 +1,8 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
+import threading
 import time
 import numpy as np
 import pytest
@@ -104,7 +105,7 @@ class TestV4LCameraStartStop:
         camera.start()
 
         assert camera.is_started()
-        mock_videocapture.assert_called_once_with("/dev/v4l/by-id/usb-Camera-video-index0")
+        mock_videocapture.assert_called_once_with("/dev/v4l/by-id/usb-Camera-video-index0", cv2.CAP_V4L2)
 
         # Verify V4L camera setup calls
         assert mock_successful_connect.set.call_count == 4
@@ -178,6 +179,31 @@ class TestV4LCameraStartStop:
         camera.start()
 
         assert camera.fps == 15
+        assert camera._desired_interval == pytest.approx(1 / 15)
+        assert camera.is_started()
+
+    @patch("arduino.app_peripherals.camera.v4l_camera.cv2.VideoCapture")
+    def test_hardware_adaptation_fps_downscale_emulation(self, mock_videocapture, mock_successful_connect):
+        """Test that V4LCamera keeps the requested FPS when the driver rate is higher."""
+
+        def get_caps(prop):
+            if prop == cv2.CAP_PROP_FRAME_WIDTH:
+                return 640
+            elif prop == cv2.CAP_PROP_FRAME_HEIGHT:
+                return 480
+            elif prop == cv2.CAP_PROP_FPS:
+                return 30
+            return 0
+
+        mock_successful_connect.get.side_effect = get_caps
+        mock_videocapture.return_value = mock_successful_connect
+
+        # Request 15fps on a device whose driver keeps 30fps: software throttling emulates it
+        camera = V4LCamera(resolution=(640, 480), fps=15)
+        camera.start()
+
+        assert camera.fps == 15
+        assert camera._desired_interval == pytest.approx(1 / 15)
         assert camera.is_started()
 
     @patch("arduino.app_peripherals.camera.v4l_camera.cv2.VideoCapture")
@@ -377,11 +403,19 @@ class TestV4LCameraRecovery:
     def test_exponential_backoff_on_open(self, mock_videocapture, mock_successful_connect, mock_failed_connect_open, mock_failed_connect_read):
         """Test that exponential backoff is used during camera opening."""
         sleep_calls = []
+        test_thread = threading.get_ident()
 
         def spy_sleep(seconds):
-            sleep_calls.append(seconds)
+            # Only what `camera.start()` sleeps on this thread. The patch below cannot be
+            # scoped to one module — `v4l_camera.time` *is* the stdlib time module, so
+            # replacing its `sleep` replaces it process-wide — and a background thread
+            # parked in `time.sleep()` spins as fast as the no-op mock returns for as long
+            # as the patch is up, flooding this list with sleeps that are not ours.
+            if threading.get_ident() == test_thread:
+                sleep_calls.append(seconds)
 
-        # Patch time.sleep in the v4l_camera module only for this test
+        # Patched via v4l_camera, but the backoff being measured is base_camera.start()'s;
+        # both modules share the one time module, so either name reaches it.
         with patch("arduino.app_peripherals.camera.v4l_camera.time.sleep", side_effect=spy_sleep):
             # Fail, attempt 5 times, succeed at last one
             mock_videocapture.side_effect = [
@@ -446,6 +480,7 @@ class TestV4LCameraRecovery:
             True,  # For _resolve_name
             True,  # For _resolve_name
             True,  # For _open_camera
+            True,  # For v4l_path existence check
             False,  # For _safe_connect tentative for third capture()
             True,  # For _safe_connect check for fourth capture()
         ]

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
@@ -6,14 +6,16 @@ import os
 import re
 import yaml
 import sys
-from typing import List, Dict, Optional
+from dataclasses import dataclass, field
+
+from arduino.app_utils.utils import get_board_name
 
 application_config_file_name: str = "app.yaml"
 config_file_name: str = "brick_config.yaml"
 compose_config_file_name: str = "brick_compose.yaml"
 
 
-def get_app_config() -> Optional[Dict]:
+def get_app_config() -> dict | None:
     """Gets app.yaml application configuration."""
     config_path = None
     app_root_dir = os.getenv("APP_HOME")
@@ -45,7 +47,7 @@ def get_app_config() -> Optional[Dict]:
     return None
 
 
-def get_brick_config(cls) -> Optional[Dict]:
+def get_brick_config(cls: type) -> dict | None:
     """Gets resolved brick_config.yaml file."""
     config_file = get_brick_linked_resource_file(cls, config_file_name)
     if config_file and os.path.exists(config_file):
@@ -55,17 +57,17 @@ def get_brick_config(cls) -> Optional[Dict]:
     return None
 
 
-def get_brick_config_file(cls) -> Optional[str]:
+def get_brick_config_file(cls: type) -> str | None:
     """Gets the full path of the brick_config.yaml file."""
     return get_brick_linked_resource_file(cls, config_file_name)
 
 
-def get_brick_compose_file(cls) -> Optional[str]:
+def get_brick_compose_file(cls: type) -> str | None:
     """Gets the full path of the brick_compose.yaml file, if present."""
     return get_brick_linked_resource_file(cls, compose_config_file_name)
 
 
-def load_brick_compose_file(cls) -> Optional[Dict]:
+def load_brick_compose_file(cls: type) -> dict | None:
     """Loads the brick_compose.yaml file and returns its content."""
     pathfile = get_brick_compose_file(cls)
     if pathfile:
@@ -76,7 +78,7 @@ def load_brick_compose_file(cls) -> Optional[Dict]:
         return None
 
 
-def get_brick_linked_resource_file(cls, resource_file_name) -> Optional[str]:
+def get_brick_linked_resource_file(cls: type, resource_file_name: str) -> str | None:
     """Gets the full path to a config file in the directory containing a class."""
     try:
         module = cls.__module__
@@ -99,7 +101,115 @@ def get_brick_linked_resource_file(cls, resource_file_name) -> Optional[str]:
         return None
 
 
-def get_brick_configured_model(brick_id: str) -> Optional[str]:
+def get_bricks_static_assets_directory() -> str | None:
+    """Gets the full path to the static assets directory.
+
+    Returns:
+        Optional[str]: The path to the static assets directory if found, otherwise None.
+    """
+    try:
+        directory_path = os.path.dirname(os.path.abspath(__file__))
+        # Go 2 directories above, then into app_bricks/static
+        base_path = os.path.dirname(os.path.dirname(directory_path))
+        requested_path = os.path.join(base_path, "app_bricks", "static")
+        if os.path.exists(requested_path):
+            return requested_path
+        else:
+            return None
+    except AttributeError:
+        # Handle built-in classes or other cases where __file__ is not available
+        return None
+    except ModuleNotFoundError:
+        return None
+
+
+@dataclass
+class ModelBrickConfig:
+    id: str
+    model_configuration: dict[str, str] = field(default_factory=dict)
+
+    @staticmethod
+    def from_dict(data: dict) -> "ModelBrickConfig":
+        return ModelBrickConfig(
+            id=data.get("id", ""),
+            model_configuration=data.get("model_configuration", {}),
+        )
+
+
+@dataclass
+class ModelDeployment:
+    handler: str = ""
+    platforms: dict[str, dict] = field(default_factory=dict)
+    metadata: dict[str, str] = field(default_factory=dict)
+
+    @staticmethod
+    def from_dict(data: dict) -> "ModelDeployment":
+        platforms = {}
+        for p in data.get("platforms", []):
+            if isinstance(p, dict):
+                for platform_name, platform_config in p.items():
+                    platforms[platform_name] = platform_config if isinstance(platform_config, dict) else {}
+        return ModelDeployment(
+            handler=data.get("handler", ""),
+            platforms=platforms,
+            metadata=data.get("metadata", {}),
+        )
+
+
+@dataclass
+class ModelEntry:
+    model_id: str
+    name: str = ""
+    description: str = ""
+    metadata: dict[str, str] = field(default_factory=dict)
+    supported_boards: list[str] = field(default_factory=list)
+    deployment: ModelDeployment | None = None
+    bricks: list[ModelBrickConfig] = field(default_factory=list)
+
+    @staticmethod
+    def from_dict(model_id: str, data: dict) -> "ModelEntry":
+        deployment = ModelDeployment.from_dict(data["deployment"]) if "deployment" in data else None
+        bricks = [ModelBrickConfig.from_dict(b) for b in data.get("bricks", [])]
+        return ModelEntry(
+            model_id=model_id,
+            name=data.get("name", ""),
+            description=data.get("description", ""),
+            metadata=data.get("metadata", {}),
+            supported_boards=data.get("supported_boards", []),
+            deployment=deployment,
+            bricks=bricks,
+        )
+
+
+def load_model_list() -> dict[str, ModelEntry] | None:
+    """Loads complete model list from static assets directory.
+
+    Returns:
+        A dictionary of model_id -> ModelEntry, or None if the file is not found.
+    """
+    static_assets_dir = get_bricks_static_assets_directory()
+    if static_assets_dir:
+        model_list_path = os.path.join(static_assets_dir, "models-list.yaml")
+        if os.path.exists(model_list_path):
+            with open(model_list_path, encoding="utf-8") as f:
+                model_list_content = yaml.safe_load(f)
+            if not model_list_content:
+                return None
+            if isinstance(model_list_content, dict) and "models" in model_list_content:
+                model_list_content = model_list_content["models"]
+            if not isinstance(model_list_content, list):
+                return None
+            models = {}
+            for entry in model_list_content:
+                if isinstance(entry, dict):
+                    for model_id, model_data in entry.items():
+                        if isinstance(model_data, dict):
+                            models[model_id] = ModelEntry.from_dict(model_id, model_data)
+            return models
+    return None
+
+
+def get_brick_configured_model(brick_id: str, brick_config: dict = None) -> str | None:
     """Helper method to extract the model name from the app configuration for this brick.
     This allows dynamic configuration of the model via the app's config file, overriding defaults.
 
@@ -107,10 +217,12 @@ def get_brick_configured_model(brick_id: str) -> Optional[str]:
 
     bricks:
     - arduino:llm:
-        model: genie:qwen3-4b
+        model: genie:qwen3_4b_instruct_2507
 
     Args:
         brick_id (str): The identifier of the brick for which to retrieve the model configuration.
+        brick_config (Dict, optional): The brick configuration dictionary. If provided, it will load the default model from this configuration,
+            if not specified into app.yaml.
     Returns:
         Optional[str]: The model name if found in the app configuration, otherwise None.
     Raises:
@@ -125,13 +237,32 @@ def get_brick_configured_model(brick_id: str) -> Optional[str]:
         bricks_list = app_cfg["bricks"]
         for brick_entry in bricks_list:
             if isinstance(brick_entry, dict) and brick_id in brick_entry:
-                brick_config = brick_entry[brick_id]
-                if isinstance(brick_config, dict) and "model" in brick_config:
-                    return brick_config["model"]
+                print(f"Found brick entry for '{brick_id}' in app.yaml: {brick_entry}")
+                brick_section = brick_entry[brick_id]
+                if isinstance(brick_section, dict) and "model" in brick_section:
+                    return brick_section["model"]
+
+    # No model found in app config, check if it's specified in the brick_config.yaml as default for the brick
+    if brick_config is None:
+        return None
+
+    if brick_config and "model_by_boards" in brick_config:
+        print(f"Found 'model_by_boards' in brick_config.yaml for brick '{brick_id}'. Checking for matching board...")
+        board_name = get_board_name()
+        print(f"Looking for model configuration for board '{board_name}' in brick_config.yaml...")
+        for board_entry in brick_config["model_by_boards"]:
+            if "platform" in board_entry and board_entry["platform"] == board_name:
+                print(f"Found matching board entry for platform '{board_name}': {board_entry}")
+                return board_entry["model"]
+
+    if brick_config and "model" in brick_config:
+        print(f"Found model configuration in brick_config.yaml for brick '{brick_id}': {brick_config['model']}")
+        return brick_config["model"]
+
     return None
 
 
-def parse_docker_compose_variable(variable_string) -> List[tuple[str, str]] | str:
+def parse_docker_compose_variable(variable_string: str) -> list[tuple[str, str]] | str:
     """Parses a Docker Compose-style environment variable string, including nested variables.
 
     Args:
@@ -159,7 +290,7 @@ def parse_docker_compose_variable(variable_string) -> List[tuple[str, str]] | st
         return variable_string
 
 
-def _accumulate_docker_compose_variables(discovered_vars, value):
+def _accumulate_docker_compose_variables(discovered_vars: list[tuple[str, str | None]], value: object) -> None:
     if isinstance(value, str):
         tp = parse_docker_compose_variable(value)
         if tp and isinstance(tp, list):
@@ -180,7 +311,7 @@ def _accumulate_docker_compose_variables(discovered_vars, value):
 
 
 class ModuleVariable:
-    def __init__(self, name: str, description: str, default_value: str = None):
+    def __init__(self, name: str, description: str, default_value: str = None) -> None:
         """Represents a variable in a Docker Compose file."""
         self.name = name
         self.default_value = default_value
@@ -195,52 +326,20 @@ class ModuleVariable:
             del dict_out["description"]
         return dict_out
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"Name: {self.name}, Default value: {self.default_value}, Description: {self.description}"
 
 
-class EnvVariable:
-    def __init__(self, name: str, description: str, default_value: str = None, hidden: bool = False, secret: bool = False):
-        """Represents a variable in brick_config file."""
-        self.name = name
-        self.default_value = default_value
-        self.description = description
-        self.hidden = hidden
-        self.secret = secret
-
-    def to_dict(self) -> dict:
-        """Converts the EnvVariable object to a dictionary."""
-        dict_out = {
-            "name": self.name,
-            "default_value": self.default_value,
-            "description": self.description,
-            "hidden": self.hidden,
-            "secret": self.secret,
-        }
-        if self.default_value is None or self.default_value == "":
-            del dict_out["default_value"]
-        if self.description is None or self.description == "":
-            del dict_out["description"]
-        if not self.hidden:
-            del dict_out["hidden"]
-        if not self.secret:
-            del dict_out["secret"]
-        return dict_out
-
-    def __str__(self):
-        return f"Name: {self.name}, Default value: {self.default_value}, Description: {self.description}"
-
-
-def load_module_supported_variables(file_path: str) -> Optional[List[ModuleVariable]]:
+def load_module_supported_variables(file_path: str) -> list[ModuleVariable] | None:
     """Loads a Docker Compose file and returns all supported variables with its default values and description.
 
     Returns:
         A list of ModuleVarable objects representing the variables found in the Docker Compose file.
     """
     try:
-        with open(file_path, "r") as file:
+        with open(file_path) as file:
             # Read the file content to get headers
-            descriptions: Dict[str, str] = {}
+            descriptions: dict[str, str] = {}
             while True:
                 line = file.readline()
                 if not line:  # End of file
@@ -293,45 +392,3 @@ def resolve_address(host: str) -> str:
         return remote_dev
     else:
         return host
-
-
-def _update_compose_release_version(
-    compose_file_path: str,
-    release_version: str,
-    append_suffix: bool = False,
-    only_ai_containers: bool = False,
-    registry: str = None,
-) -> str:
-    """Updates the release version in the Docker Compose file."""
-    with open(compose_file_path, "r") as file:
-        content = file.read()
-
-    print("Updating compose file:", compose_file_path)
-    if only_ai_containers and "-runner" not in content:
-        return compose_file_path
-
-    # Replace the release version in the content
-    updated_content = content
-
-    if only_ai_containers:
-        substitution = "-runner:" + release_version
-        # First replace branch-name style tags (e.g. dev-next, feature-foo); branch names start with a letter
-        updated_content = re.sub(r"-runner:[a-zA-Z][a-zA-Z0-9._/-]*", substitution, updated_content)
-        # Then replace semver style tags (e.g. 1.2.3)
-        updated_content = re.sub(r"-runner:[0-9]+\.[0-9]+\.[0-9]+", substitution, updated_content)
-
-    substitution = release_version
-    updated_content = re.sub(r"\${APPSLAB_VERSION:\-([^}]+)?}", substitution, updated_content)
-    updated_content = re.sub(r"\${APPSLAB_VERSION}", substitution, updated_content)
-
-    if registry and registry != "":
-        substitution = "${DOCKER_REGISTRY_BASE:-" + registry + "}"
-        updated_content = re.sub(r"\${DOCKER_REGISTRY_BASE:\-([^}]+)?}", substitution, updated_content)
-        updated_content = re.sub(r"\${DOCKER_REGISTRY_BASE}", substitution, updated_content)
-
-    if append_suffix:
-        compose_file_path = compose_file_path + ".new"
-    with open(compose_file_path, "w") as file:
-        file.write(updated_content)
-
-    return compose_file_path

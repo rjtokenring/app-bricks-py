@@ -1,7 +1,8 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
+import logging
 import site
 import pathlib
 import yaml
@@ -9,26 +10,59 @@ import json
 import os
 import sys
 import argparse
+import glob
 import shutil
 import time
+from typing import Any
 from urllib.parse import urlparse
-from typing import List, Dict, Optional
-from arduino.app_internal.core.module import (
-    _update_compose_release_version,
-    EnvVariable,
-)
-from arduino.app_utils import Logger
+from arduino.version import __version__
 
-logger = Logger(__name__)
+logger = logging.getLogger(__name__)
+
+RELEASE_VERSION_PLACEHOLDER = "__BRICKS_RELEASE_VERSION__"
 
 editable_module_config = "direct_url.json"
 
 config_file_name: str = "brick_config.yaml"
 compose_config_file_name: str = "brick_compose.yaml"
+compose_config_file_name_prefix: str = "brick_compose"
 service_config_file_name: str = "service_config.yaml"
 service_compose_config_file_name: str = "service_compose.yaml"
+service_compose_config_file_name_prefix: str = "service_compose"
 main_readme_file_name: str = "README.md"
 examples_folder_name: str = "examples"
+
+
+class EnvVariable:
+    def __init__(self, name: str, description: str, default_value: str | None = None, hidden: bool = False, secret: bool = False) -> None:
+        """Represents a variable in brick_config file."""
+        self.name = name
+        self.default_value = default_value
+        self.description = description
+        self.hidden = hidden
+        self.secret = secret
+
+    def to_dict(self) -> dict[str, Any]:
+        """Converts the EnvVariable object to a dictionary."""
+        dict_out = {
+            "name": self.name,
+            "default_value": self.default_value,
+            "description": self.description,
+            "hidden": self.hidden,
+            "secret": self.secret,
+        }
+        if not self.default_value:
+            del dict_out["default_value"]
+        if not self.description:
+            del dict_out["description"]
+        if not self.hidden:
+            del dict_out["hidden"]
+        if not self.secret:
+            del dict_out["secret"]
+        return dict_out
+
+    def __str__(self) -> str:
+        return f"Name: {self.name}, Default value: {self.default_value}, Description: {self.description}"
 
 
 class ArduinoBrick:
@@ -43,41 +77,43 @@ class ArduinoBrick:
         category: str = "miscellaneous",
         mount_devices_into_container: bool = False,
         requires_display: str = None,
-        required_device_classes: List[str] = None,
-        env_variables: Dict[str, str] = None,
-        supported_boards: List[str] = None,
-        requires_services: List[str] = None,
-    ):
+        required_device_classes: list[str] = None,
+        env_variables: dict[str, str] = None,
+        supported_boards: list[str] = None,
+        requires_services: list[str] = None,
+        ai_frameworks_compatibility: list[str] = None,
+        model_by_boards: list[dict[str, str]] = None,
+        model_configuration_variables: list[str] = None,
+    ) -> None:
         self.id = id
         self.name = name
         self.brick_description = brick_description
         self.ports = ports
         self.path = fs_path
-        self.compose_file: Optional[str] = self.get_compose_file()
-        self.readme_file: Optional[str] = self.get_readme_file()
-        self.require_container: bool = self.compose_file is not None
+        self.compose_file: str | None = self.get_compose_file()
+        self.readme_file: str | None = self.get_readme_file()
         self.model_name: str = model_name
-        self.require_model: bool = model_name != ""
         self.category = category
         self.mount_devices_into_container: bool = mount_devices_into_container
-        self.requires_display: Optional[str] = requires_display
-        self.required_device_classes: Optional[List[str]] = required_device_classes
-        self.env_variables: Optional[Dict[str, str]] = env_variables
-        self.supported_boards: Optional[List[str]] = supported_boards
-        self.requires_services: Optional[List[str]] = requires_services
+        self.requires_display: str | None = requires_display
+        self.required_device_classes: list[str] | None = required_device_classes
+        self.env_variables: dict[str, str] | None = env_variables
+        self.supported_boards: list[str] | None = supported_boards
+        self.requires_services: list[str] | None = requires_services
+        self.ai_frameworks_compatibility: list[str] | None = ai_frameworks_compatibility
+        self.model_by_boards: list[dict[str, str]] | None = model_by_boards
+        self.model_configuration_variables: list[str] | None = model_configuration_variables
 
     def to_dict(self) -> dict:
         out_dict: dict = {
             "id": self.id,
             "name": self.name,
             "description": self.brick_description,
-            "require_container": self.require_container,
-            "require_model": self.require_model,
             "mount_devices_into_container": self.mount_devices_into_container,
             "ports": self.ports,
             "category": self.category,
         }
-        if self.require_model:
+        if self.model_name and self.model_name != "":
             out_dict["model_name"] = self.model_name
         if self.requires_display:
             out_dict["requires_display"] = self.requires_display
@@ -87,9 +123,14 @@ class ArduinoBrick:
             out_dict["supported_boards"] = self.supported_boards
         if self.requires_services:
             out_dict["requires_services"] = self.requires_services
-
+        if self.model_by_boards:
+            out_dict["model_by_boards"] = self.model_by_boards
+        if self.ai_frameworks_compatibility:
+            out_dict["ai_frameworks_compatibility"] = self.ai_frameworks_compatibility
+        if self.model_configuration_variables:
+            out_dict["model_configuration_variables"] = self.model_configuration_variables
         if self.env_variables and len(self.env_variables) > 0:
-            additional_vars: List[EnvVariable] = []
+            additional_vars: list[EnvVariable] = []
             for var in self.env_variables:
                 name = var.get("name")
                 description = var.get("description", "")
@@ -103,19 +144,19 @@ class ArduinoBrick:
                 out_dict["variables"] = [var.to_dict() for var in additional_vars]
         return out_dict
 
-    def get_compose_file(self) -> Optional[str]:
+    def get_compose_file(self) -> str | None:
         compose_file: pathlib.Path = pathlib.Path(self.path) / compose_config_file_name
         if compose_file.is_file():
             return str(compose_file)
         return None
 
-    def get_readme_file(self) -> Optional[str]:
+    def get_readme_file(self) -> str | None:
         readme_file: pathlib.Path = pathlib.Path(self.path) / main_readme_file_name
         if readme_file.is_file():
             return str(readme_file)
         return None
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"Name: {self.name}\nDescription: {self.brick_description}\nPath: {self.path}\nCompose file: {self.get_compose_file()}\n"
 
 
@@ -127,19 +168,18 @@ class ArduinoService:
         brick_description: str,
         fs_path: str,
         category: str = "miscellaneous",
-        env_variables: Dict[str, str] = None,
-        supported_boards: List[str] = None,
+        env_variables: dict[str, str] = None,
+        supported_boards: list[str] = None,
         root_path: str = None,
-    ):
+    ) -> None:
         self.service_id = service_id
         self.name = name
         self.brick_description = brick_description
         self.path = fs_path
-        self.compose_file: Optional[str] = self.get_compose_file()
-        self.require_container: bool = self.compose_file is not None
+        self.compose_file: str | None = self.get_compose_file()
         self.category = category
-        self.env_variables: Optional[Dict[str, str]] = env_variables
-        self.supported_boards: Optional[List[str]] = supported_boards
+        self.env_variables: dict[str, str] | None = env_variables
+        self.supported_boards: list[str] | None = supported_boards
         self.root_path = root_path
 
     def to_dict(self) -> dict:
@@ -155,7 +195,7 @@ class ArduinoService:
             out_dict["root_path"] = self.root_path
 
         if self.env_variables and len(self.env_variables) > 0:
-            additional_vars: List[EnvVariable] = []
+            additional_vars: list[EnvVariable] = []
             for var in self.env_variables:
                 name = var.get("name")
                 description = var.get("description", "")
@@ -169,17 +209,17 @@ class ArduinoService:
                 out_dict["variables"] = [var.to_dict() for var in additional_vars]
         return out_dict
 
-    def get_compose_file(self) -> Optional[str]:
+    def get_compose_file(self) -> str | None:
         compose_file: pathlib.Path = pathlib.Path(self.path) / compose_config_file_name
         if compose_file.is_file():
             return str(compose_file)
         return None
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"Name: {self.name}\nDescription: {self.brick_description}\nPath: {self.path}\nCompose file: {self.get_compose_file()}\n"
 
 
-def find_config_yaml(root_path: str) -> tuple[List[ArduinoBrick], List[ArduinoService]]:
+def find_config_yaml(root_path: str) -> tuple[list[ArduinoBrick], list[ArduinoService]]:
     """Scans all subfolders within the given root_path to find 'config.yaml'.
 
     Args:
@@ -188,8 +228,8 @@ def find_config_yaml(root_path: str) -> tuple[List[ArduinoBrick], List[ArduinoSe
     Returns:
         list: A list of paths to directories that contain 'config.yaml'.
     """
-    discovered_modules: List[ArduinoBrick] = []
-    discovered_services: List[ArduinoService] = []
+    discovered_modules: list[ArduinoBrick] = []
+    discovered_services: list[ArduinoService] = []
     root_path_obj: pathlib.Path = pathlib.Path(root_path)
 
     if not root_path_obj.is_dir():
@@ -197,6 +237,11 @@ def find_config_yaml(root_path: str) -> tuple[List[ArduinoBrick], List[ArduinoSe
 
     for item in root_path_obj.iterdir():
         if item.is_dir():
+            if item.name == examples_folder_name:
+                # Example apps may embed app-local bricks (bricks/<id>/brick_config.yaml
+                # with a namespace-less id): they belong to the example only and must
+                # not be indexed as global bricks.
+                continue
             config_file: pathlib.Path = item / config_file_name
             service_config_file: pathlib.Path = item / service_config_file_name
             editable_module: pathlib.Path = item / editable_module_config
@@ -224,6 +269,9 @@ def find_config_yaml(root_path: str) -> tuple[List[ArduinoBrick], List[ArduinoSe
                         env_variables=config.get("variables", None),
                         supported_boards=config.get("supported_boards", None),
                         requires_services=config.get("requires_services", None),
+                        ai_frameworks_compatibility=config.get("ai_frameworks_compatibility", None),
+                        model_by_boards=config.get("model_by_boards", None),
+                        model_configuration_variables=config.get("model_configuration_variables", None),
                     )
                     discovered_modules.append(mod)
                 except yaml.YAMLError:
@@ -253,7 +301,7 @@ def find_config_yaml(root_path: str) -> tuple[List[ArduinoBrick], List[ArduinoSe
                     logger.error(f"Error: {service_config_file} is not a valid YAML file.")
             elif editable_module.is_file():
                 try:
-                    with open(editable_module, "r") as editable_module_cfg:
+                    with open(editable_module) as editable_module_cfg:
                         content: dict = json.load(editable_module_cfg)
                         if "url" in content and "dir_info" in content:
                             editable_c: dict = content["dir_info"]
@@ -280,13 +328,13 @@ def find_config_yaml(root_path: str) -> tuple[List[ArduinoBrick], List[ArduinoSe
     return discovered_modules, discovered_services
 
 
-def list_installed_packages_pkg_resources() -> tuple[Dict[str, List[ArduinoBrick]], str]:
+def list_installed_packages_pkg_resources() -> tuple[dict[str, list[ArduinoBrick]], str]:
     """List all installed packages and find those containing 'brick_config.yaml'.
     Returns a dictionary where keys are package paths and values are lists of ArduinoBrick instances.
     """
     start = time.time() * 1000
-    checked_paths: Dict[str, List[ArduinoBrick]] = {}
-    checked_svc_paths: Dict[str, List[ArduinoService]] = {}
+    checked_paths: dict[str, list[ArduinoBrick]] = {}
+    checked_svc_paths: dict[str, list[ArduinoService]] = {}
 
     # Check standard site-packages and user site-packages directories
     paths = set(site.getsitepackages())
@@ -331,9 +379,26 @@ def list_installed_packages_pkg_resources() -> tuple[Dict[str, List[ArduinoBrick
     return checked_paths, services_folder
 
 
-def save_compose_file(module: ArduinoBrick, output_dir: str, appslab_version: str):
-    """Save the compose file to the specified output directory."""
-    if not module.require_container:
+def _stamp_release_version(content: str, release_version: str) -> str:
+    return content.replace(RELEASE_VERSION_PLACEHOLDER, release_version)
+
+
+def resolve_release_version(version: str | None = None) -> str:
+    """Return the version stamped into compose and models files.
+
+    Precedence: the explicit argument, the BRICKS_RELEASE_VERSION environment variable, the installed library version.
+    """
+    if version:
+        return version
+    env_version = os.environ.get("BRICKS_RELEASE_VERSION")
+    if env_version:
+        return env_version
+    return __version__
+
+
+def save_compose_file(module: ArduinoBrick, output_dir: str, release_version: str) -> None:
+    """Copy every brick_compose*.yaml of the module to the output directory, stamping the release version."""
+    if not module.compose_file:
         return
 
     # We cannot save a folder containing the `:`, therefore we split and save it
@@ -341,19 +406,14 @@ def save_compose_file(module: ArduinoBrick, output_dir: str, appslab_version: st
     module_name = "/".join(module.id.split(":"))
     output_folder: pathlib.Path = pathlib.Path(output_dir) / module_name
     output_folder.mkdir(parents=True, exist_ok=True)
-    output_file_name: pathlib.Path = output_folder / compose_config_file_name
 
-    with open(module.compose_file, "rb") as f_source, open(output_file_name, "wb") as f_dest:
-        while True:
-            chunk = f_source.read(2048)
-            if not chunk:
-                break
-            f_dest.write(chunk)
-
-    _update_compose_release_version(compose_file_path=output_file_name, release_version=appslab_version)
+    for compose_file in pathlib.Path(module.path).glob(f"{compose_config_file_name_prefix}*.yaml"):
+        logger.info(f"Copying compose file {compose_file} for module {module.id}")
+        output_file: pathlib.Path = output_folder / compose_file.name
+        output_file.write_text(_stamp_release_version(compose_file.read_text(), release_version))
 
 
-def save_readme_file(module: ArduinoBrick, output_dir: str):
+def save_readme_file(module: ArduinoBrick, output_dir: str) -> None:
     """Save the readme file to the specified output directory."""
     if not module.readme_file:
         return
@@ -363,191 +423,97 @@ def save_readme_file(module: ArduinoBrick, output_dir: str):
     module_name = "/".join(module.id.split(":"))
     output_folder: pathlib.Path = pathlib.Path(output_dir) / module_name
     output_folder.mkdir(parents=True, exist_ok=True)
-    output_file_name: pathlib.Path = output_folder / main_readme_file_name
-
-    with open(module.readme_file, "rb") as f_source, open(output_file_name, "wb") as f_dest:
-        while True:
-            chunk = f_source.read(2048)
-            if not chunk:
-                break
-            f_dest.write(chunk)
+    shutil.copyfile(module.readme_file, output_folder / main_readme_file_name)
 
 
-def save_api_docs_files(output_dir: str):
-    """Save the API docs files to the specified output directory."""
-    shutil.copytree("docs/", output_dir, dirs_exist_ok=True)
-
-
-def save_services_files(services_folder: str, output_dir: str):
-    """Save the services files to the specified output directory."""
-    print(f"Saving services files from {services_folder} to {output_dir}...")
+def save_services_files(services_folder: str | None, output_dir: str, release_version: str) -> None:
+    """Copy the services folder to the output directory, stamping the release version into its compose files."""
     if not services_folder:
         return
+    print(f"Saving services files from {services_folder} to {output_dir}...")
     shutil.copytree(services_folder, output_dir, dirs_exist_ok=True)
+    for compose_file in pathlib.Path(output_dir).rglob(f"{service_compose_config_file_name_prefix}*.yaml"):
+        compose_file.write_text(_stamp_release_version(compose_file.read_text(), release_version))
 
 
-def save_examples_files(module: ArduinoBrick, output_dir: str):
-    """Save the examples files to the specified output directory."""
-    if not module.readme_file:
-        return
-
-    # We cannot save a folder containing the `:`, therefore we split and save it
-    # with parent folder. Example: `arduino/object_detection` instead of `arduino:object_detection`
-    module_name = "/".join(module.id.split(":"))
-    output_folder: pathlib.Path = pathlib.Path(output_dir) / module_name
-    input_folder: pathlib.Path = pathlib.Path(module.path) / examples_folder_name
-    if input_folder.is_dir():
-        shutil.copytree(input_folder, output_folder, dirs_exist_ok=True)
+def save_models_files(models_dir: str, output_dir: str, release_version: str) -> None:
+    """Copy the models-*.yaml files to the output directory, stamping the release version."""
+    model_files = glob.glob(os.path.join(models_dir, "models-*.yaml"))
+    if not model_files:
+        raise FileNotFoundError(f"No models-*.yaml files found in {models_dir}")
+    os.makedirs(output_dir, exist_ok=True)
+    for model_file in model_files:
+        content = pathlib.Path(model_file).read_text()
+        pathlib.Path(output_dir, os.path.basename(model_file)).write_text(_stamp_release_version(content, release_version))
 
 
-def library_provisioning(out_path: str = None, modules: Dict[str, List[ArduinoBrick]] = None, services_folder: str = None, buildtime: bool = False):
-    print(f"Provisioning compose files for app execution and bricks documentation. File: {out_path}")
-    try:
-        from arduino._version import __version__ as arduino_bricks_version
-    except ImportError:
-        logger.error("Error: AppLab version not found. 'appslab._version' module is not available.")
-        sys.exit(1)
+def save_pyright_rules(rules_file: str, output_dir: str) -> None:
+    """Copy the pyright rules file into the static assets, App Lab and the CI checks read it from the wheel."""
+    if not os.path.isfile(rules_file):
+        raise FileNotFoundError(f"{rules_file} not found, it is maintained at the repository root")
+    shutil.copy(rules_file, os.path.join(output_dir, os.path.basename(rules_file)))
 
+
+def save_api_docs_files(api_docs_dir: str, output_dir: str) -> None:
+    """Copy the generated API docs to the output directory."""
+    if not os.path.isdir(api_docs_dir):
+        raise FileNotFoundError(f"API docs directory {api_docs_dir} not found, generate it first")
+    shutil.copytree(api_docs_dir, output_dir, dirs_exist_ok=True)
+
+
+def save_bricks_list(modules: dict[str, list[ArduinoBrick]], output_paths: list[str]) -> None:
+    """Write the bricks list to every output path."""
+    bricks = [module.to_dict() for module_list in modules.values() for module in module_list]
+    content = yaml.dump({"bricks": bricks}, indent=2, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    for output_path in output_paths:
+        pathlib.Path(output_path).write_text(content)
+
+
+def library_provisioning(out_path: str, modules: dict[str, list[ArduinoBrick]], services_folder: str | None, release_version: str) -> None:
+    """Write the compose files, READMEs and services of the discovered bricks under out_path."""
+    print(f"Provisioning compose files into {out_path} for release version {release_version}")
     compose_output_dir = f"{out_path}/compose"
     services_output_dir = f"{out_path}/services/arduino"
     docs_output_dir = f"{out_path}/docs"
-    api_docs_output_dir = f"{out_path}/api-docs"
-    examples_output_dir = f"{out_path}/examples"
-    os.makedirs(compose_output_dir, exist_ok=True)
-    os.makedirs(services_output_dir, exist_ok=True)
-    os.makedirs(docs_output_dir, exist_ok=True)
-    os.makedirs(api_docs_output_dir, exist_ok=True)
-    os.makedirs(examples_output_dir, exist_ok=True)
+    for output_dir in (compose_output_dir, services_output_dir, docs_output_dir):
+        os.makedirs(output_dir, exist_ok=True)
 
-    for path, module_list in modules.items():
+    for module_list in modules.values():
         for module in module_list:
-            save_compose_file(module, compose_output_dir, arduino_bricks_version)
+            save_compose_file(module, compose_output_dir, release_version)
             save_readme_file(module, docs_output_dir)
-            save_examples_files(module, examples_output_dir)
 
-    # Save services files
-    save_services_files(services_folder, services_output_dir)
-
-    # Save API docs files
-    if buildtime:
-        print(f"Saving API docs files... buildtime: {buildtime}")
-        save_api_docs_files(api_docs_output_dir)
+    save_services_files(services_folder, services_output_dir, release_version)
 
 
-def release():
-    discovered_modules, services_folder = list_installed_packages_pkg_resources()
-
-    parser = argparse.ArgumentParser(description="Process AppLab modules release.")
+def release() -> None:
+    """Provision the static assets bundled into the wheel: bricks list, models files, compose files, READMEs, services, API docs and pyright rules."""
+    parser = argparse.ArgumentParser(description="Provision the static assets bundled into the Arduino App Bricks wheel.")
+    parser.add_argument("-d", "--static-dir", type=str, required=True, help="Static assets directory to populate.")
+    parser.add_argument("-m", "--models-dir", type=str, default="models", help="Directory holding the models-*.yaml files.")
+    parser.add_argument("-a", "--api-docs-dir", type=str, default="docs", help="Directory holding the generated API docs.")
+    parser.add_argument("-r", "--pyright-rules", type=str, default="pyright-rules.json", help="Pyright rules file to ship in the wheel.")
     parser.add_argument(
-        "-o",
-        "--output",
+        "-v",
+        "--version",
         type=str,
         default=None,
-        help="Optional output file path list. If not provided, the output will be printed to the console.",
+        help="Release version stamped into compose and models files. Defaults to BRICKS_RELEASE_VERSION, then to the installed library version.",
     )
-    parser.add_argument("-v", "--version", type=str, default=None, help="Release version.")
-    parser.add_argument("-d", "--dev", action="store_true", help="Development mode.")
-    parser.add_argument("-r", "--registry", type=str, default=None, help="Docker registry override.")
-
     args = parser.parse_args()
 
-    if args.version is None or args.version == "":
-        logger.error("Error: Release version is required.")
-        sys.exit(1)
-
-    registry = None
-    if args.registry is not None and args.registry != "":
-        registry = args.registry
-
-    arduino_bricks_version = args.version
-    update_ai_containers = False
-    if args.dev is not None and args.dev:
-        arduino_bricks_version = os.getenv("DEV_TAG_VERSION", "dev-latest")
-        logger.warning(f"Development mode enabled. Using '{arduino_bricks_version}' as the version.")
-        update_ai_containers = True
-
-    modules = []
-    for path, module_list in discovered_modules.items():
-        for module in module_list:
-            modules.append(module.to_dict())
-            # Update the compose file with the release version
-            if module.require_container:
-                print(f"Processing compose file {module.compose_file} for arduino bricks version {arduino_bricks_version}")
-                _update_compose_release_version(
-                    compose_file_path=module.compose_file,
-                    release_version=arduino_bricks_version,
-                    append_suffix=False,
-                    only_ai_containers=update_ai_containers,
-                    registry=registry,
-                )
-
-    # check if there are services files to update with the new version
-    if services_folder and os.path.isdir(services_folder):
-        print(f"Processing services files in {services_folder} for arduino bricks version {arduino_bricks_version}")
-        for entry in os.scandir(services_folder):
-            print(f"Checking {entry.path} for compose files to update...")
-            if not entry.is_dir():
-                continue
-            for sub_entry in os.scandir(entry.path):
-                if sub_entry.is_file() and sub_entry.name == service_compose_config_file_name:
-                    print(f"Found service compose file {sub_entry.path} | {sub_entry.name}. Updating...")
-                    _update_compose_release_version(
-                        compose_file_path=sub_entry.path,
-                        release_version=arduino_bricks_version,
-                        append_suffix=False,
-                        only_ai_containers=update_ai_containers,
-                        registry=registry,
-                    )
-
-    mod_structure = {
-        "bricks": modules,
-    }
-    mod_string = yaml.dump(mod_structure, indent=2, default_flow_style=False, sort_keys=False, allow_unicode=True)
-
-    if args.output and args.output != "":
-        for output_path in args.output.split(","):
-            with open(output_path.strip(), "w") as f:
-                f.write(mod_string)
-    else:
-        print(mod_string)
-
-
-def update_ai_container_references():
+    release_version = resolve_release_version(args.version)
     discovered_modules, services_folder = list_installed_packages_pkg_resources()
 
-    parser = argparse.ArgumentParser(description="Update AI container references.")
-    parser.add_argument("-v", "--version", type=str, default=None, help="Release version.")
-
-    parser.add_argument("-r", "--registry", type=str, default=None, help="Docker registry override.")
-
-    args = parser.parse_args()
-
-    if args.version is None or args.version == "":
-        logger.error("Error: Release version is required.")
-        sys.exit(1)
-
-    registry = None
-    if args.registry is not None and args.registry != "":
-        registry = args.registry
-
-    arduino_bricks_version = args.version
-
-    modules = []
-    for path, module_list in discovered_modules.items():
-        for module in module_list:
-            modules.append(module.to_dict())
-            # Update the compose file with the release version
-            if module.require_container:
-                _update_compose_release_version(
-                    compose_file_path=module.compose_file,
-                    release_version=arduino_bricks_version,
-                    append_suffix=False,
-                    only_ai_containers=True,
-                    registry=registry,
-                )
+    os.makedirs(args.static_dir, exist_ok=True)
+    save_bricks_list(discovered_modules, [os.path.join(args.static_dir, "bricks-list.yaml")])
+    save_models_files(args.models_dir, args.static_dir, release_version)
+    library_provisioning(args.static_dir, discovered_modules, services_folder, release_version)
+    save_api_docs_files(args.api_docs_dir, os.path.join(args.static_dir, "api-docs"))
+    save_pyright_rules(args.pyright_rules, args.static_dir)
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Process AppLab modules.")
 
     parser.add_argument("-p", "--provision-compose", action="store_true", help="Provision compose files for app execution.")
@@ -564,70 +530,44 @@ def main():
         help="Optional models output file path.",
     )
 
-    parser.add_argument("-b", "--buildtime", action="store_true", help="Buildtime execution.")
+    parser.add_argument(
+        "-v",
+        "--version",
+        type=str,
+        default=None,
+        help="Release version stamped into compose files. Defaults to BRICKS_RELEASE_VERSION, then to the installed library version.",
+    )
 
     args = parser.parse_args()
 
     discovered_modules, services_folder = list_installed_packages_pkg_resources()
 
-    modules = []
-    imported_modules = []
-    for path, module_list in discovered_modules.items():
-        for module in module_list:
-            if module.id in imported_modules:
-                continue
-            modules.append(module.to_dict())
-            imported_modules.append(module.id)
-
     if args.provision_compose:
-        composeout = args.output
-        if args.compose_output is not None and args.compose_output != "":
-            composeout = args.compose_output
-        # Provision compose files for app execution and bricks documentation
-        library_provisioning(composeout, discovered_modules, services_folder, args.buildtime)
-        if args.buildtime or len(args.output) > 0:
+        composeout = args.compose_output or args.output
+        library_provisioning(composeout, discovered_modules, services_folder, resolve_release_version(args.version))
+        if args.output:
             print("Compose provisioning completed.")
             sys.exit(0)
 
     # List bricks and build the output structures
     print(f"Provisioning bricks and model lists...")
-    mod_structure = {
-        "bricks": modules,
-    }
+    if args.output:
+        save_bricks_list(discovered_modules, [output_path.strip() for output_path in args.output.split(",")])
 
-    mod_string = yaml.dump(mod_structure, indent=2, default_flow_style=False, sort_keys=False, allow_unicode=True)
-
-    if args.output and args.output != "":
-        for output_path in args.output.split(","):
-            with open(output_path.strip(), "w") as f:
-                f.write(mod_string)
-
-    if args.model_output and args.model_output != "":
-        import inspect
-
-        logger_class = type(logger)
-        logger_file_path = inspect.getfile(logger_class)
-        model_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(logger_file_path))),
-            "app_bricks",
-            "static",
-            "models-list.yaml",
-        )
-        exists = os.path.exists(model_path)
-        if exists:
-            shutil.copy(model_path, args.model_output)
+    if args.model_output:
+        static_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app_bricks", "static")
+        model_files = glob.glob(os.path.join(static_path, "models-*.yaml"))
+        output_dir = os.path.dirname(args.model_output)
+        if model_files:
+            for model_path in model_files:
+                shutil.copy(model_path, os.path.join(output_dir, os.path.basename(model_path)))
             # Copy api-docs as well
-            api_docs_source = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(logger_file_path))),
-                "app_bricks",
-                "static",
-                "api-docs",
-            )
-            api_docs_destination = os.path.join(os.path.dirname(args.model_output), "api-docs")
+            api_docs_source = os.path.join(static_path, "api-docs")
+            api_docs_destination = os.path.join(output_dir, "api-docs")
             if os.path.exists(api_docs_source):
                 shutil.copytree(api_docs_source, api_docs_destination, dirs_exist_ok=True)
         else:
-            print(f"Model path: {model_path} does not exist. Skipping model copy.")
+            print(f"No models-*.yaml files found in {static_path}. Skipping model copy.")
 
 
 if __name__ == "__main__":

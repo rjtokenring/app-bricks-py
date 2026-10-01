@@ -1,0 +1,161 @@
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
+#
+# SPDX-License-Identifier: MPL-2.0
+
+ARG REGISTRY
+ARG BASE_IMAGE_VERSION=latest
+
+FROM ghcr.io/astral-sh/uv:0.12.21@sha256:a7aed3216253ee804de3e2d8afa5073baa1a177335345d43845cd4165e43b711 AS uv
+
+FROM python:3.13-slim-trixie@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285 AS builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG OPENCV_WHL_URL=https://github.com/arduino/app-bricks-py/releases/download/opencv%2F4.13.0.92-20260610/opencv_python_headless-4.13.0+1ddb20b-cp313-cp313-linux_aarch64.whl
+ARG OPENCV_WHL_DIGEST=sha256:8d5e8319df040b93a07c91155afea515e3629fcb55510d4eee4716fc165b9c0a
+ARG PYGOBJECT_VERSION=3.58.0
+
+COPY ./pyproject.toml ./uv.lock /tmp/deps/
+# uv stays in the image, run.sh installs the user's packages with it at runtime
+COPY --from=uv /uv /usr/local/bin/uv
+
+# The wheel stays in the image, run.sh serves it to the user's installs through UV_FIND_LINKS
+ADD --chmod=644 --checksum=${OPENCV_WHL_DIGEST} ${OPENCV_WHL_URL} /opt/wheels/
+
+RUN set -ex; \
+    apt-get update -y; \
+    # Install build dependencies
+    apt-get install -y --no-install-recommends --no-install-suggests build-essential ca-certificates binutils; \
+    # Install dependencies for building ALSA
+    apt-get install -y --no-install-recommends --no-install-suggests libasound2-dev libalsaplayer-dev portaudio19-dev libzbar0; \
+    # Install build dependencies for building PyGObject
+    apt-get install -y --no-install-recommends --no-install-suggests pkg-config libgirepository-2.0-dev libglib2.0-dev; \
+    # Install the locked Python dependencies, then the prefetched OpenCV wheel
+    uv export --frozen --project /tmp/deps | uv pip install --system --no-cache-dir --require-hashes -r -; \
+    uv pip install --system --no-cache-dir /opt/wheels/*.whl; \
+    printf 'opencv-python-headless==%s\n' "$(python -c 'from importlib.metadata import version; print(version("opencv-python-headless"))')" > /etc/uv-constraints.txt; \
+    rm -rf /tmp/deps; \
+    # Build PyGObject without cairo support
+    uv pip install --system --no-cache-dir meson-python ninja; \
+    uv pip install --system --no-cache-dir --no-build-isolation --no-deps -C setup-args="-Dpycairo=disabled" "PyGObject==${PYGOBJECT_VERSION}"; \
+    uv pip uninstall --system meson-python meson ninja pyproject-metadata packaging; \
+    # Strip debug symbols, tests and remove unneeded packages to reduce size
+    find /usr/local/lib/python3.13/site-packages -type f -name "*.so" -exec strip -s {} +; \
+    find /usr/local/lib/python3.13/site-packages -type f -name "*.so.*" -exec strip -s {} +; \
+    find /usr/local/lib/python3.13/site-packages -type d -name "tests" -exec rm -r {} +; \
+    apt remove -y build-essential ca-certificates binutils libasound2-dev libalsaplayer-dev portaudio19-dev pkg-config libgirepository-2.0-dev libglib2.0-dev; \
+    apt-get clean; \
+    apt-get autoclean -y; \
+    apt-get autoremove -y
+
+
+FROM ${REGISTRY}app-bricks/python-slim:${BASE_IMAGE_VERSION} AS production
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG LIBCAMERA_DEB_URL=https://github.com/arduino/app-bricks-py/releases/download/libcamera%2F0.7.1-qcom4/libcamera0.7_0.7.1-1.bpo13+1qcom4_arm64.deb
+ARG LIBCAMERA_DEB_DIGEST=sha256:958b7fb3d1a851542fddd5f54a259c685f1301945a3b10bce4fa15cf7886ef0f
+ARG LIBCAMERA_IPA_DEB_URL=https://github.com/arduino/app-bricks-py/releases/download/libcamera%2F0.7.1-qcom4/libcamera-ipa_0.7.1-1.bpo13+1qcom4_arm64.deb
+ARG LIBCAMERA_IPA_DEB_DIGEST=sha256:04ed476cd08acc897297f47b2a35e13fc71e459156b69be0bf7364a80bfac283
+ARG GSTREAMER_LIBCAMERA_DEB_URL=https://github.com/arduino/app-bricks-py/releases/download/libcamera%2F0.7.1-qcom4/gstreamer1.0-libcamera_0.7.1-1.bpo13+1qcom4_arm64.deb
+ARG GSTREAMER_LIBCAMERA_DEB_DIGEST=sha256:c5c38c5ddd9689cc4dd07cc433c85c325c408a67e631499679e67a616099e4f1
+ARG GSTREAMER_QTIQMMFSRC_DEB_URL=https://github.com/robgee86/app-bricks-py/releases/download/qtiqmmfsrc%2F1.8.1/qtiqmmfsrc-1.8.1.deb
+ARG GSTREAMER_QTIQMMFSRC_DEB_DIGEST=sha256:b0b764a2f7ebf369de5cc9827c2952397d2ead757de7bee3f2c9c2f468d714a9
+ARG GSTREAMER_LIBGSTREAMER_PLUGINS_BASE_DEB_URL=https://github.com/robgee86/app-bricks-py/releases/download/qtiqmmfsrc%2F1.8.1/libgstreamer-plugins-base1.0-0_1.26.2-1+deb13u1_arm64.deb
+ARG GSTREAMER_LIBGSTREAMER_PLUGINS_BASE_DEB_DIGEST=sha256:a6e1aaadbac810957f5c4ce981d955c686734e85c23cbb5b89ddd33299f920c6
+
+ADD --checksum=${LIBCAMERA_DEB_DIGEST} ${LIBCAMERA_DEB_URL} /tmp/libcamera0.7.deb
+ADD --checksum=${LIBCAMERA_IPA_DEB_DIGEST} ${LIBCAMERA_IPA_DEB_URL} /tmp/libcamera-ipa.deb
+ADD --checksum=${GSTREAMER_LIBCAMERA_DEB_DIGEST} ${GSTREAMER_LIBCAMERA_DEB_URL} /tmp/gstreamer1.0-libcamera.deb
+ADD --checksum=${GSTREAMER_QTIQMMFSRC_DEB_DIGEST} ${GSTREAMER_QTIQMMFSRC_DEB_URL} /tmp/qtiqmmfsrc.deb
+ADD --checksum=${GSTREAMER_LIBGSTREAMER_PLUGINS_BASE_DEB_DIGEST} ${GSTREAMER_LIBGSTREAMER_PLUGINS_BASE_DEB_URL} /tmp/libgstreamer-plugins-base.deb
+ADD --checksum=sha256:c53aceea2dcf5b4098099c0c4d0a061d17e178a049317b42a422b1a9f7f8eb59 https://raw.githubusercontent.com/googlefonts/opensans/bd7e37632246368c60fdcbd374dbf9bad11969b6/fonts/ttf/OpenSans-Regular.ttf /home/app/.fonts/OpenSans.ttf
+
+# Copy the installed dependencies from the 'builder' stage
+COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+COPY --from=builder /etc/uv-constraints.txt /etc/uv-constraints.txt
+COPY --from=builder /opt/wheels /opt/wheels
+
+# User installs are pinned to the shipped OpenCV build and can fetch it from the image, PyPI does not have it
+ENV UV_CONSTRAINT=/etc/uv-constraints.txt
+ENV PIP_CONSTRAINT=/etc/uv-constraints.txt
+ENV UV_FIND_LINKS=/opt/wheels
+ENV PIP_FIND_LINKS=/opt/wheels
+
+RUN set -ex; \
+    # The Qualcomm FastRPC libraries live in contrib, and for trixie only in
+    # backports: enable just that component, for this build only.
+    printf '%s\n' 'Types: deb' 'URIs: http://deb.debian.org/debian' \
+        'Suites: trixie-backports' 'Components: contrib' \
+        'Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp' \
+        > /etc/apt/sources.list.d/fastrpc-backports.sources; \
+    apt-get update -y; \
+    apt-get upgrade -y; \
+    # Install dependencies for running ALSA
+    apt-get install -y --no-install-recommends --no-install-suggests alsa-utils libportaudiocpp0; \
+    # Install dependencies for pipewire
+    apt-get install -y --no-install-recommends --no-install-suggests pipewire-alsa; \
+    # Install dependencies for running OpenCV with Gstreamer backend
+    apt-get install -y --no-install-recommends --no-install-suggests libavcodec61 libavformat61 libavutil59 libswscale8; \
+    apt-get install -y --no-install-recommends --no-install-suggests libjpeg62-turbo libtiff6 libpng16-16t64 libwebp7 libwebpdecoder3 libwebpdemux2 libwebpmux3 libopenblas0 liblapacke; \
+    apt-get install -y --no-install-recommends --no-install-suggests libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 gstreamer1.0-plugins-good gstreamer1.0-plugins-base-apps; \
+    # Install dependencies for running CSI cameras (libcamera, gstreamer introspection, qtiqmmfsrc)
+    apt-get install -y --no-install-recommends --no-install-suggests libgirepository-2.0-0 gir1.2-glib-2.0 gir1.2-gstreamer-1.0 libpisp-common libboost-filesystem1.83.0 libboost-log1.83.0 libboost-thread1.83.0 libpisp1 libegl1 libgles2 libyaml-0-2 liblttng-ust1 libdw1t64 libyuv0; \
+    dpkg -i /tmp/libcamera0.7.deb /tmp/libcamera-ipa.deb /tmp/gstreamer1.0-libcamera.deb; \
+    apt-get install -y --no-install-recommends --no-install-suggests --allow-downgrades /tmp/qtiqmmfsrc.deb /tmp/libgstreamer-plugins-base.deb; \
+    rm /tmp/libcamera0.7.deb /tmp/libcamera-ipa.deb /tmp/gstreamer1.0-libcamera.deb /tmp/qtiqmmfsrc.deb /tmp/libgstreamer-plugins-base.deb; \
+    # Install other runtime dependencies
+    apt-get install -y --no-install-recommends --no-install-suggests libglib2.0-0 inotify-tools libzbar0; \
+    # Install the FastRPC client libraries used to reach the Hexagon DSP:
+    # libcdsprpc.so.1, libadsprpc.so.1, libsdsprpc.so.1 and their listeners.
+    # This Debian build keeps the upstream paths: it reads the machine name from
+    # /sys/firmware/devicetree/base/model (no /run/device-model bind mount) and
+    # the DSP config from /usr/share/hexagon-dsp/conf.d, not /usr/share/qcom.
+    apt-get install -y --no-install-recommends --no-install-suggests -t trixie-backports libfastrpc1; \
+    rm /etc/apt/sources.list.d/fastrpc-backports.sources; \
+    # libfastrpc1 ships only the SONAME symlinks: add the unversioned ones,
+    # which live in libfastrpc-dev, so dlopen("libcdsprpc.so") resolves too.
+    for so in /usr/lib/aarch64-linux-gnu/lib*dsp*.so.1; do ln -sf "${so##*/}" "${so%.so.1}.so"; done; \
+    apt-get autoclean -y; \
+    apt-get autoremove -y; \
+    dpkg -r --force-depends libegl-mesa0 mesa-libgallium libllvm19; \
+    apt-get dist-clean; \
+    # cleanup unnecessary files to reduce image size
+    rm -rf /tmp/* /var/tmp/*; \
+    rm -rf /var/lib/apt/lists/*; \
+    rm -fr /var/cache/apt/archives/*.deb \
+        /var/cache/apt/archives/partial/*.deb \
+        /usr/share/man/* \
+        /usr/share/locale/* \
+        /var/cache/debconf/* \
+        /var/lib/dpkg/info/* \
+        /var/cache/apt/*.bin; \
+    find /usr/share/doc -type f ! -name 'copyright' -delete; \
+    find /usr/share/doc -type d -empty -delete; \
+    # precompile python files to .pyc to speed up startup time
+    python -m compileall /usr/local/bin; \
+    python -m compileall /usr/local/lib; \
+    # HACK: Remove VPX plugin
+    rm -f /usr/lib/aarch64-linux-gnu/gstreamer-1.0/libgstvpx.so; \
+    # Ensure libvpx and libx265 are not present
+    dpkg -r --force-depends libx265-215 libvpx9; \
+    ldconfig
+
+COPY conf/libcamera.yaml /etc/libcamera/configuration.yaml
+
+# Baked fastrpc DSP path config for all supported devices. The startup script
+# below copies it into /usr/share/hexagon-dsp/conf.d as
+# 00-arduino-dsp-binaries.yaml: the fastrpc parser keeps the last alphabetical
+# match, so this file sorts first and acts as a fallback that any yaml provided
+# by the host overrides.
+COPY conf/hexagon-dsp-binaries.yaml /etc/fastrpc/hexagon-dsp-binaries.yaml
+
+# Startup provisioning of the merged DSP view: it ships here, next to the
+# fastrpc libraries and the baked yaml it depends on. Derived images invoke it
+# from their entrypoint (python-apps-base does it in run.sh).
+COPY ./scripts/provision-fastrpc-dsp.sh /
+
+# Pre-create the merged DSP view root, owned by arduino so images running as
+# the non-root user can populate it at startup.
+RUN chmod 755 /provision-fastrpc-dsp.sh; \
+    mkdir -p /usr/share/hexagon-dsp/conf.d; \
+    chown -R arduino:arduino /usr/share/hexagon-dsp

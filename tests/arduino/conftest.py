@@ -1,9 +1,9 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
 """
-Pytest configuration for tests relying on microphone and speaker.
+Pytest configuration shared by the whole suite.
 
 This file mocks alsaaudio so tests can run on systems without the library installed
 (e.g., macOS or Windows which doesn't have ALSA) or without any specific hardware.
@@ -11,8 +11,7 @@ This file mocks alsaaudio so tests can run on systems without the library instal
 
 import pytest
 import sys
-from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -282,55 +281,8 @@ def pcm_registry():
     yield _pcm_registry
 
 
-@pytest.fixture
-def mock_alsa_usb_mics():
-    """
-    Fixture that mocks ALSA USB device detection for USB microphone tests.
+# Importing arduino.app_utils fails without a router: fake a successful connect for the whole suite.
+# Kept out of tests/, where a conftest would put the test packages ahead of arduino.* on sys.path.
+from arduino.router_bridge import Bridge
 
-    This fixture patches Path.exists and Path.resolve to simulate a USB audio device
-    being present on the system. Use this fixture in tests that need to work with
-    USB microphones.
-
-    Example:
-        def test_usb_microphone(mock_alsa_usb_mics):
-            mic = Microphone()
-            mic.start()
-            # ... test operations
-    """
-    from unittest.mock import patch
-
-    # Mock USB device path resolution
-    usb_device_path = "/sys/devices/platform/soc@0/4ef8800.usb/4e00000.usb/xhci-hcd.2.auto/usb1/1-1/1-1.3/1-1.3:1.0/sound/card0/pcmC0D0c"
-
-    with (
-        patch("arduino.app_peripherals.microphone.alsa_microphone.Path.exists", return_value=True) as mock_exists,
-        patch("arduino.app_peripherals.microphone.alsa_microphone.Path.resolve", return_value=Path(usb_device_path)) as mock_resolve,
-    ):
-        yield {"mock_exists": mock_exists, "mock_resolve": mock_resolve, "usb_device_path": usb_device_path}
-
-
-@pytest.fixture
-def mock_alsa_usb_speakers():
-    """
-    Fixture that mocks ALSA USB device detection for USB speaker tests.
-
-    This fixture patches Path.exists and Path.resolve to simulate a USB audio device
-    being present on the system. Use this fixture in tests that need to work with
-    USB speakers.
-
-    Example:
-        def test_usb_speaker(mock_alsa_usb_speakers):
-            spkr = Speaker()
-            spkr.start()
-            # ... test operations
-    """
-    from unittest.mock import patch
-
-    # Mock USB device path resolution
-    usb_device_path = "/sys/devices/platform/soc@0/4ef8800.usb/4e00000.usb/xhci-hcd.2.auto/usb1/1-1/1-1.3/1-1.3:1.0/sound/card0/pcmC0D0p"
-
-    with (
-        patch("arduino.app_peripherals.speaker.alsa_speaker.Path.exists", return_value=True) as mock_exists,
-        patch("arduino.app_peripherals.speaker.alsa_speaker.Path.resolve", return_value=Path(usb_device_path)) as mock_resolve,
-    ):
-        yield {"mock_exists": mock_exists, "mock_resolve": mock_resolve, "usb_device_path": usb_device_path}
+patch.object(Bridge, "connect", return_value=True).start()

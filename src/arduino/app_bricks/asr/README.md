@@ -1,10 +1,121 @@
 # Automatic Speech Recognition Brick
 
-The `AutomaticSpeechRecognition` brick provides on-device automatic speech recognition (ASR) capabilities for audio streams and files. It offers a high-level interface for transcribing audio using a local model, with support for both real-time and batch processing.
+The ASR brick provides on-device automatic speech recognition (ASR) capabilities for audio streams and files. It offers a high-level interface for transcribing audio using a local model, with support for both real-time microphone capture (`AutomaticSpeechRecognition`) and in-memory audio (`WAVAutomaticSpeechRecognition`). With the possibility to use multiple languages.
 
-## LocalASR Class Features
+## Features
 
 - **Offline Operation:** All transcriptions are performed locally, ensuring data privacy and eliminating network dependencies.
-- **Multi Language Support:** Supports the transcription of spoken multiple languages.
-- **Audio Input Formats**: Designed to work with the Microphone peripheral, WAV and PCM audio.
-- **Concurrency Control**: Limits the number of simultaneous transcription sessions to avoid resource exhaustion.
+- **Multi-Language Support:** Supports the transcription of multiple spoken languages. Language is auto-detected by default and can be overridden with the `language` constructor argument (e.g. `"en"`).
+- **Speech Translation:** With `translate=True` the brick returns English text instead of a transcription in the spoken language. Valid only for models that support translation, such as the Whisper models this brick runs, including the default `whisper-small-quantized`. The ASR model itself does the translating, so it needs no additional model and no network. English is the only possible target language.
+- **Flexible Audio Input:** `AutomaticSpeechRecognition` accepts a `BaseMicrophone` instance or `None` to use a default `Microphone()`. `WAVAutomaticSpeechRecognition` accepts a `bytes` WAV container or a raw `np.ndarray` of PCM samples (16 kHz mono).
+- **Single-Session Semantics:** Each instance handles one transcription session at a time. For concurrent transcriptions on different microphones, create multiple `AutomaticSpeechRecognition` instances.
+
+## Prerequisites
+
+Before using the ASR brick, ensure you have the following components:
+
+- USB microphone
+OR
+- WAV or PCM audio file
+
+Tips:
+- Use a USB-C® Hub with USB-A connectors to support commercial USB cameras with microphone. Note that the USB-C® Hub must have Power Delivery Support (PD).
+- Microphones included in USB cameras/webcams are generally supported
+
+## Code Example and Usage
+
+This example transcribes audio captured from the microphone for 5 seconds at a time. The brick automatically uses the default microphone and handles its start and stop functions.
+
+```python
+from arduino.app_utils import App
+from arduino.app_bricks.asr import AutomaticSpeechRecognition
+
+asr = AutomaticSpeechRecognition()
+
+print("Please start speaking for transcription...")
+
+
+def transcribe():
+    text = asr.transcribe(duration=5)
+    print(f"Transcription: {text}")
+
+
+App.run(user_loop=transcribe)
+```
+
+This example transcribes audio from a WAV file.
+
+```python
+from arduino.app_utils import App
+from arduino.app_bricks.asr import WAVAutomaticSpeechRecognition
+
+with open("recording_01.wav", "rb") as wav_file:
+    audio_bytes = wav_file.read()
+    asr = WAVAutomaticSpeechRecognition(audio_bytes)
+    App.start_brick(asr)
+    text = asr.transcribe()
+    print(f"Transcription: {text}")
+
+App.run()
+```
+
+This example translates speech into English instead of transcribing it. The spoken
+language is declared so the model does not have to detect it.
+
+```python
+from arduino.app_utils import App
+from arduino.app_bricks.asr import AutomaticSpeechRecognition
+
+asr = AutomaticSpeechRecognition(language="it", translate=True)
+
+
+def translate():
+    text = asr.transcribe(duration=5)
+    print(f"English: {text}")
+
+
+App.run(user_loop=translate)
+```
+
+`translate` is also a plain attribute, so the same instance can switch between
+transcribing and translating. The new value applies to the next session, not to a
+session that is already running.
+
+```python
+asr.translate = True
+```
+
+## Methods
+
+Both classes share the same transcription API (durations/timeouts apply to the microphone class; the WAV class always consumes the whole buffer):
+
+- `transcribe(duration=60) -> str`: transcribes audio and returns the final text (`WAVAutomaticSpeechRecognition.transcribe()` takes no arguments).
+- `transcribe_stream(duration=0) -> TranscriptionStream[ASREvent]`: yields intermediate transcription events; use it in a `with` block.
+- `transcribe_sentence(timeout=0) -> str`: transcribes until the first complete sentence is detected.
+- `transcribe_sentence_stream(timeout=0) -> TranscriptionStream[ASREvent]`: streams events until the first complete sentence.
+- `transcribe_until_cancelled() -> TranscriptionStream[ASREvent]`: streams events until `cancel()` is called.
+- `cancel()`: cancels the active transcription session, if any.
+- `is_transcribing() -> bool`: returns whether a session is currently active.
+
+## Constructor Arguments
+
+Both classes accept these, on top of their own audio source (`mic` / `wav`):
+
+- `language: str | None = None`: ISO 639-1 code of the spoken language (e.g. `"it"`). `None` lets the model detect it.
+- `translate: bool = False`: return English instead of the spoken language. Valid only for models that support translation. The Whisper models this brick runs, including the default `whisper-small-quantized`, support it; their translate task always targets English, from any of their supported source languages.
+
+Both are exposed as attributes of the same name and can be reassigned at runtime. A
+change takes effect on the next transcription session.
+
+## Errors
+
+- `ASRBusyError`: raised if you call `transcribe()` / `transcribe_stream()` while the instance already has a session running. A session stopped with `cancel()` does not count: the new one waits for it to close. Fix by cancelling or awaiting the current session, or by using a separate instance.
+- `ASRServiceBusyError`: raised when the inference server rejects session creation because it is currently serving another client. The caller decides whether to retry.
+- `ASRUnavailableError`: raised when the inference service is unreachable (container down, network error) or the WebSocket connection drops mid-session. The caller decides whether to retry.
+- `ASRError`: base class for all of the above.
+
+## Source Ownership
+
+- When `mic` is `None`, `AutomaticSpeechRecognition` constructs a default `Microphone()` and manages its lifecycle through `asr.start()` / `asr.stop()` (called automatically by `App.run()`).
+- When `mic` is a `BaseMicrophone` you pass in, **you** own its lifecycle — call `mic.start()` before transcribing and `mic.stop()` when done.
+- In-memory sources (`bytes`, `np.ndarray` passed to `WAVAutomaticSpeechRecognition`) have no device lifecycle.

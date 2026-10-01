@@ -1,11 +1,13 @@
-# SPDX-FileCopyrightText: Copyright (C) ARDUINO SRL (http://www.arduino.cc)
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
 #
 # SPDX-License-Identifier: MPL-2.0
 
+import fcntl
 import math
 import os
+import struct
 import time
-from typing import Literal, Optional
+from typing import Literal
 import cv2
 import numpy as np
 from collections.abc import Callable
@@ -16,6 +18,10 @@ from .camera import BaseCamera
 from .errors import CameraOpenError, CameraReadError
 
 logger = Logger("V4LCamera")
+
+_VIDIOC_QUERYCAP = 0x80685600  # _IOR('V', 0, struct v4l2_capability)
+_V4L2_CAP_VIDEO_CAPTURE = 0x00000001
+_V4L2_CAP_DEVICE_CAPS = 0x80000000
 
 
 class V4LCamera(BaseCamera):
@@ -30,22 +36,25 @@ class V4LCamera(BaseCamera):
         device: str | int = 0,
         resolution: tuple[int, int] = (640, 480),
         fps: int = 10,
-        adjustments: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+        adjustments: Callable[[np.ndarray], np.ndarray] | None = None,
         auto_reconnect: bool = True,
         codec: Literal["", "YUVY", "MJPG", "H264"] = "",
-    ):
+    ) -> None:
         """
         Initialize V4L camera.
 
         Args:
-            device: Camera identifier - can be:
-                   - int: Camera index (e.g., 0, 1)
-                   - str: Camera index as string or device path
-            resolution (tuple, optional): Resolution as (width, height). None uses default resolution.
-            fps (int, optional): Frames per second to capture from the camera. Default: 10.
+            device: Camera identifier in the form of either:
+                - int: Camera ordinal index (e.g., 0, 1)
+                - str: Camera ordinal index as string (e.g., "0", "1")
+                - str: Camera device path (e.g., "/dev/video0", "/dev/v4l/by-id/...",
+                    "/dev/v4l/by-path/...")
+                Default: 0 (first available USB camera).
+            resolution (tuple[int, int]): Resolution as (width, height). None uses default resolution.
+            fps (int): Frames per second to capture from the camera. Default: 10.
             adjustments (callable, optional): Function or function pipeline to adjust frames that takes
                 a numpy array and returns a numpy array. Default: None
-            auto_reconnect (bool, optional): Enable automatic reconnection on failure. Default: True.
+            auto_reconnect (bool): Enable automatic reconnection on failure. Default: True.
             codec (str, optional): Video codec to use (FourCC). Options: "YUVY", "MJPG", "H264".
                 Default: "" (auto).
         """
@@ -54,7 +63,7 @@ class V4LCamera(BaseCamera):
         self.codec = codec
 
         self.v4l_path = self._resolve_stable_path(device)
-        self.name = self._resolve_name(self.v4l_path)  # Override parent name with a human-readable name
+        self.name = f"usb:{self._resolve_name(self.v4l_path)}"  # Override parent name with a human-readable name
         self.logger = logger
 
         self._cap = None
@@ -69,22 +78,67 @@ class V4LCamera(BaseCamera):
         Returns:
             list[int]: List of USB camera indices.
         """
-        indices: list[int] = []
+        return [index for index, _ in V4LCamera._scan_stable_links()]
+
+    @staticmethod
+    def _list_stable_paths() -> list[str]:
+        """
+        Return the stable /dev/v4l/by-id links of the available USB cameras,
+        ordered by their video device index.
+
+        Returns:
+            list[str]: List of stable USB camera paths.
+        """
+        return [path for _, path in V4LCamera._scan_stable_links()]
+
+    @staticmethod
+    def _scan_stable_links() -> list[tuple[int, str]]:
+        """Scan /dev/v4l/by-id and return (video index, stable link) pairs of capture devices, sorted by index."""
+        if not os.path.exists("/dev/v4l/by-id/"):
+            return []
+
+        links: list[tuple[int, str]] = []
         try:
-            devices = [dev for dev in os.listdir("/dev/v4l/by-id/")]
-            for dev in devices:
+            for dev in os.listdir("/dev/v4l/by-id/"):
                 dev_path = os.path.join("/dev/v4l/by-id", dev)
                 target = os.path.realpath(dev_path)
                 video_basename = os.path.basename(target)
-                if video_basename.startswith("video"):
+                if video_basename.startswith("video") and V4LCamera._supports_video_capture(target):
                     index = int(video_basename.removeprefix("video"))
-                    indices.append(index)
+                    links.append((index, dev_path))
 
         except Exception as e:
             logger.error(f"Error listing available cameras: {e}")
 
-        indices.sort()
-        return indices
+        links.sort()
+        return links
+
+    @staticmethod
+    def _supports_video_capture(device_path: str) -> bool:
+        """
+        Tell whether a V4L device node supports video capture.
+
+        Cameras also expose non-capture nodes (e.g. UVC metadata) under
+        /dev/v4l/by-id, which must not be listed as cameras.
+        """
+        try:
+            fd = os.open(device_path, os.O_RDWR | os.O_NONBLOCK)
+        except OSError as e:
+            logger.debug(f"Cannot open {device_path} to query its capabilities: {e}")
+            return False
+        try:
+            caps = bytearray(104)  # struct v4l2_capability
+            fcntl.ioctl(fd, _VIDIOC_QUERYCAP, caps)
+        except OSError as e:
+            logger.debug(f"Cannot query {device_path} capabilities: {e}")
+            return False
+        finally:
+            os.close(fd)
+
+        capabilities, device_caps = struct.unpack_from("<II", caps, 84)
+        if capabilities & _V4L2_CAP_DEVICE_CAPS:
+            return bool(device_caps & _V4L2_CAP_VIDEO_CAPTURE)
+        return bool(capabilities & _V4L2_CAP_VIDEO_CAPTURE)
 
     def _resolve_stable_path(self, device: str | int) -> str:
         """
@@ -165,7 +219,7 @@ class V4LCamera(BaseCamera):
         try:
             sysfs_path = f"/sys/class/video4linux/{video_basename}/name"
             if os.path.exists(sysfs_path):
-                with open(sysfs_path, "r", encoding="utf-8", errors="ignore") as f:
+                with open(sysfs_path, encoding="utf-8", errors="ignore") as f:
                     name = f.read().strip()
                     if name:
                         return name
@@ -188,7 +242,7 @@ class V4LCamera(BaseCamera):
             raise RuntimeError(f"No device found at {self.v4l_path}")
 
         try:
-            self._cap = cv2.VideoCapture(self.v4l_path)
+            self._cap = cv2.VideoCapture(self.v4l_path, cv2.CAP_V4L2)
             if not self._cap.isOpened():
                 raise RuntimeError(f"Failed to open camera {self.name}")
 
@@ -196,7 +250,7 @@ class V4LCamera(BaseCamera):
 
             if self.codec:
 
-                def fourcc_to_str(fourcc_int):
+                def fourcc_to_str(fourcc_int: float) -> str:
                     return "".join([chr((int(fourcc_int) >> 8 * i) & 0xFF) for i in range(4)])
 
                 self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.codec))
@@ -227,9 +281,11 @@ class V4LCamera(BaseCamera):
                     logger.warning(f"Camera {self.name} returned invalid FPS value: {configured_fps}. Cannot verify FPS setting.")
                 else:
                     actual_fps = int(configured_fps)
-                    if actual_fps != self.fps:
+                    if actual_fps < self.fps:
                         logger.warning(f"Camera {self.name} FPS set to {actual_fps} instead of requested {self.fps}")
                         self.fps = actual_fps
+                    elif actual_fps > self.fps:
+                        logger.info(f"Camera {self.name} driver runs at {actual_fps} FPS, throttling to requested {self.fps} FPS")
 
             # Verify camera with a test read
             ret, frame = self._cap.read()
