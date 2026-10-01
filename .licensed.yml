@@ -93,6 +93,15 @@ apps:
     venv:
       project: containers/ai/llamacpp-npu-runner
 
+  - name: image-segmentation-runner
+    source_path: .
+    sources:
+      pip: true
+    python:
+      virtual_env_dir: "/venvs/image-segmentation-runner"
+    venv:
+      project: containers/ai/image-segmentation-runner
+
 stale_records_action: error
 
 ignored:

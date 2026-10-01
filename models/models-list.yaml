@@ -1550,6 +1550,21 @@ models:
     deployment:
       handler: "ai-hub-handler"
       pre-loaded: true
+ - image-segmentation:
+    name : "MediaPipe Selfie Segmentation"
+    description: >-
+      MediaPipe Selfie Segmentation separates the people in a frame from the background,
+      producing a per-pixel person confidence mask in real time.
+    bricks:
+      - id: "arduino:image_segmentation"
+    metadata:
+      model_size_mb: 1
+      source: "qualcomm-ai-hub"
+      source-model-id: "mediapipe_selfie"
+      source-model-url: "https://aihub.qualcomm.com/models/mediapipe_selfie"
+    deployment:
+      handler: "ai-hub-handler"
+      pre-loaded: true
  - whisper-small-quantized:
     name : "Whisper Small (quantized)"
     description: >-

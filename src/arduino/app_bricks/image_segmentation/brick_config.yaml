@@ -1,11 +1,14 @@
 id: arduino:image_segmentation
 name: Image Segmentation
 description: |
-  This image segmentation brick utilizes a pre-trained model to analyze video streams from a camera.
-  The output is a video stream featuring segmented objects as overlay, with the added capability to
-  trigger actions based on these detections.
+  This image segmentation brick analyzes a camera video stream and separates the people in view
+  from the background, pixel by pixel. The output is a video stream with the background covered
+  by a color overlay, with the added capability to trigger actions based on people presence,
+  the area they cover and their bounding box.
 category: video
-requires_container: true
+ai_frameworks_compatibility:
+  - qnn
+model: image-segmentation
 supported_boards: ["ventunoq"]
 required_devices:
   - camera

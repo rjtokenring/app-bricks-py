@@ -134,6 +134,7 @@ group "default" {
     "aihub-models-runner",
     "gesture-recognition-runner",
     "pose-estimation-runner",
+    "image-segmentation-runner",
     "llamacpp-npu-runner",
     "ei-models-runner",
     "ei-qnn-models-runner",
@@ -231,6 +232,15 @@ target "pose-estimation-runner" {
   tags       = image_tags("pose-estimation-runner")
   cache-from = cache_from("pose-estimation-runner")
   cache-to   = cache_to("pose-estimation-runner")
+  contexts   = parent_context("aihub-models-runner")
+}
+
+target "image-segmentation-runner" {
+  inherits   = ["_downstream"]
+  context    = "containers/ai/image-segmentation-runner"
+  tags       = image_tags("image-segmentation-runner")
+  cache-from = cache_from("image-segmentation-runner")
+  cache-to   = cache_to("image-segmentation-runner")
   contexts   = parent_context("aihub-models-runner")
 }
 

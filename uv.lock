@@ -247,6 +247,10 @@ dev = [
 folderwatcher = [
     { name = "watchdog" },
 ]
+image-segmentation = [
+    { name = "numpy" },
+    { name = "websockets" },
+]
 mcp-client = [
     { name = "langchain-mcp-adapters" },
     { name = "mcp" },
@@ -291,6 +295,7 @@ requires-dist = [
     { name = "arduino-app-bricks", extras = ["cloud-llm"], marker = "extra == 'all'" },
     { name = "arduino-app-bricks", extras = ["dbstorage-influx"], marker = "extra == 'all'" },
     { name = "arduino-app-bricks", extras = ["folderwatcher"], marker = "extra == 'all'" },
+    { name = "arduino-app-bricks", extras = ["image-segmentation"], marker = "extra == 'all'" },
     { name = "arduino-app-bricks", extras = ["mcp-client"], marker = "extra == 'all'" },
     { name = "arduino-app-bricks", extras = ["microphone"], marker = "extra == 'all'" },
     { name = "arduino-app-bricks", extras = ["mood-detector"], marker = "extra == 'all'" },
@@ -319,6 +324,7 @@ requires-dist = [
     { name = "mcp", marker = "extra == 'mcp-client'", specifier = "==1.29.0" },
     { name = "msgpack" },
     { name = "nltk", marker = "extra == 'mood-detector'" },
+    { name = "numpy", marker = "extra == 'image-segmentation'" },
     { name = "numpy", marker = "extra == 'microphone'" },
     { name = "numpy", marker = "extra == 'pose-estimation'" },
     { name = "opencv-python-headless", marker = "extra == 'camera'", specifier = ">=4.13,<4.14" },
@@ -337,10 +343,11 @@ requires-dist = [
     { name = "watchdog", marker = "extra == 'folderwatcher'", specifier = ">=6.0.0" },
     { name = "websocket-client", marker = "extra == 'cloud-asr'" },
     { name = "websocket-client", marker = "extra == 'dev'" },
+    { name = "websockets", marker = "extra == 'image-segmentation'" },
     { name = "websockets", marker = "extra == 'pose-estimation'" },
     { name = "websockets", marker = "extra == 'stream'" },
 ]
-provides-extras = ["dev", "dbstorage-influx", "mqtt", "folderwatcher", "camera", "microphone", "web-ui", "streamlit-ui", "mood-detector", "pose-estimation", "stream", "telegram-bot", "cloud-llm", "mcp-client", "cloud-asr", "all"]
+provides-extras = ["dev", "dbstorage-influx", "mqtt", "folderwatcher", "camera", "microphone", "web-ui", "streamlit-ui", "mood-detector", "pose-estimation", "image-segmentation", "stream", "telegram-bot", "cloud-llm", "mcp-client", "cloud-asr", "all"]
 
 [package.metadata.requires-dev]
 build = [{ name = "docstring-parser", specifier = ">=0.16" }]

@@ -1,0 +1,4 @@
+# Only the runtime files go into the image
+.venv/
+__pycache__/
+tests/

@@ -33,6 +33,7 @@ container by globbing `containers/*/<name>/Dockerfile`, so names must be unique 
 | `aihub-models-runner` | ai | `qairt-common-base` | Runs Qualcomm AI Hub models, with GStreamer/WebSocket input and MJPEG/WebSocket output |
 | `gesture-recognition-runner` | ai | `aihub-models-runner` | Hand-gesture recognition on the MediaPipe palm/landmark/classifier models |
 | `pose-estimation-runner` | ai | `aihub-models-runner` | Body pose estimation on the PoseNet MobileNet model, 17 keypoints per person, custom pose models supported |
+| `image-segmentation-runner` | ai | `aihub-models-runner` | Person segmentation on the MediaPipe Selfie Segmentation model, background overlay and person area/box per frame |
 | `ei-models-runner` | ai | Edge Impulse inference image | Edge Impulse inference with the bundled out-of-the-box models |
 | `ei-qnn-models-runner` | ai | Edge Impulse QNN inference image | Same, on the NPU-accelerated (QNN) models |
 | `llamacpp-runner` | ai | `python-slim` | llama.cpp model router, CPU build |
@@ -45,6 +46,7 @@ graph LR
   slim --> lcpp[llamacpp-runner]
   qairt[qairt-common-base] --> aihub[aihub-models-runner] --> gesture[gesture-recognition-runner]
   aihub --> pose[pose-estimation-runner]
+  aihub --> seg[image-segmentation-runner]
   qairt --> lcppnpu[llamacpp-npu-runner]
   ei[ei-models-runner]
   eiqnn[ei-qnn-models-runner]
