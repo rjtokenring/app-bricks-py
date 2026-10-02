@@ -87,14 +87,13 @@ class ImageSegmentation:
         self._callback_locks: dict[str, threading.Lock] = {}
 
         # WebSocket endpoints
-        infra = load_brick_compose_file(self.__class__)
+        infra: dict[str, Any] | None = load_brick_compose_file(self.__class__)
         if infra is None or "services" not in infra:
             raise RuntimeError("Infrastructure configuration could not be loaded.")
-        for k, _ in infra["services"].items():
-            self._host = k
-            break  # Only one service is expected
+        services: dict[str, Any] = infra["services"]
+        service = next(iter(services))  # Only one service is expected
 
-        self._host = resolve_address(self._host)
+        self._host = resolve_address(service)
         if not self._host:
             raise RuntimeError("Host address could not be resolved. Please check your configuration.")
 
