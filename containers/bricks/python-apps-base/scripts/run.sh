@@ -16,7 +16,10 @@ if [ -z "$PYTHONUNBUFFERED" ]; then
   export PYTHONUNBUFFERED=1
 fi
 
-BASE_DIR="/app"
+# The app folder: /app, where the container mounts it, unless APP_DIR names another
+# one (arduino-app-launcher prepares every app from its real path, not only the
+# one /app points to).
+BASE_DIR="${APP_DIR:-/app}"
 CACHE_DIR="$BASE_DIR/.cache"
 APP_YAML="$BASE_DIR/app.yaml"
 PYTHON_SCRIPT="$BASE_DIR/python/main.py"
@@ -47,7 +50,9 @@ fi
 
 mkdir -p "$CACHE_DIR"
 if [ ! -d "$CACHE_DIR/.venv" ]; then
-  uv venv "$CACHE_DIR/.venv" --system-site-packages
+  # Relocatable: the scripts installed in it do not hardcode the path it was
+  # created at, the same venv is reached as /app/.cache/.venv or from its real path.
+  uv venv "$CACHE_DIR/.venv" --system-site-packages --relocatable
 
   if [ -d "$PYTHON_LIBS_DIR" ]; then
     echo "Installing Python libraries from $PYTHON_LIBS_DIR"
@@ -62,7 +67,12 @@ if [ ! -d "$CACHE_DIR/.venv" ]; then
   fi
 fi
 
-. "$CACHE_DIR/.venv/bin/activate"
+# What bin/activate does, without its VIRTUAL_ENV: that one is the path the venv
+# was created at, /app/.cache/.venv for the venvs made so far, which is the venv
+# of whatever app /app points to when this runs from another path.
+export VIRTUAL_ENV="$CACHE_DIR/.venv"
+export PATH="$VIRTUAL_ENV/bin:$PATH"
+unset PYTHONHOME
 
 if [ -d "$PYTHON_LIBS_DIR" ]; then
   echo "Installing Python libraries from $PYTHON_LIBS_DIR"
@@ -141,14 +151,19 @@ if [ -d "$BASE_DIR/bricks" ]; then
   uv cache clean
 fi
 
-# Pre-provision ALSA wrapped devices
-bash /provision-alsa-devices.sh
+# Device provisioning is per container: arduino-app-launcher does it once at its
+# start and sets SKIP_DEVICE_PROVISIONING=1 when it prepares an app, since
+# rewriting ~/.asoundrc would pull it from under the app running meanwhile.
+if [ "${SKIP_DEVICE_PROVISIONING:-0}" != "1" ]; then
+  # Pre-provision ALSA wrapped devices
+  bash /provision-alsa-devices.sh
 
-# Merge the host DSP payload and yaml config into /usr/share/hexagon-dsp,
-# where the fastrpc client libraries look for them. The script ships with the
-# libraries in python-base. Best-effort: a failure here only means the DSP is
-# unavailable, the app still starts.
-sh /provision-fastrpc-dsp.sh || echo "Warning: fastrpc DSP provisioning failed"
+  # Merge the host DSP payload and yaml config into /usr/share/hexagon-dsp,
+  # where the fastrpc client libraries look for them. The script ships with the
+  # libraries in python-base. Best-effort: a failure here only means the DSP is
+  # unavailable, the app still starts.
+  sh /provision-fastrpc-dsp.sh || echo "Warning: fastrpc DSP provisioning failed"
+fi
 
 # Load custom bricks if present
 if [ -d "$BASE_DIR/bricks" ]; then
@@ -185,6 +200,7 @@ case "$1" in
     # instead of a crash on the first start. The cache prefix sends the
     # bytecode to a throwaway directory, leaving the app folder untouched.
     PYCHECK_DIR="$(mktemp -d)"
+    trap 'rm -rf "$PYCHECK_DIR"' EXIT
     if [ -d "$BASE_DIR/bricks" ]; then
       PYTHONPYCACHEPREFIX="$PYCHECK_DIR" python -m compileall -q "$BASE_DIR/python" "$BASE_DIR/bricks"
     else
@@ -194,11 +210,13 @@ case "$1" in
   *)
     install_streamlit
     if check_streamlit_ui; then
-      exec streamlit run --server.port 7000 "$PYTHON_SCRIPT"
+      # As a module: the streamlit script of a venv made before --relocatable
+      # names in its shebang the path the venv was created at
+      exec python -m streamlit run --server.port 7000 "$PYTHON_SCRIPT"
     fi
 
     echo "======== App is starting ============================"
-    cd $BASE_DIR # Change to the base directory
+    cd "$BASE_DIR" # Change to the base directory
     exec python "$PYTHON_SCRIPT"
     ;;
 esac

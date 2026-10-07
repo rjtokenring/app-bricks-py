@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 
 import inspect
+import os
 import signal
 import sys
 import threading
@@ -20,11 +21,32 @@ logger = Logger("App")
 # The whole shutdown must fit in the stop grace period the launcher gives the process: a process
 # killed while still holding an exclusive peripheral can leave it unusable for everyone else, so
 # the budgets below are derived from that limit rather than chosen independently.
-SHUTDOWN_GRACE_PERIOD_S = 5.0
+DEFAULT_SHUTDOWN_GRACE_PERIOD_S = 5.0
+"""Grace period arduino-app-cli gives the app container, used when the environment sets none."""
+
+MIN_SHUTDOWN_GRACE_PERIOD_S = 1.0
+"""Shortest grace period accepted from the environment: below it the bricks would get no time at all."""
+
+
+def _grace_period_from_env() -> float:
+    raw = os.environ.get("APP_SHUTDOWN_GRACE_PERIOD_S", "")
+    if not raw:
+        return DEFAULT_SHUTDOWN_GRACE_PERIOD_S
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(f"Ignoring APP_SHUTDOWN_GRACE_PERIOD_S={raw!r}, not a number of seconds")
+        return DEFAULT_SHUTDOWN_GRACE_PERIOD_S
+    return max(value, MIN_SHUTDOWN_GRACE_PERIOD_S)
+
+
+SHUTDOWN_GRACE_PERIOD_S = _grace_period_from_env()
 """Hard limit, in seconds, between the termination signal and the process being killed.
 
-Set by whoever stops the app, currently arduino-app-cli. Everything the shutdown does has to fit
-inside it, including the interpreter teardown that follows _shutdown().
+Set by whoever stops the app: arduino-app-cli, which waits 5 s before killing the app container,
+or arduino-app-launcher, which kills sooner and says how much sooner in APP_SHUTDOWN_GRACE_PERIOD_S.
+Everything the shutdown does has to fit inside it, including the interpreter teardown that follows
+_shutdown(). Read once, at import: the launcher sets the variable before the app process starts.
 """
 
 SHUTDOWN_HEADROOM_S = 0.5
@@ -41,11 +63,12 @@ timeout: a larger headroom would not save it, while the time is worth much more 
 bricks, where it is bounded and buys a clean stop.
 """
 
-SHUTDOWN_PERIPHERALS_BUDGET_S = 1.5
+SHUTDOWN_PERIPHERALS_BUDGET_S = 0.3 * SHUTDOWN_GRACE_PERIOD_S
 """Wall-clock budget, in seconds, for releasing every peripheral, once the bricks are stopped.
 
 Reserved out of the grace period before the bricks get theirs: releasing an exclusive device is
 the one step whose failure outlives the process, so it is the last thing that may be squeezed.
+A fixed share of the grace period, 1.5 s of the default 5 s, so a shorter one shrinks it too.
 """
 
 SHUTDOWN_BRICKS_BUDGET_S = SHUTDOWN_GRACE_PERIOD_S - SHUTDOWN_HEADROOM_S - SHUTDOWN_PERIPHERALS_BUDGET_S

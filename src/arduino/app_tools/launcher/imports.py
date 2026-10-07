@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
+#
+# SPDX-License-Identifier: MPL-2.0
+
+"""Which modules a worker imports in advance for an app, and which names belong to the app itself."""
+
+import ast
+from collections.abc import Iterable, Iterator
+from pathlib import Path
+
+SKIPPED_DIRS = {"__pycache__", ".cache", ".git", "node_modules"}
+
+DEFAULT_PRELOAD = ("numpy", "cv2", "PIL.Image", "requests", "yaml", "arduino.app_utils")
+"""Imported by every worker, whatever its app: the libraries most apps pay seconds for."""
+
+
+def _python_files(root: Path) -> Iterator[Path]:
+    if not root.is_dir():
+        return
+    for path in sorted(root.rglob("*.py")):
+        if not SKIPPED_DIRS.intersection(path.relative_to(root).parts):
+            yield path
+
+
+def _is_type_checking(test: ast.expr) -> bool:
+    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING")
+
+
+def _module_level_imports(statements: list[ast.stmt]) -> Iterator[str]:
+    """Absolute imports run when the module is imported: function bodies and `if TYPE_CHECKING:` are left out."""
+    for node in statements:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                yield alias.name
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and node.module:
+                yield node.module
+        elif isinstance(node, ast.If):
+            if not _is_type_checking(node.test):
+                yield from _module_level_imports(node.body)
+            yield from _module_level_imports(node.orelse)
+        elif isinstance(node, ast.Try | ast.TryStar):
+            yield from _module_level_imports(node.body)
+            for handler in node.handlers:
+                yield from _module_level_imports(handler.body)
+            yield from _module_level_imports(node.orelse)
+            yield from _module_level_imports(node.finalbody)
+        elif isinstance(node, ast.With | ast.ClassDef):
+            yield from _module_level_imports(node.body)
+
+
+def scan_imports(roots: Iterable[Path]) -> list[str]:
+    """Absolute module-level imports of the Python files under the roots, in first-seen order.
+
+    Files that do not parse are skipped: the app reports its own syntax errors when it runs.
+    """
+    seen: dict[str, None] = {}
+    for root in roots:
+        for path in _python_files(root):
+            try:
+                tree = ast.parse(path.read_bytes(), filename=str(path))
+            except (SyntaxError, ValueError, OSError):
+                continue
+            for name in _module_level_imports(tree.body):
+                seen.setdefault(name, None)
+    return list(seen)
+
+
+def local_module_names(*roots: Path) -> set[str]:
+    """Top-level names the app's own folders provide on sys.path: its python/ and bricks/ folders.
+
+    A module with one of these names must come from the app, never from a library imported in advance.
+    """
+    names: set[str] = set()
+    for root in roots:
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name in SKIPPED_DIRS or entry.name.startswith("."):
+                continue
+            if entry.is_dir():
+                if entry.name.isidentifier():
+                    names.add(entry.name)
+            elif entry.suffix == ".py" and entry.stem.isidentifier():
+                names.add(entry.stem)
+    return names
+
+
+def warm_candidates(preload: Iterable[str], brick_modules: Iterable[str], scanned: Iterable[str], local_names: set[str]) -> list[str]:
+    """The modules a worker tries to import, in order: the preload list, the bricks, then what the app imports.
+
+    Names whose top-level package is one of the app's own modules are dropped.
+    """
+    seen: dict[str, None] = {}
+    for group in (preload, brick_modules, scanned):
+        for name in group:
+            name = name.strip()
+            if name and name.partition(".")[0] not in local_names:
+                seen.setdefault(name, None)
+    return list(seen)

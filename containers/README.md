@@ -28,6 +28,7 @@ container by globbing `containers/*/<name>/Dockerfile`, so names must be unique 
 | `python-base` | base | `python-slim` | System deps, non-root user, fonts, OpenCV wheel with trimmed FFmpeg and GStreamer plugins-good builds, libcamera + GStreamer packages |
 | `qairt-common-base` | base | `python:3.13-slim-trixie` | Qualcomm AI Runtime and FastRPC libraries shared by the NPU runners |
 | `python-apps-base` | bricks | `python-base` | App runtime: installs the Arduino App Bricks `.whl` and the Streamlit config |
+| `app-launcher` | bricks | `python-apps-base` | App runtime that stays up across apps: arduino-app-launcher keeps a warm worker per app venv and runs the selected app in it |
 | `models-downloader` | bricks | `python-slim` | Downloads models from AI Hub, Edge Impulse and Hugging Face per `models/models-list.yaml` |
 | `tps` | bricks | `python-slim` | Wi-Fi scan server of the TPS Location API brick, serves `iw` results to the app over a Unix socket |
 | `aihub-models-runner` | ai | `qairt-common-base` | Runs Qualcomm AI Hub models, with GStreamer/WebSocket input and MJPEG/WebSocket output |
@@ -49,6 +50,7 @@ graph LR
   ei[ei-models-runner]
   eiqnn[ei-qnn-models-runner]
   slim --> tps[tps]
+  apps --> applauncher[app-launcher]
 ```
 
 `ei-models-runner` and `ei-qnn-models-runner` build on external Edge Impulse images and have no upstream

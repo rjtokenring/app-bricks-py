@@ -129,6 +129,7 @@ group "default" {
     "models-downloader",
     "python-base",
     "python-apps-base",
+    "app-launcher",
     "tps",
     "qairt-common-base",
     "aihub-models-runner",
@@ -188,6 +189,15 @@ target "python-apps-base" {
     { wheel = "dist" },
     parent_context("python-base"),
   )
+}
+
+target "app-launcher" {
+  inherits   = ["_downstream"]
+  context    = "containers/bricks/app-launcher"
+  tags       = image_tags("app-launcher")
+  cache-from = cache_from("app-launcher")
+  cache-to   = cache_to("app-launcher")
+  contexts   = parent_context("python-apps-base")
 }
 
 target "tps" {

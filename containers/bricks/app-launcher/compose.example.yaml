@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (C) Arduino s.r.l. and/or its affiliated companies
+#
+# SPDX-License-Identifier: MPL-2.0
+
+# The app-launcher container on an UNO Q, for trying the launcher by hand.
+#
+# It is the `main` service arduino-app-cli generates for every app today (see .cache/app-compose.yaml in an
+# app folder), minus what changes per app:
+#   - the app folder is not mounted at /app: every app folder is, at its own path, and /app is a symlink
+#     the launcher points at the running app;
+#   - the app environment (APP_HOME, brick variables) travels in the start request, or is read from the
+#     app's .cache/app-compose.yaml;
+#   - no depends_on: the sidecars of an app come and go with it, see dev/app-sidecars.sh.
+#
+#   mkdir -p /home/arduino/.arduino-app-launcher
+#   docker compose -f compose.example.yaml up -d
+#   docker exec app-launcher arduino-app-launcher status
+
+name: arduino-app-launcher
+
+services:
+  app-launcher:
+    image: ${DOCKER_REGISTRY_BASE:-ghcr.io/arduino/}app-bricks/app-launcher:${BRICKS_RELEASE_VERSION:-latest}
+    container_name: app-launcher
+    # tini as PID 1: it reaps what the apps leave behind, the supervisor waits only for its own workers
+    init: true
+    restart: unless-stopped
+    # The supervisor stops the running app in 2.5 s at most, then ends its idle workers
+    stop_grace_period: 10s
+    user: "1000:1000"
+    group_add: ["44", "29", "991", "20", "1001"]
+    device_cgroup_rules:
+      - "c 226:* rmw"
+      - "c 250:* rmw"
+      - "c 504:* rmw"
+      - "c 81:* rmw"
+      - "c 116:* rmw"
+      - "c 10:* rmw"
+    environment:
+      BOARD_NAME: ${BOARD_NAME:-unoq}
+      HOST_IP: ${HOST_IP:-}
+      BIND_ADDRESS: 0.0.0.0
+      XDG_RUNTIME_DIR: /run/user/1000
+      # APP_LAUNCHER_WARM_APPS: "all"          # or a comma-separated list of app folders
+      # APP_LAUNCHER_STOP_TIMEOUT_S: "2.5"     # SIGTERM, then SIGKILL to the app process group
+      # APP_LAUNCHER_WARM_CONCURRENCY: "2"
+      # APP_LAUNCHER_MEM_RESERVE_MB: "400"
+      # APP_LAUNCHER_PRELOAD: "numpy,cv2,PIL.Image,requests,yaml,arduino.app_utils"
+    extra_hosts:
+      - msgpack-rpc-router=host-gateway
+    ports:
+      - "7000:7000"
+    tmpfs:
+      - /tmp
+    volumes:
+      - type: bind
+        source: /home/arduino/ArduinoApps
+        target: /home/arduino/ArduinoApps
+      # The control socket, reachable from the host as /home/arduino/.arduino-app-launcher/launcher.sock
+      - type: bind
+        source: /home/arduino/.arduino-app-launcher
+        target: /run/arduino-app-launcher
+      - type: bind
+        source: /dev
+        target: /dev
+      - type: bind
+        source: /run/udev
+        target: /run/udev
+        read_only: true
+      - /run/user/1000/pipewire-0:/run/user/1000/pipewire-0
+      - /dev/leds/builtin/led1_b:/dev/leds/builtin/led1_b
+      - /dev/leds/builtin/led1_g:/dev/leds/builtin/led1_g
+      - /dev/leds/builtin/led1_r:/dev/leds/builtin/led1_r
+      - /dev/leds/builtin/led2_b:/dev/leds/builtin/led2_b
+      - /dev/leds/builtin/led2_g:/dev/leds/builtin/led2_g
+      - /dev/leds/builtin/led2_r:/dev/leds/builtin/led2_r
+      - /run/arduino-router.sock:/run/arduino-router.sock
+      - /var/run/arduino-router.sock:/var/run/arduino-router.sock
+      - /run/arduino-cloud-connector:/run/arduino-cloud-connector
+      - /var/run/arduino-cloud-connector:/var/run/arduino-cloud-connector
+    logging:
+      driver: json-file
+      options:
+        max-file: "2"
+        max-size: 5m
