@@ -85,6 +85,7 @@ class Worker:
         self.ready_info: Message = {}
         self.started_info: Message = {}
         self.app_run_t: float | None = None
+        self.suspended = False
         self.exit: ExitInfo | None = None
         self._on_output = on_output
         self._on_event = on_event
@@ -115,6 +116,7 @@ class Worker:
             "warm_ms": self.ready_info.get("warm_ms"),
             "uss_kb": read_uss_kb(self.pid) if self.pid and self.alive else None,
             "failed_imports": len(self.ready_info.get("failed", [])),
+            "suspended": self.suspended,
         }
 
     async def spawn(self, mode: str) -> None:
@@ -249,12 +251,27 @@ class Worker:
         Raises:
             WorkerError: if the worker exits before starting the app or does not answer in time.
         """
+        self.resume()
         self._send({"cmd": "run", "streamlit": streamlit})
         await self._wait_for((self._started,), timeout, "started")
         return self.started_info
 
+    def suspend(self) -> bool:
+        """Stop the worker with SIGSTOP, to leave the CPU to an app starting; returns whether it did."""
+        if not self.alive or self.suspended:
+            return False
+        self._killpg(signal.SIGSTOP)
+        self.suspended = True
+        return True
+
+    def resume(self) -> None:
+        if self.suspended:
+            self.suspended = False
+            self._killpg(signal.SIGCONT)
+
     async def quit(self) -> None:
         """End a worker that never ran its app."""
+        self.resume()
         if not self.alive:
             return
         self._send({"cmd": "quit"})
@@ -271,6 +288,7 @@ class Worker:
         """
         started = time.monotonic()
         killed = False
+        self.resume()
         if self.alive:
             self.state = WorkerState.STOPPING
             self._signal_leader(signal.SIGTERM)

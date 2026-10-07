@@ -358,3 +358,59 @@ def _is_worker_of(proc: Path, app: Path) -> bool:
     except OSError:
         return False
     return any(part.endswith(b"worker.py") for part in cmdline) and str(app.resolve()).encode() in cmdline
+
+
+def proc_state(pid: int) -> str:
+    with open(f"/proc/{pid}/stat") as f:
+        return f.read().rsplit(")", 1)[1].split()[0]
+
+
+def test_warm_ups_are_suspended_while_an_app_starts(env: Env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    env.app("a")
+    env.app("slow", files={"python/main.py": "import slowmod\n"})
+    modules = tmp_path / "modules"
+    modules.mkdir()
+    (modules / "slowmod.py").write_text("import time\nfor _ in range(80):\n    time.sleep(0.05)\n")
+    monkeypatch.setenv("PYTHONPATH", str(modules))
+    config = env.config
+    config.start_priority_s = 1.0
+    config.start_priority_tail_s = 0.2
+
+    async def scenario(supervisor: Supervisor) -> None:
+        await wait_until(
+            lambda: worker_state(supervisor, "a") == "ready" and worker_state(supervisor, "slow") == "warming", what="a ready, slow warming"
+        )
+        readiness = (await supervisor.dispatch({"cmd": "ping"}))["readiness"]
+        assert readiness["ready"] == ["a"] and readiness["not_ready"] == ["slow"]
+        slow = supervisor.slots["slow"].worker
+        assert slow is not None and slow.pid is not None
+        await supervisor.start("a")
+        assert slow.suspended and proc_state(slow.pid) == "T", "stopped while a starts"
+        await wait_until(lambda: not slow.suspended, timeout=3, what="resumed after start_priority_s")
+        assert proc_state(slow.pid) != "T"
+        await wait_until(lambda: worker_state(supervisor, "slow") == "ready", what="slow ready")
+        assert "slow" in (await supervisor.dispatch({"cmd": "ping"}))["readiness"]["ready"]
+
+    run_scenario(env, scenario, config)
+
+
+def test_a_suspended_worker_still_runs_its_app_on_start(env: Env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    env.app("a")
+    env.app("slow", files={"python/main.py": "import os, slowmod\nos.makedirs('data', exist_ok=True)\nopen('data/ran', 'w').close()\n"})
+    modules = tmp_path / "modules"
+    modules.mkdir()
+    (modules / "slowmod.py").write_text("import time\nfor _ in range(80):\n    time.sleep(0.05)\n")
+    monkeypatch.setenv("PYTHONPATH", str(modules))
+    config = env.config
+    config.start_priority_s = 30.0
+
+    async def scenario(supervisor: Supervisor) -> None:
+        await wait_until(lambda: worker_state(supervisor, "a") == "ready" and worker_state(supervisor, "slow") == "warming")
+        await supervisor.start("a")
+        slow = supervisor.slots["slow"].worker
+        assert slow is not None and slow.suspended
+        reply = await supervisor.start("slow")
+        assert reply["ok"] and reply["pid"] == slow.pid, "the suspended worker was resumed and used"
+        await wait_until((env.apps / "slow" / "data" / "ran").exists, what="slow ran")
+
+    run_scenario(env, scenario, config)

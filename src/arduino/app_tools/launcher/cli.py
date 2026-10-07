@@ -46,6 +46,8 @@ def _print_status(status: Message) -> None:
         worker = app.get("worker") or {}
         uss = worker.get("uss_kb")
         notes: list[str] = []
+        if worker.get("suspended"):
+            notes.append("suspended while an app starts")
         if not app.get("selected"):
             notes.append("not selected")
         if app.get("pending_warm"):
@@ -67,6 +69,9 @@ def main(argv: list[str] | None = None) -> None:
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("serve", help="run the supervisor (the container entrypoint)")
+    ping = commands.add_parser("ping", help="exit 0 when the supervisor answers: the container healthcheck")
+    ping.add_argument("--all-ready", action="store_true", help="exit 0 only once every selected app has a warm worker")
+    ping.add_argument("-q", "--quiet", action="store_true")
     start = commands.add_parser("start", help="start an app, stopping the running one")
     start.add_argument("app", help="app folder name, or path inside the apps directory")
     start.add_argument("--env", action="append", metavar="KEY=VALUE", help="app environment; default: the one of the CLI compose file")
@@ -110,7 +115,9 @@ def main(argv: list[str] | None = None) -> None:
 
     from .client import Client, LauncherUnavailable
 
-    client = Client(socket_path, timeout=None if args.command in ("start", "restart", "prepare", "bench") else 60.0)
+    client = Client(
+        socket_path, timeout=None if args.command in ("start", "restart", "prepare", "bench") else (2.0 if args.command == "ping" else 60.0)
+    )
     try:
         reply: Message
         if args.command == "start":
@@ -130,6 +137,13 @@ def main(argv: list[str] | None = None) -> None:
             reply = client.call("prepare", app=args.app, **({"env": env} if env is not None else {}))
         elif args.command == "warm":
             reply = client.call("warm", app=args.app)
+        elif args.command == "ping":
+            reply = client.call("ping")
+            readiness = reply.get("readiness", {})
+            healthy = bool(reply.get("ok")) and (not args.all_ready or not readiness.get("not_ready"))
+            if not args.quiet:
+                print(f"ok, {len(readiness.get('ready', []))}/{readiness.get('apps', 0)} apps ready" if healthy else f"not ready: {readiness}")
+            raise SystemExit(0 if healthy else 1)
         elif args.command == "status":
             reply = client.call("status")
             if not args.json and reply.get("ok"):
@@ -155,8 +169,9 @@ def main(argv: list[str] | None = None) -> None:
             reply = run_bench(client, args.app, args.runs, args.mode, args.http_url, args.settle)
         else:
             reply = client.call(args.command)
-    except LauncherUnavailable as e:
-        print(e, file=sys.stderr)
+    except (LauncherUnavailable, OSError) as e:
+        if not getattr(args, "quiet", False):
+            print(e, file=sys.stderr)
         raise SystemExit(2) from e
     except KeyboardInterrupt:
         raise SystemExit(130) from None

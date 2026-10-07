@@ -5,7 +5,8 @@ container created per app start. Its entrypoint runs `arduino-app-launcher serve
 (`src/arduino/app_tools/launcher/`), which keeps a **warm worker per app** and runs the requested app in it.
 
 Status: proof of concept. arduino-app-cli does not drive it yet; [`dev/app-sidecars.sh`](dev/app-sidecars.sh)
-and the `arduino-app-launcher` client stand in for it.
+and the `arduino-app-launcher` client stand in for it. Design, invariants and pitfalls for whoever changes it:
+[src/arduino/app_tools/launcher/README.md](../../../src/arduino/app_tools/launcher/README.md).
 
 ## How an app starts
 
@@ -49,7 +50,9 @@ container app-launcher (tini as PID 1)
    3. `{"cmd": "start", "app": "B", "env": {...}}`, `env` being the environment the `main` service of B
       would have had (`APP_HOME`, `BOARD_NAME`, `HOST_IP`, brick variables). Without `env` the launcher
       reads it from `B/.cache/app-compose.yaml`.
-4. Logs: the app output goes to the container log (`docker logs app-launcher`), the `logs` request returns
+4. The container is healthy as soon as the supervisor answers (about 3 s): a start always works from then on,
+   warm or not. Whether an app would start warm is in `ping`'s `readiness` and in `worker_ready` events.
+5. Logs: the app output goes to the container log (`docker logs app-launcher`), the `logs` request returns
    the running app's; `events` streams `app_started`, `app_run`, `app_exited` with exit code and signal.
 
 ## Control protocol
@@ -64,6 +67,7 @@ command:
 | `{"cmd": "restart", "app"?}` | `restart [APP]` | as start |
 | `{"cmd": "prepare", "app"}` | `prepare APP` | runs `run.sh prepare` |
 | `{"cmd": "warm", "app"}`, `{"cmd": "rescan"}` | `warm APP`, `rescan` | |
+| `{"cmd": "ping"}` | `ping [--all-ready] [-q]`, the healthcheck | `readiness`: apps ready to start warm, apps not yet |
 | `{"cmd": "status"}` | `status [--json]` | running app, worker of each app with state and memory |
 | `{"cmd": "logs", "tail"?, "follow"?}` | `logs [-f]` | running app output |
 | `{"cmd": "events"}` | `events` | stream of events |
@@ -82,6 +86,8 @@ Errors are `{"ok": false, "error": {"code", "message"}}`, codes `bad_request`, `
 | `APP_LAUNCHER_WARM_CONCURRENCY` | `2` | workers warming at once |
 | `APP_LAUNCHER_REPLACEMENT_DELAY_S` | `5` | delay before warming the next worker of an app just started |
 | `APP_LAUNCHER_MEM_RESERVE_MB` | `400` | no new worker below this MemAvailable |
+| `APP_LAUNCHER_START_PRIORITY_S` | `15` | while an app starts the other warm-ups are suspended, at most this long; `0` disables it |
+| `APP_LAUNCHER_START_PRIORITY_TAIL_S` | `1` | they resume this long after the app reaches `App.run()` |
 
 ## Trying it on a board
 

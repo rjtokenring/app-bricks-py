@@ -95,6 +95,10 @@ class Config:
     run_timeout_s: float = 15.0
     replacement_delay_s: float = 5.0
     """How long after an app starts its next worker begins warming, not to compete with the app's own start."""
+    start_priority_s: float = 15.0
+    """While an app starts, the other warm-ups are suspended, at most this long; 0 disables it."""
+    start_priority_tail_s: float = 1.0
+    """The warm-ups resume this long after the app reaches App.run(), while its bricks start."""
     mem_reserve_mb: int = 400
     max_failures: int = 3
     preload: tuple[str, ...] = DEFAULT_PRELOAD
@@ -119,6 +123,8 @@ class Config:
             warm_timeout_s=_env_float(environ, "APP_LAUNCHER_WARM_TIMEOUT_S", defaults.warm_timeout_s),
             run_timeout_s=_env_float(environ, "APP_LAUNCHER_RUN_TIMEOUT_S", defaults.run_timeout_s),
             replacement_delay_s=_env_float(environ, "APP_LAUNCHER_REPLACEMENT_DELAY_S", defaults.replacement_delay_s),
+            start_priority_s=_env_float(environ, "APP_LAUNCHER_START_PRIORITY_S", defaults.start_priority_s),
+            start_priority_tail_s=_env_float(environ, "APP_LAUNCHER_START_PRIORITY_TAIL_S", defaults.start_priority_tail_s),
             mem_reserve_mb=_env_int(environ, "APP_LAUNCHER_MEM_RESERVE_MB", defaults.mem_reserve_mb),
             max_failures=_env_int(environ, "APP_LAUNCHER_MAX_FAILURES", defaults.max_failures),
             preload=tuple(name.strip() for name in preload.split(",") if name.strip()) if preload is not None else defaults.preload,
@@ -180,6 +186,11 @@ class Supervisor:
         self._shutdown = asyncio.Event()
         self._server: asyncio.Server | None = None
         self.started_at = time.time()
+        # Start priority: warm-ups wait on the gate, and the workers warming are suspended, while an app starts
+        self._warm_gate = asyncio.Event()
+        self._warm_gate.set()
+        self._suspended: list[Worker] = []
+        self._resume_timer: asyncio.TimerHandle | None = None
 
     # Lifecycle of the supervisor
 
@@ -211,6 +222,7 @@ class Supervisor:
     async def close(self) -> None:
         """Stop the running app, end every worker and stop listening."""
         self._closing = True
+        self._resume_warm_ups()
         if self._server is not None:
             self._server.close()
         async with self._lifecycle:
@@ -374,6 +386,9 @@ class Supervisor:
             slot.pending_warm = False
             if self._closing or slot.warming or (slot.worker is not None and slot.worker.alive):
                 continue
+            await self._warm_gate.wait()
+            if self._closing or (slot.worker is not None and slot.worker.alive):
+                continue
             slot.warming = True
             try:
                 await self._warm(slot)
@@ -488,6 +503,7 @@ class Supervisor:
             active = ActiveRun(slot=slot, worker=worker, run_id=run_id, t_recv=t_recv)
             self.active = active
             self._flush_warm_output(worker)
+            self._prioritize(worker)
             t_run = time.time()
             try:
                 started = await worker.run(self.config.run_timeout_s, slot.info.streamlit)
@@ -547,6 +563,7 @@ class Supervisor:
         if self.active is not active:
             return
         self.active = None
+        self._resume_warm_ups()
         self._point_link(self.config.idle_dir)
         tail = active.log_splitter.rest()
         if tail:
@@ -663,6 +680,10 @@ class Supervisor:
         if message.get("event") == "app_run" and active is not None and active.worker is worker:
             active.app_run_t = worker.app_run_t
             self._publish({"event": "app_run", "app": worker.app_name, "run_id": active.run_id, "t": worker.app_run_t})
+            if self._resume_timer is not None:
+                # Its bricks are starting now: give them a moment more, then let the warm-ups go on
+                self._resume_timer.cancel()
+                self._resume_timer = asyncio.get_running_loop().call_later(self.config.start_priority_tail_s, self._resume_warm_ups)
         elif message.get("event") == "error":
             _log(f"worker {worker.pid} of {worker.app_name}: {message}")
 
@@ -690,6 +711,43 @@ class Supervisor:
             sys.stderr.buffer.write(bytes(buffered))
             sys.stderr.buffer.flush()
         self._request_warm(worker.app_name, delay=2.0 * slot.failures)
+
+    # Start priority
+
+    def _prioritize(self, starting: Worker) -> None:
+        """Give the starting app the CPU: suspend the workers still warming and hold the next warm-ups.
+
+        A board has 4 cores; a warm-up importing next to an app start slows the start down. Workers already
+        ready sleep on their channel and cost nothing. Everything resumes once the app reaches App.run() plus
+        a short tail, when it ends, or after start_priority_s at most.
+        """
+        if self.config.start_priority_s <= 0:
+            return
+        self._warm_gate.clear()
+        for slot in self.slots.values():
+            worker = slot.worker
+            if worker is not None and worker is not starting and worker.state == WorkerState.WARMING and worker.suspend():
+                self._suspended.append(worker)
+        if self._resume_timer is not None:
+            self._resume_timer.cancel()
+        self._resume_timer = asyncio.get_running_loop().call_later(self.config.start_priority_s, self._resume_warm_ups)
+        if self._suspended:
+            _log(f"suspended the warm-up of {', '.join(w.app_name for w in self._suspended)} while {starting.app_name} starts")
+
+    def _resume_warm_ups(self) -> None:
+        if self._resume_timer is not None:
+            self._resume_timer.cancel()
+            self._resume_timer = None
+        for worker in self._suspended:
+            worker.resume()
+        self._suspended.clear()
+        self._warm_gate.set()
+
+    def readiness(self) -> Message:
+        """Which selected apps would start from a warm worker right now."""
+        selected = self._selected()
+        ready = [name for name in selected if (worker := self.slots[name].worker) is not None and worker.state == WorkerState.READY]
+        return {"apps": len(selected), "ready": ready, "not_ready": [name for name in selected if name not in ready]}
 
     # Events
 
@@ -773,7 +831,7 @@ class Supervisor:
         cmd = request.get("cmd")
         try:
             if cmd == "ping":
-                return {"ok": True, "v": protocol.PROTOCOL_VERSION, "version": __version__}
+                return {"ok": True, "v": protocol.PROTOCOL_VERSION, "version": __version__, "readiness": self.readiness()}
             if cmd == "start":
                 return await self.start(
                     _required_str(request, "app"),

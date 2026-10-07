@@ -27,6 +27,15 @@ services:
     restart: unless-stopped
     # The supervisor stops the running app in 2.5 s at most, then ends its idle workers
     stop_grace_period: 10s
+    # Healthy as soon as the supervisor answers: from then on a start always works, from a warm
+    # worker or not. `arduino-app-launcher ping --all-ready` tells when every app starts warm.
+    healthcheck:
+      test: ["CMD", "arduino-app-launcher", "ping", "--quiet"]
+      interval: 2s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+      start_interval: 250ms
     user: "1000:1000"
     group_add: ["44", "29", "991", "20", "1001"]
     device_cgroup_rules:
@@ -46,6 +55,7 @@ services:
       # APP_LAUNCHER_WARM_CONCURRENCY: "2"
       # APP_LAUNCHER_MEM_RESERVE_MB: "400"
       # APP_LAUNCHER_PRELOAD: "numpy,cv2,PIL.Image,requests,yaml,arduino.app_utils"
+      # APP_LAUNCHER_START_PRIORITY_S: "15"    # warm-ups suspended while an app starts; 0 disables it
     extra_hosts:
       - msgpack-rpc-router=host-gateway
     ports:
