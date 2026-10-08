@@ -526,17 +526,16 @@ def _purge_app_modules(roots: tuple[str, ...]) -> int:
 def _reset_for_reload(baseline: Baseline, roots: tuple[str, ...]) -> tuple[list[str], int]:
     """Undo the run that just ended. Returns what makes the process unfit for another run, and how many modules went."""
     problems: list[str] = []
+    library: Any = None
     if APP_MODULE in sys.modules:
         try:
-            reset: Callable[[], list[str]] = importlib.import_module("arduino.app_utils._reload").reset
+            library = importlib.import_module("arduino.app_utils._reload")
+            problems.extend(library.reset())
         except (ImportError, AttributeError):
             problems.append("the arduino library of this venv cannot reload")
-        else:
-            try:
-                problems.extend(reset())
-            except Exception as e:  # noqa: BLE001 - any failure only means: restart instead
-                problems.append(f"the library reset failed: {e!r}")
-    # Signals first: from here on a SIGTERM must end the process at once, as it does an idle worker
+        except Exception as e:  # noqa: BLE001 - any failure only means: restart instead
+            problems.append(f"the library reset failed: {e!r}")
+    # Signals first: from here on a SIGTERM is handled as before the first run
     baseline.restore()
     deadline = time.monotonic() + RELOAD_THREAD_GRACE_S
     while (stray := _stray_threads(baseline)) and time.monotonic() < deadline:
@@ -545,8 +544,15 @@ def _reset_for_reload(baseline: Baseline, roots: tuple[str, ...]) -> tuple[list[
         problems.append(f"threads still running: {', '.join(sorted(stray))}")
     if problems:
         return problems, 0
+    # The previous __main__ still holds the objects of the ended run: without it they can be collected, and a
+    # device they claimed, e.g. the camera picked by Camera(), is free for the next run
+    sys.modules["__main__"] = types.ModuleType("__main__")
     purged = _purge_app_modules(roots)
     gc.collect()
+    held: Callable[[], list[str]] | None = getattr(library, "held_devices", None)
+    devices = held() if held is not None else []
+    if devices:
+        return [f"devices still claimed: {', '.join(devices)}"], purged
     return [], purged
 
 
@@ -575,7 +581,10 @@ def _run_reloadable(channel: Channel, main_py: str, roots: tuple[str, ...]) -> N
         problems, purged = _reset_for_reload(baseline, roots)
         if problems:
             channel.send({"event": "reload_fallback", "reason": "; ".join(problems)})
-            # The supervisor restarts the app with a new worker, and stops this one first
+            # The supervisor restarts the app with a new worker, and stops this one first. The app is already
+            # shut down: SIGTERM ends the process at once, threads left behind included, whatever handler the
+            # library installed at import.
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
             while True:
                 time.sleep(3600)
         reset_done = time.monotonic()

@@ -25,9 +25,21 @@ class DeviceRegistry:
     released automatically when the owner is garbage collected.
     """
 
+    _instances: "weakref.WeakSet[DeviceRegistry]" = weakref.WeakSet()
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._claims: dict[str, int] = {}
+        DeviceRegistry._instances.add(self)
+
+    @classmethod
+    def claimed_devices(cls) -> list[str]:
+        """The devices claimed in any registry of the process, sorted."""
+        devices: set[str] = set()
+        for registry in list(cls._instances):
+            with registry._lock:
+                devices.update(registry._claims)
+        return sorted(devices)
 
     def select(self, *device_groups: Callable[[], Sequence[str]]) -> str | None:
         """

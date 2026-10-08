@@ -359,8 +359,8 @@ def next_event(worker: WorkerProc, name: str) -> dict[str, Any]:
     raise AssertionError(f"no {name} event")
 
 
-def started_worker(tmp_path: Path, app: Path, link: Path, modules: list[str]) -> WorkerProc:
-    worker = WorkerProc(app, link, probe_env(tmp_path, "return", "worker"))
+def started_worker(tmp_path: Path, app: Path, link: Path, modules: list[str], env: dict[str, str] | None = None) -> WorkerProc:
+    worker = WorkerProc(app, link, {**probe_env(tmp_path, "return", "worker"), **(env or {})})
     assert "reload" in next_event(worker, "hello")["features"]
     worker.send({"cmd": "warm", "modules": modules})
     next_event(worker, "ready")
@@ -422,6 +422,61 @@ def test_a_thread_left_running_makes_the_reload_fall_back(tmp_path: Path):
     os.kill(worker.proc.pid, signal.SIGTERM)
     code, _, _ = worker.wait()
     assert code == -signal.SIGTERM and time.monotonic() - started < 2.0
+
+
+FAKE_CAMERA = """
+from arduino.app_peripherals.device_registry import DeviceRegistry
+
+REGISTRY = DeviceRegistry()
+LEAKED = []
+
+
+class FakeCamera:
+    \"\"\"Claims its device as Camera() does: the claim goes when the object is collected.\"\"\"
+
+    def __init__(self):
+        key = REGISTRY.select(lambda: ["fake-cam"])
+        if key is None:
+            raise RuntimeError("fake-cam already in use")
+        REGISTRY.bind(key, self)
+
+    def stop(self):
+        pass
+"""
+
+
+def fake_camera_env(tmp_path: Path) -> dict[str, str]:
+    """A library module outside the app, so a reload keeps it, as it keeps arduino.app_peripherals."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    (lib / "fakecam.py").write_text(FAKE_CAMERA)
+    return {"PYTHONPATH": str(lib)}
+
+
+def test_a_device_claimed_by_the_ended_run_is_free_for_the_next(tmp_path: Path):
+    tail = "import fakecam\ncamera = fakecam.FakeCamera()\n" + APP_RUN_TAIL
+    app, link = reloadable_app(tmp_path, 1, tail)
+    worker = started_worker(tmp_path, app, link, ["arduino.app_utils"], fake_camera_env(tmp_path))
+    next_event(worker, "app_run")
+    edit(app, 2, tail)
+    worker.send({"cmd": "reload"})
+    next_event(worker, "reload_ok")
+    assert next_event(worker, "app_run"), "the second run opened the device again"
+    wait_for(lambda: len(runs(tmp_path)) == 2)
+    time.sleep(0.3)  # app_run is reported on entering App.run(), before loop() takes SIGTERM over
+    os.kill(worker.proc.pid, signal.SIGTERM)
+    assert worker.wait()[0] == 143
+
+
+def test_a_device_still_referenced_makes_the_reload_fall_back(tmp_path: Path):
+    tail = "import fakecam\ncamera = fakecam.FakeCamera()\nfakecam.LEAKED.append(camera)\n" + APP_RUN_TAIL
+    app, link = reloadable_app(tmp_path, 1, tail)
+    worker = started_worker(tmp_path, app, link, ["arduino.app_utils"], fake_camera_env(tmp_path))
+    next_event(worker, "app_run")
+    worker.send({"cmd": "reload"})
+    assert next_event(worker, "reload_fallback")["reason"] == "devices still claimed: fake-cam"
+    os.kill(worker.proc.pid, signal.SIGTERM)
+    worker.wait()
 
 
 def test_a_reload_after_main_py_returned_falls_back(tmp_path: Path):

@@ -107,3 +107,36 @@ class TestRelease:
         registry.clear()
 
         assert registry.select(lambda: ["a", "b"]) == "a"
+
+
+class TestClaimedDevices:
+    """What every registry of the process holds."""
+
+    def test_lists_the_claims_of_every_registry(self):
+        first, second = DeviceRegistry(), DeviceRegistry()
+        first.claim("cam-test-a")
+        second.select(lambda: ["cam-test-b"])
+
+        assert {"cam-test-a", "cam-test-b"} <= set(DeviceRegistry.claimed_devices())
+
+    def test_a_released_claim_is_not_listed(self):
+        registry = DeviceRegistry()
+        registry.claim("cam-test-c")
+        registry.release("cam-test-c")
+
+        assert "cam-test-c" not in DeviceRegistry.claimed_devices()
+
+    def test_a_collected_owner_frees_its_device(self):
+        class Owner:
+            pass
+
+        registry = DeviceRegistry()
+        owner = Owner()
+        registry.select(lambda: ["cam-test-d"])
+        registry.bind("cam-test-d", owner)
+        assert "cam-test-d" in DeviceRegistry.claimed_devices()
+
+        del owner
+        gc.collect()
+
+        assert "cam-test-d" not in DeviceRegistry.claimed_devices()
