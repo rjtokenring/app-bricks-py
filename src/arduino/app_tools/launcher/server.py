@@ -45,7 +45,7 @@ from .appinfo import (  # noqa: E402
     record_prepared,
     resolve_app_path,
 )
-from .imports import DEFAULT_PRELOAD, local_module_names, scan_imports, warm_candidates  # noqa: E402
+from .imports import DEFAULT_PRELOAD, excluded_modules, local_module_names, scan_imports, warm_candidates  # noqa: E402
 from .prepare import DEFAULT_RUN_SH, run_prepare  # noqa: E402
 from .process import ExitInfo, Worker, WorkerError, WorkerSpec, WorkerState, read_meminfo_kb  # noqa: E402
 from .protocol import Message  # noqa: E402
@@ -311,7 +311,8 @@ class Supervisor:
         if info.streamlit:
             bricks += STREAMLIT_MODULES
         local = local_module_names(info.python_dir, info.bricks_dir)
-        return warm_candidates(self.config.preload, bricks, scan_imports([info.python_dir, info.bricks_dir]), local)
+        scanned = scan_imports([info.python_dir, info.bricks_dir])
+        return warm_candidates(self.config.preload, bricks, scanned, local, excluded_modules(info.brick_ids))
 
     async def _spawn(self, slot: Slot, mode: str) -> Worker:
         fingerprint, interpreter = self._fingerprint(slot)

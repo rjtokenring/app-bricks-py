@@ -87,3 +87,18 @@ def test_candidates_put_the_preload_first_and_never_name_an_app_module():
 
 def test_a_local_module_hides_a_preloaded_library_of_the_same_name():
     assert imports.warm_candidates(["yaml", "numpy"], [], [], {"yaml"}) == ["numpy"]
+
+
+WEB_SCAN = ["arduino.app_bricks.web_ui", "fastapi.responses", "uvicorn", "starlette.staticfiles", "fastapi_socketio", "fastapiextra", "requests"]
+
+
+def test_the_web_stack_is_not_warmed_without_the_web_ui_brick():
+    excluded = imports.excluded_modules(["arduino:video_object_detection", "custom:web_ui"])
+    candidates = imports.warm_candidates(["numpy", "fastapi"], [], WEB_SCAN, set(), excluded)
+    assert candidates == ["numpy", "fastapiextra", "requests"]
+
+
+def test_the_web_stack_is_warmed_with_the_web_ui_brick():
+    excluded = imports.excluded_modules(["arduino:web_ui"])
+    assert excluded == ()
+    assert imports.warm_candidates([], ["arduino.app_bricks.web_ui"], WEB_SCAN, set(), excluded) == WEB_SCAN

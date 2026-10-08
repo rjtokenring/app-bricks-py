@@ -10,8 +10,13 @@ from pathlib import Path
 
 SKIPPED_DIRS = {"__pycache__", ".cache", ".git", "node_modules"}
 
-DEFAULT_PRELOAD = ("numpy", "cv2", "PIL.Image", "requests", "yaml", "arduino.app_utils")
+DEFAULT_PRELOAD = ("numpy", "cv2", "PIL.Image", "yaml", "arduino.app_utils")
 """Imported by every worker, whatever its app: the libraries most apps pay seconds for."""
+
+WEB_UI_BRICK = "arduino:web_ui"
+
+WEB_UI_MODULES = ("arduino.app_bricks.web_ui", "fastapi", "fastapi_socketio", "starlette", "uvicorn", "socketio", "engineio")
+"""The web stack of the web_ui brick: imported in advance only for an app that declares the brick in app.yaml."""
 
 
 def _python_files(root: Path) -> Iterator[Path]:
@@ -88,15 +93,32 @@ def local_module_names(*roots: Path) -> set[str]:
     return names
 
 
-def warm_candidates(preload: Iterable[str], brick_modules: Iterable[str], scanned: Iterable[str], local_names: set[str]) -> list[str]:
+def excluded_modules(brick_ids: Iterable[str]) -> tuple[str, ...]:
+    """Modules a worker must not import in advance for an app with these bricks: the web stack without web_ui."""
+    return () if WEB_UI_BRICK in brick_ids else WEB_UI_MODULES
+
+
+def _is_excluded(name: str, excluded: Iterable[str]) -> bool:
+    return any(name == prefix or name.startswith(prefix + ".") for prefix in excluded)
+
+
+def warm_candidates(
+    preload: Iterable[str],
+    brick_modules: Iterable[str],
+    scanned: Iterable[str],
+    local_names: set[str],
+    excluded: Iterable[str] = (),
+) -> list[str]:
     """The modules a worker tries to import, in order: the preload list, the bricks, then what the app imports.
 
-    Names whose top-level package is one of the app's own modules are dropped.
+    Names whose top-level package is one of the app's own modules are dropped, and so are the excluded modules
+    with their submodules, from every group.
     """
+    excluded = tuple(excluded)
     seen: dict[str, None] = {}
     for group in (preload, brick_modules, scanned):
         for name in group:
             name = name.strip()
-            if name and name.partition(".")[0] not in local_names:
+            if name and name.partition(".")[0] not in local_names and not _is_excluded(name, excluded):
                 seen.setdefault(name, None)
     return list(seen)

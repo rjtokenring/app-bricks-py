@@ -23,7 +23,8 @@ container app-launcher (tini as PID 1)
   today). A worker is started with that venv's interpreter, so imports resolve as for `python main.py` in
   `run.sh`: app venv first, image site-packages after. Before the app runs, the worker imports the heavy
   libraries (`APP_LAUNCHER_PRELOAD`), the bricks the app declares and the third-party modules its sources
-  import. It never imports the app's own modules.
+  import. It never imports the app's own modules, nor fastapi and the rest of the web stack unless the app
+  declares the `arduino:web_ui` brick.
 - **Start.** The running app gets SIGTERM, and SIGKILL to its whole process group after 2.5 s
   (`APP_LAUNCHER_STOP_TIMEOUT_S`; the app shutdown budgets shrink to fit, see `APP_SHUTDOWN_GRACE_PERIOD_S`
   in `app_utils/app.py`). Once nothing of it is left, `/app` is pointed at the new app and its worker runs
@@ -81,7 +82,7 @@ Errors are `{"ok": false, "error": {"code", "message"}}`, codes `bad_request`, `
 |---|---|---|
 | `APP_LAUNCHER_APPS_DIR` | `/home/arduino/ArduinoApps` | |
 | `APP_LAUNCHER_WARM_APPS` | `all` | or a comma-separated list of app folders |
-| `APP_LAUNCHER_PRELOAD` | `numpy,cv2,PIL.Image,requests,yaml,arduino.app_utils` | imported by every worker |
+| `APP_LAUNCHER_PRELOAD` | `numpy,cv2,PIL.Image,yaml,arduino.app_utils` | imported by every worker; the web stack only with `arduino:web_ui` |
 | `APP_LAUNCHER_STOP_TIMEOUT_S` | `2.5` | SIGTERM to SIGKILL |
 | `APP_LAUNCHER_WARM_CONCURRENCY` | `2` | workers warming at once |
 | `APP_LAUNCHER_REPLACEMENT_DELAY_S` | `5` | delay before warming the next worker of an app just started |

@@ -35,6 +35,21 @@ These come from the people who own the feature. Keep them unless they say otherw
    `/app/certs`.
 4. **Stop:** SIGTERM, then SIGKILL to the whole process group after 2.5 s.
 5. **For now every app is warmed.** Choosing a subset comes later, through `select_apps_to_warm()`.
+6. **No fork at all**, not even between apps whose venvs add nothing to the image. A shared parent per
+   identical environment was proposed to stop repeating the common imports across workers, and declined.
+   Every worker imports on its own.
+7. **Two warm-ups at a time** (`APP_LAUNCHER_WARM_CONCURRENCY=2`). Measured on an UNO Q with 6 apps, all ready
+   after:
+
+   | concurrency | all apps ready | first, most recent app ready |
+   |---|---|---|
+   | 1 | 39 s | 7.1 s |
+   | 2 | 26 s | 7.4 s |
+   | 3 | 21 s | 8.0 s |
+   | 4 | 19 s | 9.1 s |
+   | 6 | 17 s | 10.8 s |
+
+   Higher values make every warm-up slower through contention and delay the app most likely to start next.
 
 ## Processes
 
@@ -103,15 +118,18 @@ container app-launcher        init: true, so tini is PID 1 and reaps orphans
 ### What gets imported in advance
 
 `server._warm_modules` → `imports.warm_candidates`, in this order:
-1. `APP_LAUNCHER_PRELOAD`: default numpy, cv2, PIL.Image, requests, yaml, arduino.app_utils;
+1. `APP_LAUNCHER_PRELOAD`: default numpy, cv2, PIL.Image, yaml, arduino.app_utils;
 2. the bricks of `app.yaml`. The id → module mapping comes from the `id:` of the installed
    `brick_config.yaml` files and is **not** the folder name: `arduino:video_object_detection` →
    `arduino.app_bricks.video_objectdetection`;
 3. module-level absolute imports found by an AST scan of `python/` and `bricks/`, skipping function bodies and
    `if TYPE_CHECKING:` blocks.
 
-Names whose top-level package matches an app module are dropped. The worker additionally skips anything whose
-`find_spec` origin lies inside the app folder.
+Names whose top-level package matches an app module are dropped. The web stack (`imports.WEB_UI_MODULES`:
+`arduino.app_bricks.web_ui`, fastapi, fastapi_socketio, starlette, uvicorn, socketio, engineio, with their
+submodules) is dropped from all three groups unless `app.yaml` declares `arduino:web_ui`: an app that imports
+fastapi without the brick gets it at run time. A library from the scan that imports fastapi itself still brings it
+in. The worker additionally skips anything whose `find_spec` origin lies inside the app folder.
 
 ## Supervisor
 

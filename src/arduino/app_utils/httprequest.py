@@ -3,11 +3,13 @@
 # SPDX-License-Identifier: MPL-2.0
 
 from collections.abc import Collection
-from typing import Any
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from typing import TYPE_CHECKING, Any
 from arduino.app_utils import Logger
+
+# requests and urllib3 are imported when an HttpClient is created, not with arduino.app_utils:
+# they cost ~0.4 s at app start on an UNO Q, also to the apps that never make an HTTP request
+if TYPE_CHECKING:
+    import requests
 
 logger = Logger("HttpClient")
 
@@ -25,6 +27,10 @@ class HttpClient:
         status_forcelist: Collection[int] = (411, 500, 502, 503, 504),
         allowed_methods: Collection[str] = frozenset(["GET", "POST", "PUT", "DELETE"]),
     ) -> None:
+        import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+
         self.__total_retries = total_retries
         self.__backoff_factor = backoff_factor
         self.__status_forcelist = status_forcelist
@@ -54,7 +60,7 @@ class HttpClient:
         json: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         timeout: int = 5,
-    ) -> requests.Response | None:
+    ) -> "requests.Response | None":
         """Performs a GET or POST request to a given URL with a retry mechanism using requests.
 
         Session and urllib3's Retry utility for built-in exponential backoff.
@@ -73,6 +79,8 @@ class HttpClient:
         Returns:
             requests.Response or None: The response object if successful, None otherwise.
         """
+        import requests
+
         if not url:
             logger.error("Invalid URL provided. URL must be a non-empty string.")
             return None
