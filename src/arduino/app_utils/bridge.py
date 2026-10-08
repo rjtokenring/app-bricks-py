@@ -20,7 +20,7 @@ _connect_timeout = 5.0  # Seconds an app waits for its router before failing
 _bridge: RouterBridge | None = None
 _bridge_lock = threading.Lock()
 _provided: set[str] = set()
-"""Method names currently provided through this module."""
+"""Method names currently provided through this module. Guarded by _bridge_lock."""
 
 
 def _get_bridge() -> RouterBridge:
@@ -113,7 +113,8 @@ class Bridge:
             Bridge.provide("get_country", get_country)
         """
         _get_bridge().provide(method_name, handler)
-        _provided.add(method_name)
+        with _bridge_lock:
+            _provided.add(method_name)
 
     @staticmethod
     def unprovide(method_name: str) -> None:
@@ -126,7 +127,8 @@ class Bridge:
             Bridge.unprovide("get_country")
         """
         _get_bridge().unprovide(method_name)
-        _provided.discard(method_name)
+        with _bridge_lock:
+            _provided.discard(method_name)
 
 
 def notify(method_name: str | None = None) -> Callable[[Callable[..., object]], Callable[..., None]]:

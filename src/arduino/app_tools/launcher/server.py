@@ -43,9 +43,10 @@ from .appinfo import (  # noqa: E402
     load_app,
     needs_prepare,
     record_prepared,
+    required_devices,
     resolve_app_path,
 )
-from .imports import DEFAULT_PRELOAD, excluded_modules, local_module_names, scan_imports, warm_candidates  # noqa: E402
+from .imports import CAMERA_MODULES, DEFAULT_PRELOAD, excluded_modules, local_module_names, scan_imports, uses_camera, warm_candidates  # noqa: E402
 from .prepare import DEFAULT_RUN_SH, run_prepare  # noqa: E402
 from .process import ExitInfo, Worker, WorkerError, WorkerSpec, WorkerState, read_meminfo_kb  # noqa: E402
 from .protocol import Message  # noqa: E402
@@ -96,8 +97,9 @@ class Config:
     replacement_delay_s: float = 5.0
     """Latest time after an app starts at which its next worker begins warming. An app reaching App.run() gets it
     sooner, start_priority_tail_s later, once its own start no longer needs the CPU."""
-    reload_timeout_s: float = 5.0
-    """How long a reload may take inside the app process, shutdown included, before the app is restarted instead."""
+    reload_margin_s: float = 2.5
+    """How much longer than stop_timeout_s, the app's own shutdown budget, a reload may take inside the app process
+    before the app is restarted instead: the worker still has to wait for the app's threads and reset the library."""
     start_priority_s: float = 15.0
     """While an app starts, the other warm-ups are suspended, at most this long; 0 disables it."""
     start_priority_tail_s: float = 1.0
@@ -126,7 +128,7 @@ class Config:
             warm_timeout_s=_env_float(environ, "APP_LAUNCHER_WARM_TIMEOUT_S", defaults.warm_timeout_s),
             run_timeout_s=_env_float(environ, "APP_LAUNCHER_RUN_TIMEOUT_S", defaults.run_timeout_s),
             replacement_delay_s=_env_float(environ, "APP_LAUNCHER_REPLACEMENT_DELAY_S", defaults.replacement_delay_s),
-            reload_timeout_s=_env_float(environ, "APP_LAUNCHER_RELOAD_TIMEOUT_S", defaults.reload_timeout_s),
+            reload_margin_s=_env_float(environ, "APP_LAUNCHER_RELOAD_MARGIN_S", defaults.reload_margin_s),
             start_priority_s=_env_float(environ, "APP_LAUNCHER_START_PRIORITY_S", defaults.start_priority_s),
             start_priority_tail_s=_env_float(environ, "APP_LAUNCHER_START_PRIORITY_TAIL_S", defaults.start_priority_tail_s),
             mem_reserve_mb=_env_int(environ, "APP_LAUNCHER_MEM_RESERVE_MB", defaults.mem_reserve_mb),
@@ -318,6 +320,8 @@ class Supervisor:
             bricks += STREAMLIT_MODULES
         local = local_module_names(info.python_dir, info.bricks_dir)
         scanned = scan_imports([info.python_dir, info.bricks_dir])
+        if uses_camera(required_devices(info.brick_ids), scanned):
+            bricks += CAMERA_MODULES
         return warm_candidates(self.config.preload, bricks, scanned, local, excluded_modules(info.brick_ids))
 
     async def _spawn(self, slot: Slot, mode: str) -> Worker:
@@ -465,9 +469,12 @@ class Supervisor:
             WorkerError: if its worker cannot run it.
         """
         async with self._lifecycle:
-            return await self._start_locked(ref, env, prepare, mode, time.time())
+            return await self._start_locked(ref, env=env, prepare=prepare, mode=mode, t_recv=time.time())
 
-    async def _start_locked(self, ref: str, env: dict[str, str] | None, prepare: str, mode: str, t_recv: float) -> Message:
+    async def _start_locked(
+        self, ref: str, *, env: dict[str, str] | None = None, prepare: str = "auto", mode: str = "auto", t_recv: float
+    ) -> Message:
+        """start(), with the lifecycle lock already held: t_recv is when the request that led here arrived."""
         slot = self._slot_for(ref)
         if env is not None:
             slot.env = env
@@ -523,10 +530,8 @@ class Supervisor:
 
         self._recent = pool.touch_recent(self._recent, name)
         self._save_recent()
-        if active.app_run_t is not None:
-            self._schedule_next_worker(active, self.config.start_priority_tail_s)
-        else:
-            self._schedule_next_worker(active, self.config.replacement_delay_s)
+        # Brought forward by _on_event when the app reaches App.run(), which may already have happened
+        self._schedule_next_worker(active, self.config.start_priority_tail_s if active.app_run_t is not None else self.config.replacement_delay_s)
         reply: Message = {
             "ok": True,
             "app": name,
@@ -581,12 +586,12 @@ class Supervisor:
             reason = self._reload_blocker(slot, active.worker)
             if reason is None:
                 self._prioritize(active.worker)
-                answer = await active.worker.reload(self.config.reload_timeout_s)
+                answer = await active.worker.reload(self.config.stop_timeout_s + self.config.reload_margin_s)
                 if answer.get("event") == "reload_ok" and self.active is active:
                     return self._reloaded(active, answer, t_recv)
                 reason = str(answer.get("reason") or "the worker could not reload")
             _log(f"reload of {name}: {reason}; restarting it instead")
-            reply = await self._start_locked(name, None, "auto", "auto", t_recv)
+            reply = await self._start_locked(name, t_recv=t_recv)
             reply["reload"] = {"fallback": reason}
             return reply
 

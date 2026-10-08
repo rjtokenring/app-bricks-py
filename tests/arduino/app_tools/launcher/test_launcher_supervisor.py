@@ -221,6 +221,20 @@ def test_the_next_worker_warms_once_the_app_reaches_app_run(env: Env):
     run_scenario(env, scenario, config)
 
 
+def test_the_camera_backends_are_warmed_only_for_an_app_that_opens_a_camera(env: Env):
+    from arduino.app_tools.launcher.appinfo import load_app
+    from arduino.app_tools.launcher.imports import CAMERA_MODULES
+
+    plain = env.app("plain", files={"app.yaml": "name: plain\nbricks:\n- arduino:web_ui: {}\n"})
+    brick = env.app("brick", files={"app.yaml": "name: brick\nbricks:\n- arduino:video_object_detection: {}\n"})
+    own = env.app("own", files={"python/camera_page.py": "from arduino.app_peripherals.camera import Camera\n"})
+    supervisor = Supervisor(env.config)
+    warmed = {path.name: supervisor._warm_modules(load_app(path)) for path in (plain, brick, own)}  # pyright: ignore[reportPrivateUsage]
+    assert not set(CAMERA_MODULES) & set(warmed["plain"]), "web_ui alone opens no camera"
+    assert set(CAMERA_MODULES) <= set(warmed["brick"]), "the brick requires a camera"
+    assert set(CAMERA_MODULES) <= set(warmed["own"]), "the app imports the camera package itself"
+
+
 VENV_ON_DEMAND_RUN_SH = """#!/bin/sh
 # As run.sh: no venv for an app that adds nothing to the image
 echo "$1 $APP_DIR" >> "$FAKE_PREPARE_LOG"

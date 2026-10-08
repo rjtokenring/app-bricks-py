@@ -117,8 +117,9 @@ in its own process: imports, venv and router connection are kept.
    supervisor closes the run (`app_exited` with `reload`) and opens a new one (`app_started`, path `reload`),
    same pid.
 5. Not clean, e.g. a thread still running: `reload_fallback {reason}`. The worker waits, with SIGTERM back to
-   its default, and the supervisor restarts the app as `restart` does, from the standby worker. Also after
-   `reload_timeout_s` (5 s) without an answer.
+   its default, and the supervisor restarts the app as `restart` does, from the standby worker. Also when no answer
+   comes within `stop_timeout_s` + `reload_margin_s` (2.5 + 2.5 s): the app's shutdown budget, plus the thread
+   grace and the reset.
 
 Limits: atexit handlers registered by a run stay (counted in `atexit_added`); state kept by library modules
 outside `App`, `Peripherals` and the Bridge is not reset; an app that catches `BaseException` around its loop
@@ -156,18 +157,27 @@ reload: keeping them open across a reload (camera open ~0.45 s, UVC release ~0.6
 ### What gets imported in advance
 
 `server._warm_modules` → `imports.warm_candidates`, in this order:
-1. `APP_LAUNCHER_PRELOAD`: default numpy, cv2, PIL.Image, yaml, arduino.app_utils;
+1. `APP_LAUNCHER_PRELOAD`: default numpy, yaml, arduino.app_utils;
 2. the bricks of `app.yaml`. The id → module mapping comes from the `id:` of the installed
    `brick_config.yaml` files and is **not** the folder name: `arduino:video_object_detection` →
-   `arduino.app_bricks.video_objectdetection`;
+   `arduino.app_bricks.video_objectdetection`. Then, for an app that opens a camera, the local camera backends
+   (`imports.CAMERA_MODULES`, which bring cv2): a brick of the app lists `camera` in its `required_devices`, or the
+   app's own code imports `arduino.app_peripherals.camera`;
 3. module-level absolute imports found by an AST scan of `python/` and `bricks/`, skipping function bodies and
    `if TYPE_CHECKING:` blocks.
+
+cv2 and PIL are not in the default preload. Measured on an UNO Q, importing the module of most bricks already loads
+both (the Edge Impulse bricks through `app_internal.core.ei`, the video bricks, `camera_code_detection`, `llm`,
+`tts`...), while the bricks that do not (`web_ui`, `weather_forecast`, `dbstorage_sqlstore`, `mqtt`,
+`cloud_llm`...) never need them unless the app opens a camera. cv2 costs ~0.3 s and ~23 MiB per worker, PIL ~0.13 s
+and ~5 MiB.
 
 Names whose top-level package matches an app module are dropped. The web stack (`imports.WEB_UI_MODULES`:
 `arduino.app_bricks.web_ui`, fastapi, fastapi_socketio, starlette, uvicorn, socketio, engineio, with their
 submodules) is dropped from all three groups unless `app.yaml` declares `arduino:web_ui`: an app that imports
 fastapi without the brick gets it at run time. A library from the scan that imports fastapi itself still brings it
-in. The worker additionally skips anything whose `find_spec` origin lies inside the app folder.
+in. The worker additionally skips anything whose `find_spec` origin is the app's own code, `python/` or `bricks/`;
+the app venv, in `.cache/.venv` inside the app folder, is warmed like the image site-packages.
 
 ## Supervisor
 
@@ -188,8 +198,10 @@ request, a failure count and a prepare lock. There is a single active run (`Acti
 6. Short settle (`settle_s`), so the router drops A's provided methods.
 7. Repoint `/home/app/.launcher/current` atomically: temp symlink + `os.replace`.
 8. Send `run` to B's worker and wait for `started`.
-9. Queue the next workers: A's after `replacement_delay_s`, B's after `replacement_delay_s` too, so warming
-   does not take CPU from B's own start.
+9. Queue the next workers, so that warming does not take CPU from B's own start: A's after `replacement_delay_s`,
+   B's `start_priority_tail_s` after B reaches `App.run()`, when the warm-ups suspended by the start resume too,
+   and after `replacement_delay_s` at most, for an app that never calls `App.run()`. On an UNO Q this has a
+   restart 2 s after the previous start find a ready worker: 2.9 s to HTTP instead of 4.5 s.
 
 A restart is the same path with A == B: the stop does not queue a worker, the start does.
 

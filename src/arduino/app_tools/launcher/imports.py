@@ -10,8 +10,18 @@ from pathlib import Path
 
 SKIPPED_DIRS = {"__pycache__", ".cache", ".git", "node_modules"}
 
-DEFAULT_PRELOAD = ("numpy", "cv2", "PIL.Image", "yaml", "arduino.app_utils")
-"""Imported by every worker, whatever its app: the libraries most apps pay seconds for."""
+DEFAULT_PRELOAD = ("numpy", "yaml", "arduino.app_utils")
+"""Imported by every worker, whatever its app: libraries most apps load, cheap enough to keep for the others.
+
+Not cv2 (~0.3 s and ~23 MiB per worker on an UNO Q) nor PIL: most bricks that need them import them anyway, and an
+app that opens a camera itself gets CAMERA_MODULES.
+"""
+
+CAMERA_PACKAGE = "arduino.app_peripherals.camera"
+
+CAMERA_MODULES = (f"{CAMERA_PACKAGE}.v4l_camera", f"{CAMERA_PACKAGE}.csi_camera")
+"""The backends Camera() imports to open a local camera, cv2 among their dependencies. Neither touches a device at
+import, so both are safe to import on a board that has only one kind of camera."""
 
 WEB_UI_BRICK = "arduino:web_ui"
 
@@ -91,6 +101,11 @@ def local_module_names(*roots: Path) -> set[str]:
             elif entry.suffix == ".py" and entry.stem.isidentifier():
                 names.add(entry.stem)
     return names
+
+
+def uses_camera(required_devices: Iterable[str], scanned: Iterable[str]) -> bool:
+    """Whether an app opens a camera: one of its bricks requires it, or its own code imports the camera package."""
+    return "camera" in required_devices or any(name == CAMERA_PACKAGE or name.startswith(CAMERA_PACKAGE + ".") for name in scanned)
 
 
 def excluded_modules(brick_ids: Iterable[str]) -> tuple[str, ...]:

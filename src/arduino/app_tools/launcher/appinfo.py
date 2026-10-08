@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -121,14 +121,22 @@ def load_app(path: Path) -> AppInfo:
     return AppInfo(name=path.name, path=path, brick_ids=tuple(parse_brick_ids(parsed)), streamlit=is_streamlit_app(text))
 
 
+@dataclass(frozen=True)
+class InstalledBrick:
+    """A brick of the library, as its brick_config.yaml describes it."""
+
+    module: str
+    required_devices: tuple[str, ...] = ()
+
+
 @cache
-def brick_module_index() -> dict[str, str]:
-    """Map the id of every installed brick to its module, from the `id:` of each brick_config.yaml.
+def installed_bricks() -> dict[str, InstalledBrick]:
+    """Every installed brick by id, from the `id:` and `required_devices:` of each brick_config.yaml.
 
     The id is not always the package name: arduino:video_object_detection lives in
     arduino.app_bricks.video_objectdetection.
     """
-    index: dict[str, str] = {}
+    index: dict[str, InstalledBrick] = {}
     try:
         spec = importlib.util.find_spec("arduino.app_bricks")
     except (ImportError, ValueError):
@@ -138,18 +146,27 @@ def brick_module_index() -> dict[str, str]:
     for location in spec.submodule_search_locations:
         for config in sorted(Path(location).glob("*/brick_config.yaml")):
             try:
-                brick_id = (yaml.safe_load(config.read_text(encoding="utf-8")) or {}).get("id")
+                data: Any = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
+                brick_id: object = data.get("id")
+                devices: object = data.get("required_devices")
             except (OSError, yaml.YAMLError, AttributeError):
                 continue
             if isinstance(brick_id, str):
-                index.setdefault(brick_id, f"arduino.app_bricks.{config.parent.name}")
+                required = tuple(str(device) for device in cast("list[object]", devices)) if isinstance(devices, list) else ()
+                index.setdefault(brick_id, InstalledBrick(f"arduino.app_bricks.{config.parent.name}", required))
     return index
 
 
 def brick_modules(brick_ids: tuple[str, ...] | list[str]) -> list[str]:
     """Modules of the bricks an app declares; ids with no installed brick, e.g. app-local ones, are skipped."""
-    index = brick_module_index()
-    return [index[brick_id] for brick_id in brick_ids if brick_id in index]
+    index = installed_bricks()
+    return [index[brick_id].module for brick_id in brick_ids if brick_id in index]
+
+
+def required_devices(brick_ids: tuple[str, ...] | list[str]) -> set[str]:
+    """The devices the installed bricks among brick_ids declare they need, e.g. "camera"."""
+    index = installed_bricks()
+    return {device for brick_id in brick_ids if brick_id in index for device in index[brick_id].required_devices}
 
 
 def _compose_main_environment(compose_file: Path) -> dict[str, str]:

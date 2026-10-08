@@ -121,6 +121,13 @@ def test_prepare_is_needed_without_a_venv_or_after_a_change(tmp_path: Path):
     assert appinfo.needs_prepare(app)
 
 
+def test_the_installed_bricks_say_which_devices_they_require():
+    assert appinfo.installed_bricks()["arduino:video_object_detection"].required_devices == ("camera",)
+    assert appinfo.installed_bricks()["arduino:web_ui"].required_devices == ()
+    assert appinfo.required_devices(["arduino:web_ui", "arduino:camera_code_detection", "custom:mine"]) == {"camera"}
+    assert appinfo.required_devices(["arduino:weather_forecast"]) == set()
+
+
 def test_an_app_that_adds_nothing_is_prepared_once_and_runs_without_a_venv(tmp_path: Path):
     app = appinfo.load_app(make_app(tmp_path, "one"))
     assert not appinfo.needs_venv(app)

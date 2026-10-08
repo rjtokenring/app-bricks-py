@@ -54,7 +54,7 @@ services:
       # APP_LAUNCHER_STOP_TIMEOUT_S: "2.5"     # SIGTERM, then SIGKILL to the app process group
       # APP_LAUNCHER_WARM_CONCURRENCY: "2"
       # APP_LAUNCHER_MEM_RESERVE_MB: "400"
-      # APP_LAUNCHER_PRELOAD: "numpy,cv2,PIL.Image,yaml,arduino.app_utils"
+      # APP_LAUNCHER_PRELOAD: "numpy,yaml,arduino.app_utils"
       # APP_LAUNCHER_START_PRIORITY_S: "15"    # warm-ups suspended while an app starts; 0 disables it
     extra_hosts:
       - msgpack-rpc-router=host-gateway

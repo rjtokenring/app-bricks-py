@@ -83,10 +83,11 @@ Errors are `{"ok": false, "error": {"code", "message"}}`, codes `bad_request`, `
 |---|---|---|
 | `APP_LAUNCHER_APPS_DIR` | `/home/arduino/ArduinoApps` | |
 | `APP_LAUNCHER_WARM_APPS` | `all` | or a comma-separated list of app folders |
-| `APP_LAUNCHER_PRELOAD` | `numpy,cv2,PIL.Image,yaml,arduino.app_utils` | imported by every worker; the web stack only with `arduino:web_ui` |
+| `APP_LAUNCHER_PRELOAD` | `numpy,yaml,arduino.app_utils` | imported by every worker; the web stack only with `arduino:web_ui`, the camera backends (cv2) only for an app that opens a camera |
 | `APP_LAUNCHER_STOP_TIMEOUT_S` | `2.5` | SIGTERM to SIGKILL |
 | `APP_LAUNCHER_WARM_CONCURRENCY` | `2` | workers warming at once |
-| `APP_LAUNCHER_REPLACEMENT_DELAY_S` | `5` | delay before warming the next worker of an app just started |
+| `APP_LAUNCHER_REPLACEMENT_DELAY_S` | `5` | longest delay before warming the next worker of an app just started; it starts sooner, `APP_LAUNCHER_START_PRIORITY_TAIL_S` after the app reaches `App.run()` |
+| `APP_LAUNCHER_RELOAD_MARGIN_S` | `2.5` | how much longer than the stop timeout a reload may take in the app process before the app is restarted instead |
 | `APP_LAUNCHER_MEM_RESERVE_MB` | `400` | no new worker below this MemAvailable |
 | `APP_LAUNCHER_START_PRIORITY_S` | `15` | while an app starts the other warm-ups are suspended, at most this long; `0` disables it |
 | `APP_LAUNCHER_START_PRIORITY_TAIL_S` | `1` | they resume this long after the app reaches `App.run()` |

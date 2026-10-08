@@ -102,3 +102,14 @@ def test_the_web_stack_is_warmed_with_the_web_ui_brick():
     excluded = imports.excluded_modules(["arduino:web_ui"])
     assert excluded == ()
     assert imports.warm_candidates([], ["arduino.app_bricks.web_ui"], WEB_SCAN, set(), excluded) == WEB_SCAN
+
+
+def test_the_default_preload_leaves_cv2_and_pil_to_the_apps_that_need_them():
+    assert not {"cv2", "PIL", "PIL.Image"} & set(imports.DEFAULT_PRELOAD)
+
+
+def test_a_camera_brick_or_a_camera_import_means_the_app_opens_a_camera():
+    assert imports.uses_camera({"camera"}, [])
+    assert imports.uses_camera(set(), ["arduino.app_peripherals.camera"])
+    assert imports.uses_camera(set(), ["arduino.app_peripherals.camera.v4l_camera"])
+    assert not imports.uses_camera({"microphone"}, ["arduino.app_utils", "arduino.app_peripherals.camera_extra"])
