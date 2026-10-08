@@ -221,6 +221,30 @@ def test_the_next_worker_warms_once_the_app_reaches_app_run(env: Env):
     run_scenario(env, scenario, config)
 
 
+VENV_ON_DEMAND_RUN_SH = """#!/bin/sh
+# As run.sh: no venv for an app that adds nothing to the image
+echo "$1 $APP_DIR" >> "$FAKE_PREPARE_LOG"
+"""
+
+
+def test_an_app_without_a_venv_is_prepared_once(env: Env):
+    env.app("a")
+    run_sh = env.root / "run-venv-on-demand.sh"
+    run_sh.write_text(VENV_ON_DEMAND_RUN_SH)
+    run_sh.chmod(0o755)
+    config = dataclasses.replace(env.config, run_sh=run_sh)
+
+    async def scenario(supervisor: Supervisor) -> None:
+        await wait_until(lambda: worker_state(supervisor, "a") == "ready")
+        first = await supervisor.start("a")
+        await wait_until(lambda: worker_state(supervisor, "a") == "ready", what="spare worker")
+        second = await supervisor.restart(None)
+        assert second["worker"]["was_ready"] and second["pid"] != first["pid"]
+        assert len(env.prepare_log.read_text().splitlines()) == 1, "prepared at the first warm-up only"
+
+    run_scenario(env, scenario, config)
+
+
 def test_a_reload_runs_the_edited_main_py_in_the_same_process(env: Env):
     app = env.app("a")
 

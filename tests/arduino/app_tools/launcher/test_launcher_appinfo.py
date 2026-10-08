@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -118,6 +119,38 @@ def test_prepare_is_needed_without_a_venv_or_after_a_change(tmp_path: Path):
     assert not appinfo.needs_prepare(app)
     (app_path / "python" / "requirements.txt").write_text("requests\npsutil\n")
     assert appinfo.needs_prepare(app)
+
+
+def test_an_app_that_adds_nothing_is_prepared_once_and_runs_without_a_venv(tmp_path: Path):
+    app = appinfo.load_app(make_app(tmp_path, "one"))
+    assert not appinfo.needs_venv(app)
+    assert appinfo.needs_prepare(app), "never prepared by the launcher"
+    appinfo.record_prepared(app)
+    assert not appinfo.needs_prepare(app), "run.sh makes no venv for it: prepare would run at every start"
+
+
+def test_a_missing_venv_needs_a_prepare_when_the_app_needs_one(tmp_path: Path):
+    app_path = make_app(tmp_path, "one", files={"python/requirements.txt": "requests\n"})
+    app = appinfo.load_app(app_path)
+    appinfo.record_prepared(app)
+    assert appinfo.needs_prepare(app), "the requirements go into a venv that does not exist"
+
+
+@pytest.mark.parametrize(
+    ("files", "streamlit", "expected"),
+    [
+        ({}, False, False),
+        ({"python/requirements.txt": "\n  \n"}, False, False),
+        ({"python/requirements.txt": "requests\n"}, False, True),
+        ({"bricks/mine/requirements.txt": "numpy\n"}, False, True),
+        ({"python-libraries/lib-1.0-py3-none-any.whl": ""}, False, True),
+        ({".cache/.venv/pyvenv.cfg": ""}, False, True),
+        ({}, True, True),
+    ],
+)
+def test_needs_venv_follows_run_sh(tmp_path: Path, files: dict[str, str], streamlit: bool, expected: bool):
+    app = appinfo.load_app(make_app(tmp_path, "one", files=files))
+    assert appinfo.needs_venv(dataclasses.replace(app, streamlit=streamlit)) is expected
 
 
 def test_the_app_fingerprint_ignores_main_py_and_follows_the_rest(tmp_path: Path):

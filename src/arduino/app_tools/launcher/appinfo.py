@@ -220,9 +220,29 @@ def _deps_record(app: AppInfo) -> Path:
     return app.launcher_cache / "deps.sha"
 
 
+def _has_requirements(path: Path) -> bool:
+    try:
+        return any(line.strip() for line in path.read_text().splitlines())
+    except OSError:
+        return False
+
+
+def needs_venv(app: AppInfo) -> bool:
+    """Whether the app runs in its own venv, by the rule of run.sh: a venv that exists is kept, otherwise one is made
+    only for what the app adds to the image, i.e. requirements, private wheels, brick requirements or Streamlit."""
+    if app.venv_python.parent.parent.is_dir() or (app.path / "python-libraries").is_dir():
+        return True
+    if _has_requirements(app.python_dir / "requirements.txt"):
+        return True
+    if app.bricks_dir.is_dir() and any(_has_requirements(path) for path in app.bricks_dir.glob("*/requirements.txt")):
+        return True
+    return app.streamlit
+
+
 def needs_prepare(app: AppInfo) -> bool:
-    """Whether run.sh prepare has to run before the app gets a worker: no venv yet, or its dependencies changed."""
-    if not app.venv_python.exists():
+    """Whether run.sh prepare has to run before the app gets a worker: never prepared, its dependencies changed, or
+    the venv they go into is missing. An app that adds nothing to the image has no venv and needs none."""
+    if needs_venv(app) and not app.venv_python.exists():
         return True
     try:
         recorded = _deps_record(app).read_text().strip()
