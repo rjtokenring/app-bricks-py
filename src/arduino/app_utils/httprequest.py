@@ -6,9 +6,8 @@ from collections.abc import Collection
 from typing import TYPE_CHECKING, Any
 from arduino.app_utils import Logger
 
-# requests and urllib3 are imported when an HttpClient is created, not with arduino.app_utils:
-# they cost ~0.4 s at app start on an UNO Q, also to the apps that never make an HTTP request
 if TYPE_CHECKING:
+    # requests (and urllib3) are imported where they are used: loading them costs ~400 ms at app start
     import requests
 
 logger = Logger("HttpClient")
@@ -27,13 +26,13 @@ class HttpClient:
         status_forcelist: Collection[int] = (411, 500, 502, 503, 504),
         allowed_methods: Collection[str] = frozenset(["GET", "POST", "PUT", "DELETE"]),
     ) -> None:
-        import requests
-        from requests.adapters import HTTPAdapter
-        from urllib3.util.retry import Retry
-
         self.__total_retries = total_retries
         self.__backoff_factor = backoff_factor
         self.__status_forcelist = status_forcelist
+
+        import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
 
         # Configure the Retry strategy
         retries_strategy = Retry(
