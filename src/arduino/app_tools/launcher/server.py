@@ -94,7 +94,8 @@ class Config:
     warm_timeout_s: float = 300.0
     run_timeout_s: float = 15.0
     replacement_delay_s: float = 5.0
-    """How long after an app starts its next worker begins warming, not to compete with the app's own start."""
+    """Latest time after an app starts at which its next worker begins warming. An app reaching App.run() gets it
+    sooner, start_priority_tail_s later, once its own start no longer needs the CPU."""
     reload_timeout_s: float = 5.0
     """How long a reload may take inside the app process, shutdown included, before the app is restarted instead."""
     start_priority_s: float = 15.0
@@ -163,6 +164,8 @@ class ActiveRun:
     t_recv: float
     stopping: bool = False
     app_run_t: float | None = None
+    next_worker: asyncio.TimerHandle | None = None
+    """When the app's next worker is asked for: brought forward once the app reaches App.run()."""
     log: deque[str] = field(default_factory=lambda: deque[str](maxlen=LOG_TAIL_LINES))
     log_splitter: protocol.LineSplitter = field(default_factory=protocol.LineSplitter)
 
@@ -520,7 +523,10 @@ class Supervisor:
 
         self._recent = pool.touch_recent(self._recent, name)
         self._save_recent()
-        self._request_warm(name, delay=self.config.replacement_delay_s)
+        if active.app_run_t is not None:
+            self._schedule_next_worker(active, self.config.start_priority_tail_s)
+        else:
+            self._schedule_next_worker(active, self.config.replacement_delay_s)
         reply: Message = {
             "ok": True,
             "app": name,
@@ -604,7 +610,7 @@ class Supervisor:
         if tail:
             self._add_log_line(previous, tail.decode(errors="replace"))
         self._publish({"event": "app_exited", "app": name, "run_id": previous.run_id, "reload": True})
-        active = ActiveRun(slot=previous.slot, worker=worker, run_id=next(self._run_ids), t_recv=t_recv)
+        active = ActiveRun(slot=previous.slot, worker=worker, run_id=next(self._run_ids), t_recv=t_recv, next_worker=previous.next_worker)
         self.active = active
         timings = {key: answer.get(key) for key in ("shutdown_ms", "reset_ms", "purged", "atexit_added")}
         reply: Message = {
@@ -634,6 +640,8 @@ class Supervisor:
         if self.active is not active:
             return
         self.active = None
+        if active.next_worker is not None:
+            active.next_worker.cancel()  # Whoever ended the run decides about the next worker, below or in a start
         self._resume_warm_ups()
         self._point_link(self.config.idle_dir)
         tail = active.log_splitter.rest()
@@ -746,10 +754,19 @@ class Supervisor:
         for queue in list(self._log_followers):
             queue.put_nowait(line)
 
+    def _schedule_next_worker(self, active: ActiveRun, delay: float) -> None:
+        """Ask for the next worker of the running app after delay, replacing an earlier schedule."""
+        if active.next_worker is not None:
+            active.next_worker.cancel()
+        active.next_worker = asyncio.get_running_loop().call_later(delay, self._request_warm, active.slot.info.name)
+
     def _on_event(self, worker: Worker, message: Message) -> None:
         active = self.active
         if message.get("event") == "app_run" and active is not None and active.worker is worker:
             active.app_run_t = worker.app_run_t
+            if active.next_worker is not None:
+                # Its bricks are starting: the next worker warms once they had their moment, not after the fixed delay
+                self._schedule_next_worker(active, self.config.start_priority_tail_s)
             self._publish({"event": "app_run", "app": worker.app_name, "run_id": active.run_id, "t": worker.app_run_t})
             if self._resume_timer is not None:
                 # Its bricks are starting now: give them a moment more, then let the warm-ups go on

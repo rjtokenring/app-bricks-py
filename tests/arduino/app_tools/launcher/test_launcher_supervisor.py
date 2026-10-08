@@ -5,6 +5,7 @@
 """The supervisor end to end: real workers, a fake run.sh, apps that record each run."""
 
 import asyncio
+import dataclasses
 import json
 import os
 import shutil
@@ -204,6 +205,20 @@ def test_a_restart_runs_the_edited_main_py(env: Env):
         assert [run["version"] for run in runs] == ["1", "2"]
 
     run_scenario(env, scenario)
+
+
+def test_the_next_worker_warms_once_the_app_reaches_app_run(env: Env):
+    env.app("a", tail="from arduino.app_utils import App\nApp.run()\n")
+    config = dataclasses.replace(env.config, replacement_delay_s=60.0, start_priority_tail_s=0.2)
+
+    async def scenario(supervisor: Supervisor) -> None:
+        await wait_until(lambda: worker_state(supervisor, "a") == "ready")
+        await supervisor.start("a")
+        assert worker_state(supervisor, "a") is None, "the start took the worker"
+        # Well before the 60 s fallback delay
+        await wait_until(lambda: worker_state(supervisor, "a") == "ready", timeout=30.0, what="the next worker")
+
+    run_scenario(env, scenario, config)
 
 
 def test_a_reload_runs_the_edited_main_py_in_the_same_process(env: Env):
