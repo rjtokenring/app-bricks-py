@@ -92,7 +92,9 @@ container app-launcher        init: true, so tini is PID 1 and reaps orphans
    3. send `started` and print the run.sh banner;
    4. install the `App.run()` trace;
    5. `exec` main.py into a fresh `ModuleType('__main__')`.
-4. **End.** The interpreter shuts down normally (threading shutdown, atexit) and the process exits.
+4. **End.** On a signal or `sys.exit()` inside `App.run()`, `App._exit` runs the atexit handlers, flushes and
+   calls `os._exit` once the shutdown is done: the interpreter teardown (~0.9 s on an UNO Q) is skipped. An app
+   whose main.py returns ends through the normal interpreter shutdown.
 
 ### Reload in the same process
 
@@ -137,9 +139,10 @@ reload: keeping them open across a reload (camera open ~0.45 s, UVC release ~0.6
 - **Uncaught exceptions.** Frames of `worker.py` are stripped, and the hook is called with
   `exc.with_traceback(tb)`. The default hook of Python 3.12+ prints `exc.__traceback__` and ignores its `tb`
   argument. Exit code 1, as for an uncaught exception.
-- **The worker never installs a SIGTERM handler.** Idle, SIGTERM kills it. Running, `App.run()` installs its
-  own handler (`app.py`, exit 143). This also stays compatible with the import-time handler of PR #554, which
-  installs only over `SIG_DFL`.
+- **The worker never installs a SIGTERM handler.** Importing `arduino.app_utils` installs one over `SIG_DFL`
+  (`install_startup_signal_handler`, exit 143), so a worker warmed with it ends on SIGTERM through the
+  interpreter; `App.run()` takes the signal over with its own (`app.py`, exit 143 through `App._exit`). A
+  reload that falls back puts SIGTERM back to `SIG_DFL` while it waits to be stopped.
 - **SIGUSR1 belongs to the worker** while main.py runs: it carries the reload. An app that installs its own
   SIGUSR1 handler still runs, but its reloads fall back to a restart.
 - **Shadowed module names.** If an app module has the name of a module already imported, e.g. a local
@@ -347,4 +350,3 @@ must be reaped) and a non-root user.
 - Learned preloads: snapshot `sys.modules` at `App.run()` and replay it at the next warm-up.
 - Trigger through the Bridge instead of, or next to, the unix socket.
 - Port 7000 is published by the launcher container: it cannot run next to classic app containers.
-- PR #554 (lazy imports, `perf/app-startup-time`) changes run.sh too: expect a merge to reconcile.

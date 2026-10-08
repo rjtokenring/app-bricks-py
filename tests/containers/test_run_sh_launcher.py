@@ -71,7 +71,7 @@ def _app(tmp_path: Path, files: dict[str, str] | None = None, app_yaml: str = "n
 
 
 def test_app_dir_names_the_app_folder(tmp_path: Path):
-    app = _app(tmp_path)
+    app = _app(tmp_path, {"python/requirements.txt": "requests\n"})  # Something to install: the app gets a venv
     result, calls = _run(app, tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     venv = app / ".cache" / ".venv"

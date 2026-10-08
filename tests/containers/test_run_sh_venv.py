@@ -38,11 +38,9 @@ STREAMLIT_APP_YAML = "name: t\nbricks:\n- arduino:streamlit_ui: {}\n"
 
 def _run(app: Path, tmp_path: Path) -> list[str]:
     """Run run.sh against an app folder with the tools replaced by loggers; return the commands they saw."""
-    # The script serves /app, where the container mounts the app: a copy pointed at the test folder stands in
-    script = RUN_SH.read_text().replace("\r\n", "\n")
-    assert script.count('BASE_DIR="/app"\n') == 1, "run.sh no longer sets BASE_DIR the way this test rewrites it"
+    # APP_DIR points the script at the test folder instead of /app; the copy has LF line ends on any checkout
     run_sh = tmp_path / "run.sh"
-    run_sh.write_text(script.replace('BASE_DIR="/app"\n', f'BASE_DIR="{app}"\n'))
+    run_sh.write_text(RUN_SH.read_text().replace("\r\n", "\n"))
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     for name, body in FAKE_TOOLS.items():
@@ -60,6 +58,7 @@ def _run(app: Path, tmp_path: Path) -> list[str]:
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "HOME": str(home),
         "FAKE_LOG": str(log),
+        "APP_DIR": str(app),
     }
     result = subprocess.run(["sh", str(run_sh)], env=env, capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -79,7 +78,7 @@ def _app(tmp_path: Path, files: dict[str, str] | None = None, app_yaml: str = WE
 
 
 def _venv_created(app: Path, calls: list[str]) -> bool:
-    return f"uv venv {app}/.cache/.venv --system-site-packages" in calls
+    return any(call.startswith(f"uv venv {app}/.cache/.venv --system-site-packages") for call in calls)
 
 
 def test_an_app_that_adds_nothing_runs_on_the_system_interpreter(tmp_path: Path):
@@ -133,4 +132,4 @@ def test_streamlit_apps_get_a_venv(tmp_path: Path):
     calls = _run(app, tmp_path)
     assert _venv_created(app, calls), calls
     assert any("uv pip install" in c and "streamlit" in c for c in calls), calls
-    assert calls[-1].startswith("streamlit run")
+    assert calls[-1].startswith("python -m streamlit run")
