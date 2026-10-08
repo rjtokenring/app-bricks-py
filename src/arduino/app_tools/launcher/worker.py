@@ -53,7 +53,7 @@ from typing import Any  # noqa: E402
 PROTOCOL_VERSION = 1
 """Must match arduino.app_tools.launcher.protocol.PROTOCOL_VERSION."""
 
-FEATURES = ["reload"]
+FEATURES = ("reload",)
 """What this worker supports beyond the protocol version, announced in `hello`."""
 
 RELOAD_SIGNAL = signal.SIGUSR1
@@ -137,9 +137,13 @@ class Quit(Exception):
     """The supervisor asked this worker to end, or went away, before the app ran."""
 
 
-def _is_within(path: str, folder: str) -> bool:
+APP_CODE_DIRS = ("python", "bricks")
+"""The app's own code: the folders of the app that are on sys.path when it runs. Not its .cache, where its venv is."""
+
+
+def _is_app_code(path: str, app_real: str) -> bool:
     real = os.path.realpath(path)
-    return real == folder or real.startswith(folder + os.sep)
+    return any(real == folder or real.startswith(folder + os.sep) for folder in (os.path.join(app_real, name) for name in APP_CODE_DIRS))
 
 
 def _module_origin(spec: importlib.machinery.ModuleSpec) -> str | None:
@@ -202,8 +206,8 @@ def warm(channel: Channel, modules: list[str], app_real: str) -> Message | None:
         if spec is None:
             continue  # Not installed in this venv: the app does not need it, or will say so itself
         origin = _module_origin(spec)
-        if origin is not None and _is_within(origin, app_real):
-            continue  # The app's own code is imported only when the app runs
+        if origin is not None and _is_app_code(origin, app_real):
+            continue  # The app's own code is imported only when the app runs; its venv is not its code
         try:
             importlib.import_module(name)
             imported.append(name)
@@ -295,7 +299,7 @@ def _shadowed_local_modules(roots: list[str], app_real: str) -> list[str]:
             if module is None or not name.isidentifier():
                 continue
             location = getattr(module, "__file__", None)
-            if location is None or not _is_within(location, app_real):
+            if location is None or not _is_app_code(location, app_real):
                 shadowed.append(name)
     return sorted(set(shadowed))
 
@@ -639,7 +643,8 @@ def run(channel: Channel, request: Message, app_real: str, link: str, warmed: bo
         # An app module has the name of one imported in advance: only a fresh interpreter runs it as python main.py would
         channel.close()
         _exec_fresh_interpreter([main_py])
-    _run_reloadable(channel, main_py, (python_dir, bricks_dir, os.path.join(app_real, "python"), os.path.join(app_real, "bricks")))
+    # As the app reaches its code through the link, and as it really is: the prefixes the purge of a reload compares
+    _run_reloadable(channel, main_py, tuple(os.path.join(base, name) for base in (link, app_real) for name in APP_CODE_DIRS))
 
 
 def main() -> None:

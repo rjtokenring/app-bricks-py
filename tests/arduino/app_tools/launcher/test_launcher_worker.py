@@ -140,8 +140,10 @@ def run_classic(tmp_path: Path, link: Path, mode: str) -> tuple[int, str, str]:
     return result.returncode, result.stdout, result.stderr
 
 
-def run_worker(tmp_path: Path, app: Path, link: Path, mode: str, modules: list[str] | None = None) -> tuple[int, str, str, list[dict[str, Any]]]:
-    worker = WorkerProc(app, link, probe_env(tmp_path, mode, "worker"))
+def run_worker(
+    tmp_path: Path, app: Path, link: Path, mode: str, modules: list[str] | None = None, env: dict[str, str] | None = None
+) -> tuple[int, str, str, list[dict[str, Any]]]:
+    worker = WorkerProc(app, link, {**probe_env(tmp_path, mode, "worker"), **(env or {})})
     events = [worker.event()]
     worker.send({"cmd": "warm", "modules": modules or []})
     events.append(worker.event())
@@ -231,6 +233,27 @@ def test_the_app_own_modules_are_never_imported_in_advance(tmp_path: Path):
     code, _, _, events = run_worker(tmp_path, app, link, "return", modules=["helper"])
     assert code == 0
     assert events[1]["imported"] == []
+
+
+VENV_SITE = ".cache/.venv/lib/python3/site-packages"
+"""Where an app venv keeps its packages: inside the app folder, but not the app's code."""
+
+
+def test_the_app_venv_is_imported_in_advance(tmp_path: Path):
+    app, link = make_app(tmp_path, {f"{VENV_SITE}/venvlib.py": "VALUE = 1\n"})
+    code, _, _, events = run_worker(tmp_path, app, link, "return", modules=["venvlib"], env={"PYTHONPATH": str(app / VENV_SITE)})
+    assert code == 0
+    assert events[1]["imported"] == ["venvlib"]
+
+
+def test_a_venv_module_named_like_an_app_module_gets_a_fresh_interpreter(tmp_path: Path):
+    main = "import helper, os\nopen(os.environ['PROBE_OUT'] + '.helper', 'w').write(helper.__file__)\n"
+    app, link = make_app(tmp_path, {f"{VENV_SITE}/helper.py": "LOCAL = False\n", "python/helper.py": "LOCAL = True\n", "python/main.py": main})
+    code, _, _, events = run_worker(tmp_path, app, link, "return", modules=["helper"], env={"PYTHONPATH": str(app / VENV_SITE)})
+    assert code == 0
+    assert events[1]["imported"] == ["helper"]
+    assert events[2]["path"] == "exec" and events[2]["shadowed"] == ["helper"]
+    assert os.path.realpath((tmp_path / "worker.helper").read_text()) == str((app / "python" / "helper.py").resolve()), "the app gets its own module"
 
 
 def test_an_app_module_named_like_a_preloaded_one_gets_a_fresh_interpreter(tmp_path: Path):
