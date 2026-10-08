@@ -96,6 +96,7 @@ class Worker:
         self._started = asyncio.Event()
         self._leader_exited = asyncio.Event()
         self._exited = asyncio.Event()
+        self._reload_reply: asyncio.Future[Message] | None = None
         self._tasks: list[asyncio.Task[None]] = []
 
     @property
@@ -198,6 +199,12 @@ class Worker:
             self._started.set()
         elif event == "app_run":
             self.app_run_t = float(message.get("t", time.time()))
+        elif event in ("reload_ok", "reload_fallback"):
+            if event == "reload_ok":
+                self.started_info = message
+                self.app_run_t = None
+            if self._reload_reply is not None and not self._reload_reply.done():
+                self._reload_reply.set_result(message)
         self._on_event(self, message)
 
     async def _read_output(self) -> None:
@@ -255,6 +262,31 @@ class Worker:
         self._send({"cmd": "run", "streamlit": streamlit})
         await self._wait_for((self._started,), timeout, "started")
         return self.started_info
+
+    @property
+    def can_reload(self) -> bool:
+        """The worker runs main.py itself and can run it again: not after an exec, not for Streamlit."""
+        return "reload" in self.hello.get("features", []) and self.started_info.get("path") in ("warm", "immediate", "reload")
+
+    async def reload(self, timeout: float) -> Message:
+        """Ask the running worker to run main.py again in its process; returns its `reload_ok` or `reload_fallback`.
+
+        A worker that does not answer in time, or exits, gets a `reload_fallback` built here.
+        """
+        self.resume()
+        reply: asyncio.Future[Message] = asyncio.get_running_loop().create_future()
+        self._reload_reply = reply
+        exited = asyncio.create_task(self._leader_exited.wait())
+        try:
+            self._send({"cmd": "reload"})
+            await asyncio.wait([reply, exited], timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            exited.cancel()
+            self._reload_reply = None
+        if reply.done():
+            return reply.result()
+        reason = "the worker exited" if self._leader_exited.is_set() else f"no answer within {timeout:.1f}s"
+        return {"event": "reload_fallback", "reason": reason}
 
     def suspend(self) -> bool:
         """Stop the worker with SIGSTOP, to leave the CPU to an app starting; returns whether it did."""

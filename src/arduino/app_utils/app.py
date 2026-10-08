@@ -335,6 +335,38 @@ class AppController:
             # leaves its one-shot latch open so the interpreter-exit fallback can try again.
             logger.exception(f"Failed to release the peripherals: {e}")
 
+    def _reset_for_reload(self) -> list[str]:
+        """Stops every brick and peripheral still active, then empties the controller as at import.
+
+        A run interrupted inside App.run() is already shut down; one interrupted before it, or whose
+        bricks were started by hand, is not, so the bricks and the peripherals are stopped here too.
+
+        Returns:
+            list[str]: Why the process is not clean enough for another run; empty when it is.
+        """
+        self._stopping = True
+        try:
+            self._stop_all_bricks()
+        finally:
+            self._stop_all_peripherals()
+
+        problems: list[str] = []
+        if not self._app_lock.acquire(timeout=SHUTDOWN_LOCK_BUDGET_S):
+            return ["the app lock is still held"]
+        try:
+            if self._running_queue:
+                problems.append(f"bricks still running: {', '.join(_brick_name(brick) for brick in self._running_queue)}")
+            self._waiting_queue.clear()
+            self._running_queue.clear()
+            self._brick_states.clear()
+            self._running = False
+            self._stopping = False
+        finally:
+            self._app_lock.release()
+        # The peripherals of the ended run are released: the next run registers its own
+        peripheral_registry.Peripherals.clear()
+        return problems
+
     def _is_framework_managed(self) -> bool:
         """Detect if running inside a framework that manages the process lifecycle.
 

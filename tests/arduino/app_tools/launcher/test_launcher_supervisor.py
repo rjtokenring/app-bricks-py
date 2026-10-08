@@ -206,6 +206,78 @@ def test_a_restart_runs_the_edited_main_py(env: Env):
     run_scenario(env, scenario)
 
 
+def test_a_reload_runs_the_edited_main_py_in_the_same_process(env: Env):
+    app = env.app("a")
+
+    async def scenario(supervisor: Supervisor) -> None:
+        await wait_until(lambda: worker_state(supervisor, "a") == "ready")
+        first = await supervisor.start("a")
+        await wait_until(lambda: env.runs("a"))
+        events: asyncio.Queue[Any] = asyncio.Queue()
+        supervisor._subscribers.add(events)  # pyright: ignore[reportPrivateUsage]
+        (app / "python" / "main.py").write_text(RECORDING_APP.format(version="2", tail=LOOP))
+        second = await supervisor.reload()
+        assert second["ok"] and second["path"] == "reload", second
+        assert second["pid"] == first["pid"] and second["run_id"] != first["run_id"]
+        runs = await wait_until(lambda: len(env.runs("a")) == 2 and env.runs("a"))
+        assert [run["version"] for run in runs] == ["1", "2"]
+        assert runs[0]["pid"] == runs[1]["pid"]
+        published = [events.get_nowait() for _ in range(events.qsize())]
+        assert [(e["event"], e["run_id"]) for e in published if e["event"] in ("app_exited", "app_started")] == [
+            ("app_exited", first["run_id"]),
+            ("app_started", second["run_id"]),
+        ]
+        stopped = await supervisor.stop()
+        assert stopped["stopped"]["signal"] == "SIGTERM", "the reloaded app stops as any other"
+
+    run_scenario(env, scenario)
+
+
+def test_a_reload_falls_back_to_a_restart_when_the_process_is_not_clean(env: Env):
+    stray = "import threading\nthreading.Thread(target=time.sleep, args=(300,), name='stray', daemon=True).start()\n" + LOOP
+    env.app("a", tail=stray)
+
+    async def scenario(supervisor: Supervisor) -> None:
+        await wait_until(lambda: worker_state(supervisor, "a") == "ready")
+        first = await supervisor.start("a")
+        await wait_until(lambda: env.runs("a"))
+        await wait_until(lambda: worker_state(supervisor, "a") == "ready", what="spare worker")
+        second = await supervisor.reload()
+        assert "stray" in second["reload"]["fallback"], second
+        assert second["pid"] != first["pid"] and pid_gone(first["pid"])
+        assert second["worker"]["was_ready"], "the fallback takes the spare worker"
+        await wait_until(lambda: len(env.runs("a")) == 2)
+
+    run_scenario(env, scenario)
+
+
+def test_a_reload_falls_back_to_a_restart_when_the_dependencies_change(env: Env):
+    app = env.app("a")
+
+    async def scenario(supervisor: Supervisor) -> None:
+        await wait_until(lambda: worker_state(supervisor, "a") == "ready")
+        first = await supervisor.start("a")
+        await wait_until(lambda: env.runs("a"))
+        prepares = len(env.prepare_log.read_text().splitlines())
+        (app / "python" / "requirements.txt").write_text("requests\n")
+        second = await supervisor.reload()
+        assert second["reload"]["fallback"] == "its dependencies changed"
+        assert second["pid"] != first["pid"]
+        assert len(env.prepare_log.read_text().splitlines()) == prepares + 1, "the restart installs the new dependencies"
+
+    run_scenario(env, scenario)
+
+
+def test_a_reload_with_no_app_running_is_not_found(env: Env):
+    env.app("a")
+
+    async def scenario(supervisor: Supervisor) -> None:
+        reply = await supervisor.dispatch({"cmd": "reload"})
+        assert reply["error"]["code"] == "not_found"
+
+    run_scenario(env, scenario)
+
+
 def test_an_app_that_ignores_sigterm_is_killed_with_its_children(env: Env):
     app = env.app("stubborn", tail=STUBBORN_TAIL)
 

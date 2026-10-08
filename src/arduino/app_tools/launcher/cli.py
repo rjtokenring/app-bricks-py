@@ -80,6 +80,7 @@ def main(argv: list[str] | None = None) -> None:
     commands.add_parser("stop", help="stop the running app")
     restart = commands.add_parser("restart", help="start an app again, the running one by default")
     restart.add_argument("app", nargs="?")
+    commands.add_parser("reload", help="run the edited main.py of the running app again in its process; restarts it if it cannot")
     prepare = commands.add_parser("prepare", help="run run.sh prepare on an app: venv and dependencies")
     prepare.add_argument("app")
     prepare.add_argument("--env", action="append", metavar="KEY=VALUE")
@@ -116,7 +117,7 @@ def main(argv: list[str] | None = None) -> None:
     from .client import Client, LauncherUnavailable
 
     client = Client(
-        socket_path, timeout=None if args.command in ("start", "restart", "prepare", "bench") else (2.0 if args.command == "ping" else 60.0)
+        socket_path, timeout=None if args.command in ("start", "restart", "reload", "prepare", "bench") else (2.0 if args.command == "ping" else 60.0)
     )
     try:
         reply: Message
@@ -132,6 +133,8 @@ def main(argv: list[str] | None = None) -> None:
             reply = client.call("start", **request)
         elif args.command == "restart":
             reply = client.call("restart", **({"app": args.app} if args.app else {}))
+        elif args.command == "reload":
+            reply = client.call("reload")
         elif args.command == "prepare":
             env = _parse_env(args.env)
             reply = client.call("prepare", app=args.app, **({"env": env} if env is not None else {}))

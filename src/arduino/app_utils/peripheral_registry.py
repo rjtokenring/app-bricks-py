@@ -219,7 +219,7 @@ class PeripheralRegistry:
             self._stopping = False
 
     def clear(self) -> None:
-        """Drop every registration and re-arm the one-shot latch. Intended for tests."""
+        """Drop every registration and re-arm the one-shot latch."""
         with self._lock:
             self._peripherals.clear()
             self._stopped = False

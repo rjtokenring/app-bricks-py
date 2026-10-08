@@ -64,9 +64,10 @@ container app-launcher        init: true, so tini is PID 1 and reaps orphans
 
 - **Supervisor.** Never imports app code or heavy libraries, and never imports `arduino.app_utils`. It owns
   the control socket, the pool, the `/app` link, `run.sh prepare`, log relay and events.
-- **Worker.** One OS process, **used for at most one run of its app**. It is never reused: the "clean context"
-  for the next start is a new process. Thread leaks, the router connection with its `provide`d methods,
-  devices, port 7000, module state: the OS cleans all of it when the process ends.
+- **Worker.** One OS process, **used for one run of its app**, or for several consecutive runs of the same
+  app through `reload` (below). Otherwise the "clean context" for the next start is a new process. Thread
+  leaks, the router connection with its `provide`d methods, devices, port 7000, module state: the OS cleans all
+  of it when the process ends.
 
 ## Life of a worker
 
@@ -93,6 +94,38 @@ container app-launcher        init: true, so tini is PID 1 and reaps orphans
    5. `exec` main.py into a fresh `ModuleType('__main__')`.
 4. **End.** The interpreter shuts down normally (threading shutdown, atexit) and the process exits.
 
+### Reload in the same process
+
+`reload` (`Supervisor.reload`, `arduino-app-launcher reload`) runs the edited main.py of the running app again
+in its own process: imports, venv and router connection are kept.
+
+1. The supervisor refuses it, and restarts instead, when the worker cannot reload (Streamlit, exec path, an
+   older worker without the `reload` feature in `hello`), when `needs_prepare` or when the app fingerprint
+   changed (app.yaml, venv, env).
+2. During the run a daemon thread of the worker (`launcher-control`) reads the channel. On `reload` it sends
+   SIGUSR1 to the main thread; the handler raises `Reload`, a `BaseException`. Inside `App.run()` the existing
+   `except BaseException` path shuts the app down (bricks, then peripherals) within the usual budgets.
+3. Back in the worker: `arduino.app_utils._reload.reset()` empties `App` (queues, flags, peripheral registry)
+   and withdraws the `provide`d methods; the process state captured before the first run is put back
+   (signal handlers, `sys.path`, env, argv, cwd, stdio, root logging handlers); the threads started by the run
+   get 1 s to end. Threads named `Bridge.*` are the router connection and may stay.
+4. Clean: the modules imported from `python/` and `bricks/` are dropped, with their `.pyc` (an edit within the
+   second of the import, same size, would otherwise run the old bytecode), and main.py runs again in a new
+   `__main__`. The worker sends `reload_ok` with `shutdown_ms`, `reset_ms`, `purged`, `atexit_added`; the
+   supervisor closes the run (`app_exited` with `reload`) and opens a new one (`app_started`, path `reload`),
+   same pid.
+5. Not clean, e.g. a thread still running: `reload_fallback {reason}`. The worker waits, with SIGTERM back to
+   its default, and the supervisor restarts the app as `restart` does, from the standby worker. Also after
+   `reload_timeout_s` (5 s) without an answer.
+
+Limits: atexit handlers registered by a run stay (counted in `atexit_added`); state kept by library modules
+outside `App`, `Peripherals` and the Bridge is not reset; an app that catches `BaseException` around its loop
+swallows the `Reload` and gets the timeout fallback. `Reload` is asynchronous, like `KeyboardInterrupt`: landing
+in `AppController._start()` between `brick.start()` and the append to `_running_queue`, it leaves a started brick
+the shutdown never sees, and a device opened in `start()` stays open (the thread check does not see an fd).
+Peripherals are released and opened again at every
+reload: keeping them open across a reload (camera open ~0.45 s, UVC release ~0.67 s) is the next step.
+
 ### Why main.py runs the way it does (do not "simplify")
 
 - **Not `runpy.run_path`.** It puts the previous `__main__` back as soon as the top-level code returns, but
@@ -107,6 +140,8 @@ container app-launcher        init: true, so tini is PID 1 and reaps orphans
 - **The worker never installs a SIGTERM handler.** Idle, SIGTERM kills it. Running, `App.run()` installs its
   own handler (`app.py`, exit 143). This also stays compatible with the import-time handler of PR #554, which
   installs only over `SIG_DFL`.
+- **SIGUSR1 belongs to the worker** while main.py runs: it carries the reload. An app that installs its own
+  SIGUSR1 handler still runs, but its reloads fall back to a restart.
 - **Shadowed module names.** If an app module has the name of a module already imported, e.g. a local
   `fractions.py` or `utils.py` after a preload, the worker `execv`s a fresh `python /app/python/main.py`
   (path `exec`). Correct, just not warm. A fresh interpreter sets `sys.path[0]` to the *real* folder of

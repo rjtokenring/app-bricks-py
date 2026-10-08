@@ -66,6 +66,7 @@ command:
 | `{"cmd": "start", "app", "env"?, "prepare"?: "auto"\|"never", "mode"?: "auto"\|"immediate"}` | `arduino-app-launcher start APP [--env K=V]` | `run_id`, `pid`, `path` (warm, exec, streamlit), timings |
 | `{"cmd": "stop"}` | `stop` | exit code, signal, `killed`, `stop_ms` |
 | `{"cmd": "restart", "app"?}` | `restart [APP]` | as start |
+| `{"cmd": "reload"}` | `reload` | as start, `path: "reload"` and `reload {shutdown_ms, reset_ms, purged, atexit_added}`; or a restart's reply with `reload.fallback` |
 | `{"cmd": "prepare", "app"}` | `prepare APP` | runs `run.sh prepare` |
 | `{"cmd": "warm", "app"}`, `{"cmd": "rescan"}` | `warm APP`, `rescan` | |
 | `{"cmd": "ping"}` | `ping [--all-ready] [-q]`, the healthcheck | `readiness`: apps ready to start warm, apps not yet |

@@ -95,6 +95,8 @@ class Config:
     run_timeout_s: float = 15.0
     replacement_delay_s: float = 5.0
     """How long after an app starts its next worker begins warming, not to compete with the app's own start."""
+    reload_timeout_s: float = 5.0
+    """How long a reload may take inside the app process, shutdown included, before the app is restarted instead."""
     start_priority_s: float = 15.0
     """While an app starts, the other warm-ups are suspended, at most this long; 0 disables it."""
     start_priority_tail_s: float = 1.0
@@ -123,6 +125,7 @@ class Config:
             warm_timeout_s=_env_float(environ, "APP_LAUNCHER_WARM_TIMEOUT_S", defaults.warm_timeout_s),
             run_timeout_s=_env_float(environ, "APP_LAUNCHER_RUN_TIMEOUT_S", defaults.run_timeout_s),
             replacement_delay_s=_env_float(environ, "APP_LAUNCHER_REPLACEMENT_DELAY_S", defaults.replacement_delay_s),
+            reload_timeout_s=_env_float(environ, "APP_LAUNCHER_RELOAD_TIMEOUT_S", defaults.reload_timeout_s),
             start_priority_s=_env_float(environ, "APP_LAUNCHER_START_PRIORITY_S", defaults.start_priority_s),
             start_priority_tail_s=_env_float(environ, "APP_LAUNCHER_START_PRIORITY_TAIL_S", defaults.start_priority_tail_s),
             mem_reserve_mb=_env_int(environ, "APP_LAUNCHER_MEM_RESERVE_MB", defaults.mem_reserve_mb),
@@ -459,78 +462,80 @@ class Supervisor:
             WorkerError: if its worker cannot run it.
         """
         async with self._lifecycle:
-            t_recv = time.time()
-            slot = self._slot_for(ref)
-            if env is not None:
-                slot.env = env
-            name = slot.info.name
-            stopped: Message | None = None
+            return await self._start_locked(ref, env, prepare, mode, time.time())
 
-            # Dependencies first: a venv must not change under the app using it
-            if prepare != "never" and needs_prepare(slot.info):
-                if self.active is not None and self.active.slot is slot:
-                    stopped = await self._stop_active(rewarm=False)
-                await self._ensure_prepared(slot)
+    async def _start_locked(self, ref: str, env: dict[str, str] | None, prepare: str, mode: str, t_recv: float) -> Message:
+        slot = self._slot_for(ref)
+        if env is not None:
+            slot.env = env
+        name = slot.info.name
+        stopped: Message | None = None
 
-            fingerprint, _ = self._fingerprint(slot)
-            worker, slot.worker = slot.worker, None
-            if worker is not None and (not worker.alive or worker.spec.fingerprint != fingerprint or mode == "immediate"):
-                reason = "immediate mode" if mode == "immediate" else ("it exited" if not worker.alive else "the app changed")
-                _log(f"not using the warm worker of {name}: {reason}")
-                self._spawn_task(self._discard(worker))
-                worker = None
-            was_ready = worker is not None and worker.state == WorkerState.READY
+        # Dependencies first: a venv must not change under the app using it
+        if prepare != "never" and needs_prepare(slot.info):
+            if self.active is not None and self.active.slot is slot:
+                stopped = await self._stop_active(rewarm=False)
+            await self._ensure_prepared(slot)
 
-            # The stopped app gets its next worker once this one has started; a restart of the same app
-            # needs none, it is asked for below
-            restarting = self.active is not None and self.active.slot is slot
-            stopping = (
-                asyncio.create_task(self._stop_active(rewarm=not restarting, rewarm_delay=self.config.replacement_delay_s))
-                if self.active is not None
-                else None
-            )
-            try:
-                if worker is None:
-                    # With an app to stop first, warming overlaps its shutdown
-                    worker = await self._spawn(slot, "warm" if stopping is not None and mode != "immediate" else "immediate")
-            finally:
-                if stopping is not None:
-                    stopped = await stopping
-            if stopped is not None and self.config.settle_s > 0:
-                await asyncio.sleep(self.config.settle_s)
+        fingerprint, _ = self._fingerprint(slot)
+        worker, slot.worker = slot.worker, None
+        if worker is not None and (not worker.alive or worker.spec.fingerprint != fingerprint or mode == "immediate"):
+            reason = "immediate mode" if mode == "immediate" else ("it exited" if not worker.alive else "the app changed")
+            _log(f"not using the warm worker of {name}: {reason}")
+            self._spawn_task(self._discard(worker))
+            worker = None
+        was_ready = worker is not None and worker.state == WorkerState.READY
 
-            self._point_link(slot.info.path)
-            run_id = next(self._run_ids)
-            active = ActiveRun(slot=slot, worker=worker, run_id=run_id, t_recv=t_recv)
-            self.active = active
-            self._flush_warm_output(worker)
-            self._prioritize(worker)
-            t_run = time.time()
-            try:
-                started = await worker.run(self.config.run_timeout_s, slot.info.streamlit)
-            except WorkerError:
-                if self.active is active:
-                    await self._stop_active(rewarm_delay=2.0)
-                raise
+        # The stopped app gets its next worker once this one has started; a restart of the same app
+        # needs none, it is asked for below
+        restarting = self.active is not None and self.active.slot is slot
+        stopping = (
+            asyncio.create_task(self._stop_active(rewarm=not restarting, rewarm_delay=self.config.replacement_delay_s))
+            if self.active is not None
+            else None
+        )
+        try:
+            if worker is None:
+                # With an app to stop first, warming overlaps its shutdown
+                worker = await self._spawn(slot, "warm" if stopping is not None and mode != "immediate" else "immediate")
+        finally:
+            if stopping is not None:
+                stopped = await stopping
+        if stopped is not None and self.config.settle_s > 0:
+            await asyncio.sleep(self.config.settle_s)
 
-            self._recent = pool.touch_recent(self._recent, name)
-            self._save_recent()
-            self._request_warm(name, delay=self.config.replacement_delay_s)
-            reply: Message = {
-                "ok": True,
-                "app": name,
-                "run_id": run_id,
-                "pid": worker.pid,
-                "path": started.get("path"),
-                "worker": {"mode": worker.mode, "was_ready": was_ready, "warm_ms": worker.ready_info.get("warm_ms")},
-                "stopped": stopped,
-                "t": {"recv": t_recv, "run": t_run, "started": started.get("t")},
-            }
-            if started.get("shadowed"):
-                reply["shadowed"] = started["shadowed"]
-            _log(f"started {name} (run {run_id}, pid {worker.pid}, {started.get('path')}) in {(time.time() - t_recv) * 1000:.0f} ms")
-            self._publish({"event": "app_started", **{k: reply[k] for k in ("app", "run_id", "pid", "path", "t")}})
-            return reply
+        self._point_link(slot.info.path)
+        run_id = next(self._run_ids)
+        active = ActiveRun(slot=slot, worker=worker, run_id=run_id, t_recv=t_recv)
+        self.active = active
+        self._flush_warm_output(worker)
+        self._prioritize(worker)
+        t_run = time.time()
+        try:
+            started = await worker.run(self.config.run_timeout_s, slot.info.streamlit)
+        except WorkerError:
+            if self.active is active:
+                await self._stop_active(rewarm_delay=2.0)
+            raise
+
+        self._recent = pool.touch_recent(self._recent, name)
+        self._save_recent()
+        self._request_warm(name, delay=self.config.replacement_delay_s)
+        reply: Message = {
+            "ok": True,
+            "app": name,
+            "run_id": run_id,
+            "pid": worker.pid,
+            "path": started.get("path"),
+            "worker": {"mode": worker.mode, "was_ready": was_ready, "warm_ms": worker.ready_info.get("warm_ms")},
+            "stopped": stopped,
+            "t": {"recv": t_recv, "run": t_run, "started": started.get("t")},
+        }
+        if started.get("shadowed"):
+            reply["shadowed"] = started["shadowed"]
+        _log(f"started {name} (run {run_id}, pid {worker.pid}, {started.get('path')}) in {(time.time() - t_recv) * 1000:.0f} ms")
+        self._publish({"event": "app_started", **{k: reply[k] for k in ("app", "run_id", "pid", "path", "t")}})
+        return reply
 
     async def stop(self) -> Message:
         async with self._lifecycle:
@@ -549,6 +554,71 @@ class Supervisor:
                 raise AppNotFound("no app is running")
             ref = self.active.slot.info.name
         return await self.start(ref)
+
+    async def reload(self) -> Message:
+        """Run the edited main.py of the running app again inside its process, imports kept.
+
+        Falls back to a restart, with a new worker, when the app cannot be reloaded in place: its
+        dependencies, app.yaml or environment changed, or its process is not clean once the app stopped.
+        The reply says which way it went: `path` is "reload", or the reply is a start's with `reload.fallback`.
+
+        Raises:
+            AppNotFound: if no app is running.
+        """
+        async with self._lifecycle:
+            t_recv = time.time()
+            active = self.active
+            if active is None:
+                raise AppNotFound("no app is running")
+            name = active.slot.info.name
+            slot = self._slot_for(name)  # Reads app.yaml again
+            reason = self._reload_blocker(slot, active.worker)
+            if reason is None:
+                self._prioritize(active.worker)
+                answer = await active.worker.reload(self.config.reload_timeout_s)
+                if answer.get("event") == "reload_ok" and self.active is active:
+                    return self._reloaded(active, answer, t_recv)
+                reason = str(answer.get("reason") or "the worker could not reload")
+            _log(f"reload of {name}: {reason}; restarting it instead")
+            reply = await self._start_locked(name, None, "auto", "auto", t_recv)
+            reply["reload"] = {"fallback": reason}
+            return reply
+
+    def _reload_blocker(self, slot: Slot, worker: Worker) -> str | None:
+        """Why the running app cannot be reloaded in its process, or None if it can."""
+        if not worker.alive or worker.state != WorkerState.RUNNING:
+            return "the app is not running"
+        if not worker.can_reload:
+            return f"its worker cannot reload (path {worker.started_info.get('path')})"
+        if needs_prepare(slot.info):
+            return "its dependencies changed"
+        if self._fingerprint(slot)[0] != worker.spec.fingerprint:
+            return "app.yaml, the venv or the environment changed"
+        return None
+
+    def _reloaded(self, previous: ActiveRun, answer: Message, t_recv: float) -> Message:
+        """The worker runs main.py again: close the previous run, as an exit would, and open the new one."""
+        worker = previous.worker
+        name = previous.slot.info.name
+        tail = previous.log_splitter.rest()
+        if tail:
+            self._add_log_line(previous, tail.decode(errors="replace"))
+        self._publish({"event": "app_exited", "app": name, "run_id": previous.run_id, "reload": True})
+        active = ActiveRun(slot=previous.slot, worker=worker, run_id=next(self._run_ids), t_recv=t_recv)
+        self.active = active
+        timings = {key: answer.get(key) for key in ("shutdown_ms", "reset_ms", "purged", "atexit_added")}
+        reply: Message = {
+            "ok": True,
+            "app": name,
+            "run_id": active.run_id,
+            "pid": worker.pid,
+            "path": "reload",
+            "reload": timings,
+            "t": {"recv": t_recv, "started": answer.get("t")},
+        }
+        _log(f"reloaded {name} (run {active.run_id}, pid {worker.pid}) in {(time.time() - t_recv) * 1000:.0f} ms: {timings}")
+        self._publish({"event": "app_started", **{k: reply[k] for k in ("app", "run_id", "pid", "path", "t")}})
+        return reply
 
     async def _stop_active(self, rewarm: bool = True, rewarm_delay: float = 0.0) -> Message | None:
         """Stop the running app and wait until nothing of it is left; then its next worker starts warming."""
@@ -845,6 +915,8 @@ class Supervisor:
             if cmd == "restart":
                 app = request.get("app")
                 return await self.restart(str(app) if app else None)
+            if cmd == "reload":
+                return await self.reload()
             if cmd == "prepare":
                 return await self.prepare(_required_str(request, "app"), env=_optional_env(request))
             if cmd == "warm":

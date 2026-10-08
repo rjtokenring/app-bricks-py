@@ -19,6 +19,8 @@ _connect_timeout = 5.0  # Seconds an app waits for its router before failing
 
 _bridge: RouterBridge | None = None
 _bridge_lock = threading.Lock()
+_provided: set[str] = set()
+"""Method names currently provided through this module."""
 
 
 def _get_bridge() -> RouterBridge:
@@ -111,6 +113,7 @@ class Bridge:
             Bridge.provide("get_country", get_country)
         """
         _get_bridge().provide(method_name, handler)
+        _provided.add(method_name)
 
     @staticmethod
     def unprovide(method_name: str) -> None:
@@ -123,6 +126,7 @@ class Bridge:
             Bridge.unprovide("get_country")
         """
         _get_bridge().unprovide(method_name)
+        _provided.discard(method_name)
 
 
 def notify(method_name: str | None = None) -> Callable[[Callable[..., object]], Callable[..., None]]:
@@ -256,7 +260,7 @@ def provide(method_name: str | None = None) -> Callable[[Callable[..., object]],
         if _is_unbound_or_class_method(func):
             raise TypeError(f"'{func.__name__}' is expected to be a function but is a method or a classmethod.")
 
-        _get_bridge().provide(actual_method_name, func)
+        Bridge.provide(actual_method_name, func)
 
         # Return the original function, registration is only a side-effect
         return func
@@ -278,3 +282,24 @@ def _is_unbound_or_class_method(func: Callable[..., object]) -> bool:
         ) and first_param.name in ("self", "cls")
     except ValueError:
         return False
+
+
+def unprovide_all() -> list[str]:
+    """Withdraws every provided method; the router connection stays open.
+
+    Returns:
+        list[str]: The methods that could not be withdrawn, with the reason.
+    """
+    with _bridge_lock:
+        bridge = _bridge
+        names = sorted(_provided)
+        _provided.clear()
+    if bridge is None:
+        return []
+    problems: list[str] = []
+    for name in names:
+        try:
+            bridge.unprovide(name)
+        except Exception as e:
+            problems.append(f"cannot withdraw the provided method '{name}': {e}")
+    return problems

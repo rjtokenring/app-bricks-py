@@ -300,6 +300,142 @@ def test_sigterm_inside_app_run_exits_143(tmp_path: Path):
     assert code == 143, out
 
 
+RELOADABLE = """
+import json, os, signal, sys, threading, time
+import helper
+VERSION = {version}
+OUT = os.environ["PROBE_OUT"]
+record = {{
+    "version": VERSION,
+    "helper": helper.VALUE,
+    "pid": os.getpid(),
+    "main_is_this_module": sys.modules["__main__"].__dict__ is globals(),
+    "sighup": str(signal.getsignal(signal.SIGHUP)),
+    "path0": sys.path[0],
+    "cwd": os.getcwd(),
+    "env": os.environ.get("PROBE_SET_BY_APP"),
+}}
+with open(OUT + ".runs", "a") as f:
+    f.write(json.dumps(record) + "\\n")
+# What a run may leave behind, which the next run must not see
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
+os.environ["PROBE_SET_BY_APP"] = str(VERSION)
+sys.path.insert(0, "/nowhere")
+os.chdir("/")
+{tail}
+"""
+
+APP_RUN_TAIL = "from arduino.app_utils import App\nApp.run()\n"
+
+
+def reloadable_app(tmp_path: Path, version: int, tail: str = APP_RUN_TAIL) -> tuple[Path, Path]:
+    return make_app(tmp_path, {"python/main.py": RELOADABLE.format(version=version, tail=tail), "python/helper.py": f"VALUE = {version}\n"})
+
+
+def edit(app: Path, version: int, tail: str = APP_RUN_TAIL) -> None:
+    (app / "python" / "main.py").write_text(RELOADABLE.format(version=version, tail=tail))
+    (app / "python" / "helper.py").write_text(f"VALUE = {version}\n")
+
+
+def runs(tmp_path: Path) -> list[dict[str, Any]]:
+    path = tmp_path / "worker.runs"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def wait_for(condition: Any, timeout: float = 20.0) -> Any:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = condition()
+        if value:
+            return value
+        time.sleep(0.05)
+    raise AssertionError("timed out")
+
+
+def next_event(worker: WorkerProc, name: str) -> dict[str, Any]:
+    while (event := worker.event()) is not None:
+        if event.get("event") == name:
+            return event
+    raise AssertionError(f"no {name} event")
+
+
+def started_worker(tmp_path: Path, app: Path, link: Path, modules: list[str]) -> WorkerProc:
+    worker = WorkerProc(app, link, probe_env(tmp_path, "return", "worker"))
+    assert "reload" in next_event(worker, "hello")["features"]
+    worker.send({"cmd": "warm", "modules": modules})
+    next_event(worker, "ready")
+    worker.send({"cmd": "run"})
+    next_event(worker, "started")
+    return worker
+
+
+def test_a_reload_runs_the_edited_app_in_the_same_process(tmp_path: Path):
+    app, link = reloadable_app(tmp_path, 1)
+    worker = started_worker(tmp_path, app, link, ["arduino.app_utils"])
+    next_event(worker, "app_run")
+    wait_for(lambda: runs(tmp_path))
+
+    edit(app, 2)
+    worker.send({"cmd": "reload"})
+    reloaded = next_event(worker, "reload_ok")
+    assert reloaded["pid"] == worker.proc.pid and reloaded["purged"] >= 1, reloaded
+    assert next_event(worker, "app_run"), "the trace reports the App.run() of every run"
+    first, second = wait_for(lambda: len(runs(tmp_path)) == 2 and runs(tmp_path))
+
+    assert (first["version"], second["version"]) == (1, 2)
+    assert second["helper"] == 2, "the app's own modules are imported again"
+    assert second["pid"] == first["pid"]
+    assert second["main_is_this_module"]
+    for key in ("sighup", "path0", "cwd", "env"):
+        assert second[key] == first[key], f"{key}: the second run starts from the state of the first"
+
+    os.kill(worker.proc.pid, signal.SIGTERM)
+    code, out, _ = worker.wait()
+    assert code == 143
+    assert out.count("App is starting") == 2
+
+
+def test_an_app_without_app_run_reloads_too(tmp_path: Path):
+    loop = "while True:\n    time.sleep(0.05)\n"
+    app, link = reloadable_app(tmp_path, 1, loop)
+    worker = started_worker(tmp_path, app, link, [])
+    wait_for(lambda: runs(tmp_path))
+    edit(app, 2, loop)
+    worker.send({"cmd": "reload"})
+    next_event(worker, "reload_ok")
+    assert [run["version"] for run in wait_for(lambda: len(runs(tmp_path)) == 2 and runs(tmp_path))] == [1, 2]
+    os.kill(worker.proc.pid, signal.SIGTERM)
+    worker.wait()
+
+
+def test_a_thread_left_running_makes_the_reload_fall_back(tmp_path: Path):
+    tail = "threading.Thread(target=time.sleep, args=(300,), name='stray', daemon=True).start()\n" + APP_RUN_TAIL
+    app, link = reloadable_app(tmp_path, 1, tail)
+    worker = started_worker(tmp_path, app, link, ["arduino.app_utils"])
+    next_event(worker, "app_run")
+    worker.send({"cmd": "reload"})
+    fallback = next_event(worker, "reload_fallback")
+    assert "stray" in fallback["reason"]
+    assert len(runs(tmp_path)) == 1, "main.py does not run again"
+    # The app is already stopped: a SIGTERM ends the process at once
+    started = time.monotonic()
+    os.kill(worker.proc.pid, signal.SIGTERM)
+    code, _, _ = worker.wait()
+    assert code == -signal.SIGTERM and time.monotonic() - started < 2.0
+
+
+def test_a_reload_after_main_py_returned_falls_back(tmp_path: Path):
+    tail = "threading.Thread(target=time.sleep, args=(300,), name='keeps-it-alive').start()\n"
+    app, link = reloadable_app(tmp_path, 1, tail)
+    worker = started_worker(tmp_path, app, link, [])
+    wait_for(lambda: runs(tmp_path))
+    time.sleep(0.2)
+    worker.send({"cmd": "reload"})
+    assert next_event(worker, "reload_fallback")["reason"] == "main.py has already returned"
+    os.killpg(worker.proc.pid, signal.SIGKILL)
+    worker.wait()
+
+
 def test_an_immediate_worker_reports_app_run_too(tmp_path: Path):
     app, link = make_app(tmp_path)
     worker = WorkerProc(app, link, probe_env(tmp_path, "app_run", "worker"))
