@@ -10,8 +10,8 @@ FROM ghcr.io/astral-sh/uv:0.13.0@sha256:cdc6093146eb3ff6a40107b38f008b789e050e77
 FROM ${REGISTRY}app-bricks/qairt-common-base:${BASE_IMAGE_VERSION}
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG LLAMA_CPP_URL=https://github.com/arduino/app-bricks-py/releases/download/llamacpp%2F20261006/llamacpp-hexagon-20261006.tar.gz
-ARG LLAMA_CPP_DIGEST=sha256:67cbf2cb666bb236e2b7943da5fe17ab4ba74a9930204d9be2ca7092df850497
+ARG LLAMA_CPP_URL=https://github.com/arduino/app-bricks-py/releases/download/llamacpp%2F20261019/llamacpp-hexagon-20261019.tar.gz
+ARG LLAMA_CPP_DIGEST=sha256:79ae16c2cd30a460ee543be0138df31b68e972dfd97fa398b08f1f385549791d
 
 ADD --checksum=${LLAMA_CPP_DIGEST} ${LLAMA_CPP_URL} /tmp/llamacpp.tar.gz
 
