@@ -195,6 +195,69 @@ def test_xet_download_routes_both_counters_into_a_single_bar():
         reporter.close()
 
 
+def _fetch(desc, size, steps=2):
+    """Download a file the way huggingface_hub reports it: one bar, updated, closed."""
+    bar = JsonProgress(desc=desc, total=size, unit="B")
+    for _ in range(steps):
+        bar.update(size // steps)
+    bar.close()
+
+
+def test_the_files_of_one_transfer_report_one_progress(monkeypatch, capsys):
+    """A GGUF and its projector: one bar each in huggingface_hub, one 0-100% for the host."""
+    monkeypatch.setattr(JsonProgress, "EMIT_INTERVAL", 0)
+
+    with JsonProgress.one_transfer(150):
+        _fetch("model.gguf", 100)
+        _fetch("mmproj.gguf", 50)
+
+    events = read_events(capsys)
+    assert [(e["event"], e["description"], e["current"]) for e in events] == [
+        ("start", "model.gguf", 0),
+        ("update", "model.gguf", 50),
+        ("update", "model.gguf", 100),
+        ("start", "mmproj.gguf", 100),
+        ("update", "mmproj.gguf", 125),
+        ("update", "mmproj.gguf", 150),
+        ("complete", "mmproj.gguf", 150),
+    ]
+    assert {e["total"] for e in events} == {150}
+
+
+def test_a_transfer_reports_no_more_than_its_expected_size(monkeypatch, capsys):
+    """The expected size comes from the Hub listing: the files may outweigh it."""
+    monkeypatch.setattr(JsonProgress, "EMIT_INTERVAL", 0)
+
+    with JsonProgress.one_transfer(120):
+        _fetch("model.gguf", 100)
+        _fetch("mmproj.gguf", 50)
+
+    assert [e["percentage"] for e in read_events(capsys)][-3:] == ["100.0%", "100.0%", "100.0%"]
+
+
+def test_a_failed_transfer_reports_no_completion(monkeypatch, capsys):
+    monkeypatch.setattr(JsonProgress, "EMIT_INTERVAL", 0)
+
+    with pytest.raises(OSError), JsonProgress.one_transfer(150):
+        _fetch("model.gguf", 100)
+        raise OSError("connection reset")
+
+    assert "complete" not in [e["event"] for e in read_events(capsys)]
+    # ... and the files downloaded after it are reported on their own again.
+    _fetch("other.gguf", 10)
+    assert [(e["event"], e["total"]) for e in read_events(capsys)][-1] == ("complete", 10)
+
+
+@pytest.mark.parametrize("total", [None, 0])
+def test_a_transfer_of_unknown_size_reports_file_by_file(total, capsys):
+    with JsonProgress.one_transfer(total):
+        _fetch("model.gguf", 100)
+        _fetch("mmproj.gguf", 50)
+
+    events = read_events(capsys)
+    assert [(e["event"], e["total"]) for e in events] == [("start", 100), ("complete", 100), ("start", 50), ("complete", 50)]
+
+
 @pytest.mark.parametrize(
     ("path", "pattern", "expected"),
     [
@@ -1167,7 +1230,7 @@ def stub_download(monkeypatch):
 
     monkeypatch.setattr(hf_downloader, "validate_hub_source", lambda *args, **kwargs: None)
     monkeypatch.setattr(hf_downloader, "download_matched_files", _download)
-    monkeypatch.setattr(hf_downloader, "expected_size_mb", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hf_downloader, "expected_size_bytes", lambda *args, **kwargs: None)
     return requested
 
 
@@ -2124,6 +2187,42 @@ def test_the_marker_of_a_multimodal_download_names_both_files(tmp_path, monkeypa
     assert seen[0]["file_patterns"] == ["*Q4_0*.gguf", "mmproj-F16.gguf"]
 
 
+def test_a_multimodal_download_reports_one_progress_for_both_files(tmp_path, monkeypatch, capsys):
+    """The reported bug: the progress ran to 100% on the GGUF, then again on the projector."""
+    models_dir, _repo = _qwen_repo(tmp_path)
+    sizes = {"Qwen3-0.6B-Q4_0.gguf": 300, "mmproj-F16.gguf": 100}
+
+    def _listing(_repo_id, patterns, ignore_pattern=None, **_kwargs):
+        matched = [_SizedRepoFile(path, size) for path, size in sizes.items() if any(matches_pattern(path, p) for p in patterns)]
+        return [f for f in matched if not (ignore_pattern and matches_pattern(f.path, ignore_pattern))]
+
+    def _download(repo_id, allow_pattern, output_dir, _tqdm_class, ignore_pattern=None, verbose=False):
+        for f in _listing(repo_id, [allow_pattern], ignore_pattern):
+            _fetch(f"{f.path}: reconstructing file", f.size)
+            Path(output_dir, f.path).write_bytes(b"\0")
+
+    monkeypatch.setattr(hf_downloader, "validate_hub_source", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hf_downloader, "list_repo_matches", _listing)
+    monkeypatch.setattr(hf_downloader, "download_matched_files", _download)
+    monkeypatch.setattr(JsonProgress, "EMIT_INTERVAL", 0)
+
+    _run_main(
+        monkeypatch,
+        "--model-url",
+        "llamacpp:unsloth/Qwen3-0.6B-GGUF:Q4_0",
+        "--model-mmproj-url",
+        "unsloth/Qwen3-0.6B-GGUF",
+        "--output-dir",
+        str(models_dir),
+    )
+
+    progress = [e for e in read_events(capsys) if "percentage" in e]
+    percentages = [float(e["percentage"].rstrip("%")) for e in progress]
+    assert percentages == sorted(percentages), "the progress went backwards"
+    assert [e["event"] for e in progress].count("complete") == 1
+    assert progress[-1] == {**progress[-1], "event": "complete", "current": 400, "total": 400}
+
+
 def test_delete_takes_only_the_projector_that_was_asked_for(tmp_path, monkeypatch):
     """'*mmproj*F16*.gguf' also matches mmproj-BF16.gguf, which delete must not remove."""
     models_dir, repo = _qwen_repo(tmp_path, "Qwen3-0.6B-Q4_0.gguf", "mmproj-F16.gguf", "mmproj-BF16.gguf")
@@ -2232,7 +2331,7 @@ def test_downloading_a_repository_url_falls_back_like_the_key(tmp_path, monkeypa
 
 
 # --------------------------------------------------------------------------- #
-# expected_size_mb: the size an ad-hoc download is listed with before it lands
+# expected_size_bytes: the size an ad-hoc download is listed with before it lands
 # --------------------------------------------------------------------------- #
 class _SizedRepoFile(_RepoFile):
     def __init__(self, path, size):
@@ -2240,29 +2339,29 @@ class _SizedRepoFile(_RepoFile):
         self.size = size
 
 
-def test_expected_size_mb_sums_the_matched_files(monkeypatch):
+def test_expected_size_bytes_sums_the_matched_files(monkeypatch):
     files = [_SizedRepoFile("m-Q4_0.gguf", 3 * 1024 * 1024), _SizedRepoFile("mmproj-F16.gguf", 1024 * 1024)]
     monkeypatch.setattr(hf_downloader, "list_repo_matches", lambda *a, **k: files)
-    assert hf_downloader.expected_size_mb("org/m-GGUF", ["*Q4_0*.gguf", "*mmproj*F16*.gguf"]) == 4.0
+    assert hf_downloader.expected_size_bytes("org/m-GGUF", ["*Q4_0*.gguf", "*mmproj*F16*.gguf"]) == 4 * 1024 * 1024
 
 
 @pytest.mark.parametrize("listing", [[], [_SizedRepoFile("m.gguf", None)]])
-def test_expected_size_mb_unknown_without_sizes(monkeypatch, listing):
+def test_expected_size_bytes_unknown_without_sizes(monkeypatch, listing):
     monkeypatch.setattr(hf_downloader, "list_repo_matches", lambda *a, **k: listing)
-    assert hf_downloader.expected_size_mb("org/m-GGUF", ["*.gguf"]) is None
+    assert hf_downloader.expected_size_bytes("org/m-GGUF", ["*.gguf"]) is None
 
 
-def test_expected_size_mb_never_fails_the_download(monkeypatch):
+def test_expected_size_bytes_never_fails_the_download(monkeypatch):
     def _boom(*_args, **_kwargs):
         raise OSError("offline")
 
     monkeypatch.setattr(hf_downloader, "list_repo_matches", _boom)
-    assert hf_downloader.expected_size_mb("org/m-GGUF", ["*.gguf"]) is None
+    assert hf_downloader.expected_size_bytes("org/m-GGUF", ["*.gguf"]) is None
 
 
 def test_download_marker_carries_the_expected_size(tmp_path, monkeypatch, stub_download):
     models_dir, repo = _qwen_repo(tmp_path)
-    monkeypatch.setattr(hf_downloader, "expected_size_mb", lambda *a, **k: 380.5)
+    monkeypatch.setattr(hf_downloader, "expected_size_bytes", lambda *a, **k: int(380.5 * 1024 * 1024))
     seen: list[dict] = []
     monkeypatch.setattr(
         hf_downloader,
