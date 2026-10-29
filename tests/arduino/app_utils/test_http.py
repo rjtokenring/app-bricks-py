@@ -46,6 +46,7 @@ def server() -> Iterator[Server]:
             path = self.path.split("?")[0]
             if path == "/stream":
                 self.send_response(200)
+                self.send_header("Content-Type", "audio/pcm;rate=24000")
                 self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
                 for index, chunk in enumerate([b"first", b"second"]):
@@ -238,6 +239,12 @@ def test_stream_yields_the_body_as_it_arrives(server: Server):
         assert next(chunks) == b"first"  # Before the server sends the rest
         server.release_stream.set()
         assert list(chunks) == [b"second"]
+
+
+def test_stream_exposes_the_headers_before_the_body_is_read(server: Server):
+    with http.stream("POST", f"{server.url}/stream", json={}) as response:
+        assert response.headers.get("Content-Type") == "audio/pcm;rate=24000"
+        server.release_stream.set()
 
 
 def test_stream_returns_error_statuses_with_their_body(server: Server):

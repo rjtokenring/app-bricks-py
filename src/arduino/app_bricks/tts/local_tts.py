@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
+import base64
+import os
 import queue
 import re
 import threading
@@ -22,6 +24,20 @@ logger = Logger("TextToSpeech")
 
 TTS_MAX_CHARS = 1024
 TTS_MAX_QUEUE_SIZE = 128
+
+LLAMACPP_MODEL_PREFIX = "llamacpp:"
+"""Models with this prefix are synthesized by the llama.cpp speech service, the others by the audio analytics one."""
+
+# Pocket TTS speaks about 0.75 frames (80 ms each) per character of text, measured in Italian
+# and English. The frame budget of a request leaves room for slower voices and still ends a
+# generation that never emits its end of speech: llama-server's own default (512 frames, 41 s)
+# cuts a TTS_MAX_CHARS chunk short.
+LLAMACPP_FRAMES_PER_CHAR = 2
+LLAMACPP_MIN_FRAMES = 128
+
+# Pocket TTS starts speaking within its first frames: the synthesized audio opens with this much
+# silence, so that the first syllable is neither clipped by a waking speaker nor heard as abrupt.
+LLAMACPP_LEAD_SILENCE_S = 0.3
 
 
 class VoiceConfig(TypedDict):
@@ -62,44 +78,90 @@ class SynthesisStream(AbstractContextManager["SynthesisStream"], Iterator[bytes]
         self._generator.close()
 
 
+class _LinearResampler:
+    """Resample a stream of mono samples with linear interpolation, seamlessly across chunks."""
+
+    def __init__(self, input_rate: int, output_rate: int) -> None:
+        self._step = input_rate / output_rate
+        # Of the next output sample, in input samples from the start of _tail
+        self._position = 0.0
+        self._tail = np.zeros(0, dtype=np.float32)
+
+    def process(self, samples: np.ndarray) -> np.ndarray:
+        """Return the output samples the input received so far allows, keeping what the next ones need."""
+        signal = np.concatenate((self._tail, samples))
+        count = max(0, int((signal.size - 1 - self._position) // self._step) + 1) if signal.size else 0
+        output = np.interp(self._position + self._step * np.arange(count), np.arange(signal.size), signal) if count else signal[:0]
+        next_position = self._position + self._step * count
+        keep = min(int(next_position), signal.size)
+        self._tail = signal[keep:]
+        self._position = next_position - keep
+        return output
+
+
 @brick
 class TextToSpeech:
     """Text-to-Speech brick for offline speech synthesis using local TTS service."""
 
     _APP_SERVICE_NAME = "audio-analytics-runner"
+    _LLAMACPP_SERVICE_NAME = "llamacpp-tts-runner"
+    _LLAMACPP_SERVICE_PORT = 9998
 
-    def __init__(self, speaker: BaseSpeaker | None = None, max_queue_size: int = TTS_MAX_QUEUE_SIZE) -> None:
+    def __init__(
+        self,
+        speaker: BaseSpeaker | None = None,
+        max_queue_size: int = TTS_MAX_QUEUE_SIZE,
+        voice: str | os.PathLike[str] | None = None,
+    ) -> None:
         """Initialize the TextToSpeech brick.
         Args:
             speaker (BaseSpeaker, optional): Speaker instance to use for audio output. If not provided, a default Speaker will be used.
             max_queue_size (int): Maximum number of pending ``speak(block=False)`` requests. When the
                 queue is full, further non-blocking calls raise TTSBusyError instead of piling up.
+            voice (str | os.PathLike, optional): Path to a short recording (WAV, 3-5 seconds of clean
+                speech) of the voice to speak with. Required by the ``llamacpp:`` models (Pocket TTS),
+                which clone the voice of the recording; longer recordings delay the start of every
+                sentence. Ignored by the other models, which have a voice of their own.
+
+        Raises:
+            TTSError: If a ``llamacpp:`` model is configured without a readable ``voice`` recording.
         """
         if max_queue_size <= 0:
             raise ValueError("max_queue_size must be greater than 0.")
 
         self._speaker = speaker or Speaker(0, sample_rate=Speaker.RATE_44K, shared=True)
 
-        # API configuration
-        self.api_host = resolve_address(self._APP_SERVICE_NAME)
-        if not self.api_host:
-            raise RuntimeError("Host address could not be resolved. Please check your configuration.")
-
-        self.api_port = 8085
-        self.api_base_url = f"http://{self.api_host}:{self.api_port}/audio-analytics/v1/api"
-
-        logger.debug(f"Initialized TextToSpeech with API base URL: {self.api_base_url}")
-
-        # Resolve the model: app.yaml override (per-brick `model:`) takes precedence over the brick default.
+        # Resolve the model first, it decides the runner: app.yaml override (per-brick `model:`) takes precedence over the brick default.
         brick_config = get_brick_config(self.__class__) or {}
         brick_id = brick_config.get("id")
         override = get_brick_configured_model(brick_id) if brick_id else None
         model_name = override or brick_config.get("model")
         if not model_name:
             raise RuntimeError("No TTS model configured for the TextToSpeech brick.")
+        self._llamacpp = model_name.startswith(LLAMACPP_MODEL_PREFIX)
 
-        self._voice = self._resolve_voice(model_name)
-        logger.debug(f"Using TTS model '{self._voice['model']}' (language='{self._voice['language']}').")
+        # API configuration
+        self.api_host = resolve_address(self._LLAMACPP_SERVICE_NAME if self._llamacpp else self._APP_SERVICE_NAME)
+        if not self.api_host:
+            raise RuntimeError("Host address could not be resolved. Please check your configuration.")
+
+        if self._llamacpp:
+            self.api_port = self._LLAMACPP_SERVICE_PORT
+            self.api_base_url = f"http://{self.api_host}:{self.api_port}"
+        else:
+            self.api_port = 8085
+            self.api_base_url = f"http://{self.api_host}:{self.api_port}/audio-analytics/v1/api"
+
+        logger.debug(f"Initialized TextToSpeech with API base URL: {self.api_base_url}")
+
+        if self._llamacpp:
+            self._voice_reference = self._read_voice_reference(voice)
+            self._voice = self._resolve_llamacpp_model(model_name, voice)
+        else:
+            if voice is not None:
+                logger.warning(f"TTS model '{model_name}' has a voice of its own: the voice recording '{voice}' is ignored.")
+            self._voice = self._resolve_voice(model_name)
+        logger.debug(f"Using TTS model '{self._voice['model']}' (language='{self._voice['language']}', voice='{self._voice['name']}').")
 
         self._active_session_lock = threading.Lock()
         self._cancelled: threading.Event | None = None
@@ -374,6 +436,34 @@ class TextToSpeech:
 
         raise RuntimeError(f"TTS model '{model_name}' is not available on the runner.")
 
+    @staticmethod
+    def _read_voice_reference(voice: str | os.PathLike[str] | None) -> str:
+        """Return the voice recording a llama.cpp model clones, base64-encoded as the runner takes it."""
+        hint = "Pass voice='path/to/voice.wav' to TextToSpeech: a WAV with 3-5 seconds of clean speech in the voice to clone."
+        if voice is None:
+            raise TTSError("Pocket TTS models need a recording of the voice to speak with.", hint=hint)
+        try:
+            with open(voice, "rb") as f:
+                return base64.b64encode(f.read()).decode("ascii")
+        except OSError as e:
+            raise TTSError(f"Cannot read the voice recording '{voice}': {e}.", hint=hint) from e
+
+    def _resolve_llamacpp_model(self, model_name: str, voice: str | os.PathLike[str] | None) -> VoiceConfig:
+        """Check that the llama.cpp speech service serves `model_name` and return the voice config to synthesize with."""
+        name = model_name.removeprefix(LLAMACPP_MODEL_PREFIX)
+        try:
+            response = http.get(f"{self.api_base_url}/v1/models")
+        except Exception as e:
+            raise RuntimeError(f"Failed to fetch TTS models: {e}.")
+        if response.status_code != 200:
+            raise RuntimeError(f"Failed to fetch TTS models (HTTP {response.status_code}).")
+
+        listing: dict[str, Any] = response.json() or {}
+        entries: list[dict[str, Any]] = listing.get("data") or []
+        if not any(entry.get("id") == name for entry in entries):
+            raise RuntimeError(f"TTS model '{model_name}' is not available on the runner.")
+        return {"model": name, "name": os.path.basename(os.fspath(voice or "")), "language": None}
+
     def _chunk_text(self, text: str) -> list[str]:
         """Split text into chunks accepted by the local TTS service.
 
@@ -432,15 +522,26 @@ class TextToSpeech:
             logger.debug("Speech session cancelled before synthesis")
             return
 
-        payload = {
-            "text": text,
-            "model": self._voice["model"],
-            "language": self._voice["language"],
-            "voice": self._voice["name"],
-            "sample_rate": self._speaker.sample_rate,
-            "keep_alive": keep_alive,
-        }
-        url = f"{self.api_base_url}/tts/synthesize"
+        if self._llamacpp:
+            url = f"{self.api_base_url}/tts"
+            payload: dict[str, Any] = {
+                "model": self._voice["model"],
+                "input": text,
+                "speaker_ref_b64": self._voice_reference,
+                "n_predict": max(LLAMACPP_MIN_FRAMES, LLAMACPP_FRAMES_PER_CHAR * len(text)),
+                "response_format": "pcm",
+                "stream": True,
+            }
+        else:
+            url = f"{self.api_base_url}/tts/synthesize"
+            payload = {
+                "text": text,
+                "model": self._voice["model"],
+                "language": self._voice["language"],
+                "voice": self._voice["name"],
+                "sample_rate": self._speaker.sample_rate,
+                "keep_alive": keep_alive,
+            }
         started_at = time.perf_counter()
         total_audio_bytes = 0
         first_chunk_logged = False
@@ -462,7 +563,10 @@ class TextToSpeech:
                     return
 
                 stream_chunk_size = self._speaker.buffer_size * self._speaker.channels * self._speaker.format.itemsize
-                for audio_chunk in response.iter_content(chunk_size=stream_chunk_size):
+                audio_chunks = response.iter_content(chunk_size=stream_chunk_size)
+                if self._llamacpp:
+                    audio_chunks = self._to_speaker_pcm(audio_chunks, response.headers.get("Content-Type", ""))
+                for audio_chunk in audio_chunks:
                     if cancelled is not None and cancelled.is_set():
                         logger.debug("Speech session cancelled while reading synthesis stream")
                         return
@@ -488,7 +592,31 @@ class TextToSpeech:
                     f"pcm_bytes={total_audio_bytes}, keep_alive={keep_alive})"
                 )
 
+    def _to_speaker_pcm(self, chunks: Iterator[bytes], content_type: str) -> Generator[bytes]:
+        """Convert the float32 PCM of the llama.cpp speech service, at the rate its content type
+        names (e.g. ``audio/pcm;rate=24000;encoding=float;bits=32``), to 16-bit PCM at the speaker rate,
+        opened by LLAMACPP_LEAD_SILENCE_S of silence."""
+        match = re.search(r"rate=(\d+)", content_type)
+        if not match:
+            raise RuntimeError(f"Unexpected audio format from synthesis API: '{content_type}'")
+        resampler = _LinearResampler(int(match.group(1)), self._speaker.sample_rate)
+        sample_width = np.dtype(np.float32).itemsize
+        # Sent with the first speech rather than ahead of it, so that the speaker never waits for audio in between
+        lead_silence = bytes(2 * round(LLAMACPP_LEAD_SILENCE_S * self._speaker.sample_rate))
+        pending = b""
+        for chunk in chunks:
+            audio_bytes = pending + chunk
+            aligned_size = len(audio_bytes) - (len(audio_bytes) % sample_width)
+            pending = audio_bytes[aligned_size:]
+            samples = resampler.process(np.frombuffer(audio_bytes[:aligned_size], dtype="<f4"))
+            if samples.size:
+                yield lead_silence + np.clip(np.rint(samples * 32767), -32768, 32767).astype("<i2").tobytes()
+                lead_silence = b""
+
     def _cancel_remote_tts(self) -> None:
+        if self._llamacpp:
+            # llama-server stops synthesizing when the client goes away, which closing the stream does
+            return
         try:
             response = http.post(f"{self.api_base_url}/tts/cancel")
             if response.status_code >= 400:

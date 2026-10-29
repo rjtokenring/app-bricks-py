@@ -1029,3 +1029,64 @@ def test_models_ini_serves_each_model_under_its_derived_name(runner, tmp_path, c
         "unsloth/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_0",
     ]
     assert config["unsloth/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_0"]["mmproj"].endswith("mmproj-BF16.gguf")
+
+
+# --------------------------------------------------------------------------- #
+# Speech models: the llamacpp_tts service serves them, the LLM service the rest
+# --------------------------------------------------------------------------- #
+
+
+def _install_speech_and_language_models(tmp_path: Path) -> None:
+    """A Pocket TTS pair (its mmproj generates audio, as the EryriLabs GGUF declares), a
+    vision model with its mmproj and a text-only model, as the models-downloader lays them out."""
+    pocket = tmp_path / "EryriLabs" / "pocket-tts-GGUF" / "italian"
+    attention_model(pocket / "pocket-tts-italian.gguf", layers=6, architecture="pockettts")
+    speech_mmproj = {"general.architecture": "clip", "clip.has_audio_encoder": True, "clip.has_gen_audio_encoder": True}
+    write_gguf(pocket / "mmproj-pocket-tts-italian.gguf", speech_mmproj, [])
+    vision = tmp_path / "unsloth" / "gemma-4-E4B-it-GGUF"
+    attention_model(vision / "gemma-4-E4B-it-Q4_0.gguf", layers=32)
+    write_gguf(vision / "mmproj-BF16.gguf", {"general.architecture": "clip", "clip.has_vision_encoder": True}, [])
+    attention_model(tmp_path / "google" / "gemma-4-E2B-it-qat-q4_0-gguf" / "gemma-4-E2B_q4_0-it.gguf", layers=35)
+
+
+def test_speech_models_are_served_apart_from_the_language_models(tmp_path):
+    _install_speech_and_language_models(tmp_path)
+
+    assert sorted(configure_llamacpp.served_models(tmp_path, speech=True)) == ["pocket-tts-italian"]
+    assert sorted(configure_llamacpp.served_models(tmp_path)) == ["gemma-4-E2B_q4_0-it", "gemma-4-E4B-it-Q4_0"]
+
+
+def test_an_unreadable_mmproj_leaves_its_model_with_the_language_models(tmp_path):
+    _install_speech_and_language_models(tmp_path)
+    (tmp_path / "EryriLabs" / "pocket-tts-GGUF" / "italian" / "mmproj-pocket-tts-italian.gguf").write_bytes(b"\0")
+
+    assert configure_llamacpp.served_models(tmp_path, speech=True) == {}
+    assert "pocket-tts-italian" in configure_llamacpp.served_models(tmp_path)
+
+
+def test_the_speech_preset_never_overwrites_the_language_one(tmp_path, capsys):
+    """Both services mount the same models directory: each writes the preset its server starts with."""
+    _install_speech_and_language_models(tmp_path)
+
+    configure_llamacpp.generate_models_ini(tmp_path)
+    configure_llamacpp.generate_models_ini(tmp_path, speech=True)
+
+    language, speech = configparser.ConfigParser(), configparser.ConfigParser()
+    language.read(tmp_path / "models.ini")
+    speech.read(tmp_path / "models-tts.ini")
+    assert sorted(language.sections()) == ["gemma-4-E2B_q4_0-it", "gemma-4-E4B-it-Q4_0"]
+    assert speech.sections() == ["pocket-tts-italian"]
+    assert speech["pocket-tts-italian"]["mmproj"].endswith("mmproj-pocket-tts-italian.gguf")
+
+
+def test_the_speech_service_sizes_only_the_speech_models(tmp_path, monkeypatch, capsys):
+    """An 8B model in the shared directory must not ask the speech server for more sessions."""
+    _install_speech_and_language_models(tmp_path)
+    attention_model(tmp_path / "Qwen3-8B-Q4_0.gguf", layers=36, weight_mib=3739)
+    monkeypatch.setattr(configure_llamacpp.sys, "argv", ["configure-llamacpp.py", str(tmp_path), "--speech", "--print-ndev", "--ctx", "4096"])
+
+    configure_llamacpp.main()
+
+    out, err = capsys.readouterr()
+    assert out.strip() == "1"
+    assert "pocket-tts-italian" in err and "Qwen3-8B" not in err

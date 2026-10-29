@@ -1,0 +1,8 @@
+service_id: arduino:llamacpp_tts
+name: LLaMaCPP speech synthesis service
+description: |
+  LLaMaCPP speech synthesis service runs text-to-speech models (e.g. Pocket TTS) on the NPU and serves them over REST.
+  It shares the llama.cpp models with the LLM service, but serves only the models that generate speech, with its own configuration.
+category: ai
+supported_boards: ["ventunoq"]
+supported_model_types: ["llamacpp:*"]

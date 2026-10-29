@@ -12,8 +12,11 @@ diagnostic to stderr, so the caller can read the answer with a command substitut
 ``--probe-ggml-types`` is internal: the script runs itself in that mode to read the ggml
 type table out of libggml in a child process (see probe_ggml_types()).
 
+``--speech`` turns every mode to the speech models (see served_models()).
+
 Usage:
     python configure-llamacpp.py /models
+    python configure-llamacpp.py /models --speech
     python configure-llamacpp.py /models --print-ctx --ctx 16384
     python configure-llamacpp.py /models --print-ndev --ctx 4096
     python configure-llamacpp.py --probe-ggml-types /opt/pkg-snapdragon/lib/libggml-base.so
@@ -254,19 +257,31 @@ class Tensor(NamedTuple):
     bytes: int
 
 
+def read_header(reader: GgufReader):
+    """Return (tensor count, metadata) from the start of a GGUF header."""
+    if reader.raw(4) != GGUF_MAGIC:
+        raise ValueError("not a GGUF file")
+    reader.u32()  # header version
+    tensor_count, metadata_count = reader.u64(), reader.u64()
+
+    metadata = {}
+    for _ in range(metadata_count):
+        key = reader.string()
+        metadata[key] = reader.value(reader.u32())
+    return tensor_count, metadata
+
+
+def read_gguf_metadata(path: Path) -> dict:
+    """Return the metadata from a GGUF file's header, without reading the tensor index."""
+    with open(path, "rb") as f:
+        return read_header(GgufReader(f))[1]
+
+
 def read_gguf(path: Path):
     """Return (metadata, tensors) from a GGUF file's header, without reading weights."""
     with open(path, "rb") as f:
         reader = GgufReader(f)
-        if reader.raw(4) != GGUF_MAGIC:
-            raise ValueError("not a GGUF file")
-        reader.u32()  # header version
-        tensor_count, metadata_count = reader.u64(), reader.u64()
-
-        metadata = {}
-        for _ in range(metadata_count):
-            key = reader.string()
-            metadata[key] = reader.value(reader.u32())
+        tensor_count, metadata = read_header(reader)
 
         tensors = []
         for _ in range(tensor_count):
@@ -851,12 +866,47 @@ def find_models(models_dir: Path):
     return models
 
 
-def generate_models_ini(models_dir: Path):
-    """Write the models.ini preset indexing every model in models_dir."""
-    config = configparser.ConfigParser()
-    config.read_dict(find_models(models_dir))
+# --------------------------------------------------------------------------- #
+# Speech models
+#
+# The image backs two services over the same models directory: the language models one
+# and the speech one (app_services/llamacpp_tts, started with --speech). A speech model is
+# one whose mmproj carries an audio generator, the very GGUF key llama-server serves POST
+# /tts for. Each service serves only its own kind and writes its own preset, so neither
+# loads the other's models nor overwrites the preset the other server was started with.
+# --------------------------------------------------------------------------- #
 
-    output_path = models_dir / "models.ini"
+SPEECH_GENERATOR_KEY = "clip.has_gen_audio_encoder"
+
+
+def generates_speech(entry) -> bool:
+    """Whether the model of a find_models() entry generates speech, read from its mmproj."""
+    mmproj = entry.get("mmproj")
+    if not mmproj:
+        return False
+    try:
+        return bool(read_gguf_metadata(Path(mmproj)).get(SPEECH_GENERATOR_KEY))
+    except Exception:
+        # An unreadable mmproj cannot be served for speech either: llama-server would refuse it.
+        return False
+
+
+def served_models(models_dir: Path, speech: bool = False):
+    """The models of models_dir the server serves: the speech models with *speech*, every other one without."""
+    return {name: entry for name, entry in find_models(models_dir).items() if generates_speech(entry) == speech}
+
+
+def models_ini_path(models_dir: Path, speech: bool = False) -> Path:
+    """Where the preset for the speech or the language models is written."""
+    return models_dir / ("models-tts.ini" if speech else "models.ini")
+
+
+def generate_models_ini(models_dir: Path, speech: bool = False):
+    """Write the preset indexing the models of models_dir the server serves (see served_models())."""
+    config = configparser.ConfigParser()
+    config.read_dict(served_models(models_dir, speech))
+
+    output_path = models_ini_path(models_dir, speech)
     with open(output_path, "w") as f:
         config.write(f)
 
@@ -901,6 +951,11 @@ def parse_args():
         help="Context size the server will run at, which decides how much room the KV cache "
         f"leaves for the weights on each session (0: not configured, taken as {DEFAULT_CTX_SIZE})",
     )
+    parser.add_argument(
+        "--speech",
+        action="store_true",
+        help="Serve the speech models instead of the language models: only they are sized, and the preset is written to models-tts.ini",
+    )
     return parser.parse_args()
 
 
@@ -919,12 +974,12 @@ def main():
     scope = f"a {ctx_size} token context" if args.ctx > 0 else f"an unconfigured context (taken as {ctx_size})"
     if args.print_ctx:
         print(f"Scanning installed models to check they hold {scope}...", file=sys.stderr)
-        print(detect_ctx_size(find_models(args.models_dir), ctx_size))
+        print(detect_ctx_size(served_models(args.models_dir, args.speech), ctx_size))
     elif args.print_ndev:
         print(f"Scanning installed models to size the Hexagon sessions for {scope}...", file=sys.stderr)
-        print(detect_hexagon_sessions(find_models(args.models_dir), ctx_size))
+        print(detect_hexagon_sessions(served_models(args.models_dir, args.speech), ctx_size))
     else:
-        generate_models_ini(args.models_dir)
+        generate_models_ini(args.models_dir, args.speech)
 
 
 if __name__ == "__main__":

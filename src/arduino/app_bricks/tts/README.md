@@ -5,7 +5,8 @@ The `TextToSpeech` brick provides a completely offline text-to-speech (TTS) solu
 ## Features
 
 - **Offline Operation:** All text-to-speech functions are performed locally, ensuring data privacy and eliminating network dependencies.
-- **Multiple Language Support:** Select a language by configuring the corresponding TTS model (e.g. `melo-tts-en`, `melo-tts-es`, `melo-tts-zh`, `piper-tts-de`, `piper-tts-en`, `piper-tts-it`) in `brick_config.yaml` or override per-app in `app.yaml`.
+- **Multiple Language Support:** Select a language by configuring the corresponding TTS model (e.g. `melo-tts-en`, `melo-tts-es`, `melo-tts-zh`, `piper-tts-de`, `piper-tts-en`, `piper-tts-it`, `llamacpp:pocket-tts-en`, `llamacpp:pocket-tts-italian`) in `brick_config.yaml` or override per-app in `app.yaml`.
+- **Voice Cloning:** The Pocket TTS models (`llamacpp:pocket-tts-en`, `llamacpp:pocket-tts-italian`) run on the NPU with llama.cpp and speak with the voice of a short recording you provide (see [Pocket TTS voices](#pocket-tts-voices)).
 - **Audio Output Formats:** Directly output synthesized speech to a Speaker instance or to WAV, PCM, or PCM audio.
 - **Long Text Support:** `speak()` splits long input into sentence-aware chunks of up to 1024 characters before synthesis.
 - **Streaming Playback:** `speak()` plays PCM chunks as they arrive from the local TTS service instead of waiting for the full rendered response.
@@ -77,11 +78,38 @@ with open("synthesized_speech.wav", "wb") as f:
     f.write(wav)
 ```
 
+### Pocket TTS voices
+
+The Pocket TTS models clone the voice of a recording: pass the path of a WAV file with 3-5 seconds of clean speech as `voice`, and select the model in `app.yaml`.
+
+```yaml
+bricks:
+- arduino:tts:
+    model: llamacpp:pocket-tts-italian
+```
+
+```python
+from arduino.app_bricks.tts import TextToSpeech
+from arduino.app_utils import App
+
+
+tts = TextToSpeech(voice="voice.wav")  # A short recording of the voice to speak with
+
+
+def runner():
+    tts.speak("Ciao, sono la voce della tua scheda Arduino.")
+
+
+App.run(user_loop=runner)
+```
+
+The recording also sets the tone of the output: background noise and level are cloned along with the voice. Every sentence starts after the voice is analyzed again, so a longer recording delays each one. The synthesized audio of every sentence opens with 0.3 seconds of silence, so that its first syllable is not clipped.
+
 ## Configuration
 
-`TextToSpeech(speaker=None, max_queue_size=128)`: pass a `Speaker` instance to control the audio output device (a default shared `Speaker` is used otherwise); `max_queue_size` bounds the number of pending `speak(block=False)` requests.
+`TextToSpeech(speaker=None, max_queue_size=128, voice=None)`: pass a `Speaker` instance to control the audio output device (a default shared `Speaker` is used otherwise); `max_queue_size` bounds the number of pending `speak(block=False)` requests; `voice` is the path of the WAV recording the Pocket TTS models (`llamacpp:` models) speak with, required by them and ignored by the other models.
 
 ## Errors
 
 - `TTSBusyError`: raised if you call `speak()` (blocking mode), `synthesize_pcm()`, `synthesize_pcm_stream()`, or `synthesize_wav()` while the instance already has an active session. Fix by awaiting the current session or using a separate instance. `speak(..., block=False)` raises it only when the speech queue is full: otherwise the text is queued and played when the current session ends.
-- `TTSError`: base class for all of the above.
+- `TTSError`: base class for all of the above. Raised on its own when a Pocket TTS model (`llamacpp:` model) is configured without a readable `voice` recording: pass the path of a WAV file to `TextToSpeech(voice=...)`.

@@ -3,7 +3,17 @@ name: Text-to-Speech (TTS)
 description: Text-to-Speech brick for offline speech synthesis
 category: audio
 supported_boards: ["ventunoq"]
-requires_services: ["arduino:genie_audio"]
+requires_services:
+  - id: arduino:genie_audio
+    when:
+      model: "piper*"
+  - id: arduino:genie_audio
+    when:
+      model: "melo*"
+  - id: arduino:llamacpp_tts
+    when:
+      model: "llamacpp:*"
 ai_frameworks_compatibility:
   - qnn
+  - llamacpp
 model: pipertts_en
