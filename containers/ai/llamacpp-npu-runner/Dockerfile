@@ -4,8 +4,8 @@
 
 ARG REGISTRY
 ARG BASE_IMAGE_VERSION=latest
-ARG LLAMA_CPP_URL=https://github.com/arduino/app-bricks-py/releases/download/llamacpp%2F20261103/llamacpp-hexagon-20261103.tar.gz
-ARG LLAMA_CPP_DIGEST=sha256:b94451402491d4b285f81d01e6ea9717a2a5bc53010410b30cb6443208720444
+ARG LLAMA_CPP_URL=https://github.com/rjtokenring/app-bricks-py/releases/download/llamacpp%2F20261109/llamacpp-hexagon-20261109.tar.gz
+ARG LLAMA_CPP_DIGEST=sha256:8d13f9364a946ef326fd7b62aab28b9e92a6f0c372bfff20b0b64f06e3fe05f5
 
 FROM ghcr.io/astral-sh/uv:0.13.0@sha256:cdc6093146eb3ff6a40107b38f008b789e050e77ad87865e381d9917da55a168 AS uv
 

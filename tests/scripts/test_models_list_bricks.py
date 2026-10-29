@@ -6,8 +6,8 @@
 
 A model served by a local runner says which one in its id, ``genie:`` or ``llamacpp:``.
 Every brick the catalog lists such a model under has to declare that framework and
-require that runner's service for it, or App Lab offers the model to a brick that
-cannot run it.
+require a service of that runner for it (``arduino:<framework>``, or another service
+running the same image), or App Lab offers the model to a brick that cannot run it.
 """
 
 from __future__ import annotations
@@ -20,11 +20,17 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BRICKS_DIR = REPO_ROOT / "src" / "arduino" / "app_bricks"
+SERVICES_DIR = REPO_ROOT / "src" / "arduino" / "app_services"
 RUNNER_FRAMEWORKS = ("genie", "llamacpp")
 
 
 def _brick_config(brick_id: str) -> dict:
     return yaml.safe_load((BRICKS_DIR / brick_id.split(":", 1)[1] / "brick_config.yaml").read_text(encoding="utf-8"))
+
+
+def _service_images(service_id: str) -> set[str]:
+    compose = yaml.safe_load((SERVICES_DIR / service_id.split(":", 1)[1] / "service_compose.yaml").read_text(encoding="utf-8"))
+    return {service["image"] for service in compose["services"].values()}
 
 
 def _catalog() -> dict[str, dict]:
@@ -74,4 +80,7 @@ def test_a_brick_can_run_every_runner_model_listed_under_it(model_id: str, brick
     config = _brick_config(brick_id)
 
     assert framework in (config.get("ai_frameworks_compatibility") or []), f"{brick_id} does not declare the {framework} framework"
-    assert f"arduino:{framework}" in _required_services(config, model_id), f"{brick_id} does not require arduino:{framework} for {model_id}"
+    runner_images = _service_images(f"arduino:{framework}")
+    assert any(_service_images(service) & runner_images for service in _required_services(config, model_id)), (
+        f"{brick_id} does not require a service of the {framework} runner for {model_id}"
+    )

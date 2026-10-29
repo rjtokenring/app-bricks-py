@@ -1,0 +1,61 @@
+services:
+  llamacpp-tts-runner:
+    image: ${DOCKER_REGISTRY_BASE:-ghcr.io/arduino/}app-bricks/llamacpp-npu-runner:__BRICKS_RELEASE_VERSION__
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+    environment:
+      # Serve only the speech models, from models-tts.ini (see run-model-router.sh)
+      - LLAMACPP_SPEECH_MODELS=true
+      - LLAMA_LOG_LEVEL=error
+      - LLAMA_ARG_HOST=0.0.0.0
+      - LLAMA_ARG_PORT=9998
+      - LLAMA_ARG_POLL=0
+      # Two voices (e.g. Italian and English) stay loaded together
+      - LLAMA_ARG_MODELS_MAX=${LLAMA_ARG_MODELS_MAX:-2}
+      # Reference voice + text of one request fit with room to spare
+      - LLAMA_ARG_CTX_SIZE=${LLAMA_ARG_CTX_SIZE:-4096}
+      - LLAMA_ARG_THREADS=${LLAMA_ARG_THREADS:-4}
+      - LLAMA_ARG_CPU_MASK=${LLAMA_ARG_CPU_MASK:-0x0f}
+      # A speech model fits one Hexagon session, the other sessions stay free for the LLM service
+      - GGML_HEXAGON_DEVICES=1
+      - GGML_HEXAGON_OPBATCH=2048
+      - GGML_HEXAGON_MBUF=256,256
+    working_dir: /models
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:9998:9998
+      - ${BIND_ADDRESS_IPV6:-[::1]}:9998:9998
+    # Add capability to allow process to modify resource limits
+    cap_add:
+      - SYS_RESOURCE
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    oom_score_adj: -500
+    # Two Pocket TTS voices loaded measured 290-370 MiB (the NPU buffers are not counted here)
+    mem_limit: 1g
+    memswap_limit: 1g
+    devices:
+      - /dev/dma_heap/system
+      - /dev/fastrpc-cdsp
+    volumes:
+      # Mount hexagon firmware
+      - /sys/firmware/devicetree/base/model:/run/device-model
+      # Read-only: /qairt-entrypoint.sh merges it into /usr/share/qcom in the container layer
+      - ${HOST_DSP_INSTALLATION_PATH:-/usr/share/qcom}:/run/host-qcom:ro
+      - /var/lib/arduino-app-cli/models/llamacpp/:/models/
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9998/health"]
+      interval: 5s
+      start_period: 30s
+      start_interval: 250ms
+      timeout: 5s
+      retries: 5
+    # Pinned on cores 0-3 like the LLM service: it's like using --cpu-mask 0x0f on llama-server
+    cpuset: "0-3"

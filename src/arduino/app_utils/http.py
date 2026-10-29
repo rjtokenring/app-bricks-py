@@ -84,6 +84,7 @@ class Stream:
 
     def __init__(self, status_code: int, response: http.client.HTTPResponse, request_line: str) -> None:
         self.status_code = status_code
+        self.headers: Message = response.headers
         self._response = response
         self._request_line = request_line
 

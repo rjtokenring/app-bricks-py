@@ -4,8 +4,18 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
-echo "Generating models.ini..."
-python3 /configure-llamacpp.py /models
+# The image backs the language models service and, with LLAMACPP_SPEECH_MODELS=true, the
+# speech one (app_services/llamacpp_tts), both over the same /models: each serves only its
+# own models, from a preset of its own, so neither overwrites the one the other started with.
+CONFIGURE_ARGS=()
+MODELS_PRESET=/models/models.ini
+if [ "${LLAMACPP_SPEECH_MODELS,,}" = "true" ]; then
+  CONFIGURE_ARGS=(--speech)
+  MODELS_PRESET=/models/models-tts.ini
+fi
+
+echo "Generating ${MODELS_PRESET}..."
+python3 /configure-llamacpp.py /models "${CONFIGURE_ARGS[@]}"
 
 echo "Starting LLama server..."
 export LD_LIBRARY_PATH=/opt/pkg-snapdragon/lib
@@ -33,7 +43,7 @@ fi
 # server unable to load the 8B model that needed all four.
 size_models() {
   local mode="$1" ctx="$2" fallback="$3" answer status
-  answer="$(python3 /configure-llamacpp.py /models "${mode}" --ctx "${ctx}")"
+  answer="$(python3 /configure-llamacpp.py /models "${CONFIGURE_ARGS[@]}" "${mode}" --ctx "${ctx}")"
   status=$?
   if [ "${status}" -ne 0 ] || ! [[ "${answer}" =~ ^[0-9]+$ ]]; then
     echo "WARNING: configure-llamacpp.py ${mode} failed (exit status ${status}, answer '${answer}'): falling back to ${fallback}" >&2
@@ -97,7 +107,7 @@ LLAMA_ARGS=(
   --device "$DEVICE_LIST"
   -ngl "$NGL"
   --load-mode none
-  --models-preset /models/models.ini
+  --models-preset "${MODELS_PRESET}"
 )
 
 if [ "${LLAMA_SERVER_SILENT}" = "1" ]; then
