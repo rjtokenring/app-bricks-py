@@ -639,10 +639,12 @@ def test_wait_until_done_waits_for_queued_speech(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 LLAMACPP_PCM = "audio/pcm;rate=24000;encoding=float;bits=32"
+POCKET_VOICES = ["alba", "giovanni", "vera"]
 
 
-def make_llamacpp_tts(monkeypatch, tmp_path, speaker, post_response, served=("pocket-tts-italian",), with_voice=True, **tts_kwargs):
-    """A TextToSpeech configured with llamacpp:pocket-tts-italian, whose runner serves *served*."""
+def make_llamacpp_tts(monkeypatch, speaker, post_response, served=("pocket-tts-italian",), voices=POCKET_VOICES, clones=False, **tts_kwargs):
+    """A TextToSpeech configured with llamacpp:pocket-tts-italian, whose runner serves *served*, each with the
+    predefined *voices*, and with a voice encoder when it *clones*."""
     requests = []
 
     @contextlib.contextmanager
@@ -654,9 +656,12 @@ def make_llamacpp_tts(monkeypatch, tmp_path, speaker, post_response, served=("po
         finally:
             response.close()
 
-    def get(url, **kwargs):
-        assert url == "http://llamacpp-tts-runner:9998/v1/models"
-        return FakeResponse(json_data={"data": [{"id": name} for name in served]})
+    def get(url, params=None, **kwargs):
+        assert url == "http://llamacpp-tts-runner:9998/props"
+        if params["model"] not in served:  # The router's answer for a model it does not serve
+            return FakeResponse(status_code=400, json_data={"error": {"code": 400, "message": f"model '{params['model']}' not found"}})
+        props = {"modalities": {"vision": False, "video": False, "audio": clones}}
+        return FakeResponse(json_data=props | ({"voices": voices} if voices else {}))
 
     def post(url, json=None, **kwargs):
         raise AssertionError(f"{url}: llama.cpp is never sent a POST outside of the synthesis stream")
@@ -666,10 +671,6 @@ def make_llamacpp_tts(monkeypatch, tmp_path, speaker, post_response, served=("po
     monkeypatch.setattr("arduino.app_utils.http.post", post)
     monkeypatch.setattr("arduino.app_utils.http.stream", stream)
 
-    if with_voice:
-        voice_path = tmp_path / "voice.wav"
-        voice_path.write_bytes(b"RIFF fake voice")
-        tts_kwargs["voice"] = voice_path
     tts = TextToSpeech(speaker=speaker, **tts_kwargs)
     App.unregister(tts)
     speaker.start()
@@ -683,19 +684,19 @@ def float_pcm_response(samples, chunk_bytes=None):
     return FakeResponse(chunks=[data[i : i + size] for i in range(0, len(data), size)], headers={"Content-Type": LLAMACPP_PCM})
 
 
-def test_llamacpp_model_synthesizes_through_the_speech_service(monkeypatch, tmp_path):
+def test_llamacpp_model_synthesizes_through_the_speech_service(monkeypatch):
     speaker = BlockingSpeaker(buffer_size=4)
     speaker.release_first_chunk.set()
     samples = 0.5 * np.sin(2 * np.pi * 440 * np.arange(2400) / 24000)
-    tts, requests = make_llamacpp_tts(monkeypatch, tmp_path, speaker, lambda url, json, **kwargs: float_pcm_response(samples))
+    tts, requests = make_llamacpp_tts(monkeypatch, speaker, lambda url, json, **kwargs: float_pcm_response(samples), voice="giovanni")
 
     pcm = np.frombuffer(tts.synthesize_pcm("Ciao a tutti."), dtype="<i2")
 
     ((method, url, payload),) = requests
     assert (method, url) == ("POST", "http://llamacpp-tts-runner:9998/tts")
-    assert payload["model"] == "pocket-tts-italian"
-    assert payload["input"] == "Ciao a tutti."
-    assert payload["speaker_ref_b64"] == base64.b64encode(b"RIFF fake voice").decode()
+    # A predefined voice by name, no recording to clone (speaker_ref)
+    assert set(payload) == {"model", "input", "voice", "n_predict", "response_format", "stream"}
+    assert (payload["model"], payload["input"], payload["voice"]) == ("pocket-tts-italian", "Ciao a tutti.", "giovanni")
     assert (payload["response_format"], payload["stream"]) == ("pcm", True)
     # 0.1 s at 24 kHz becomes 0.1 s of 16-bit PCM at the speaker rate, the same tone, after the lead silence
     speech = pcm[round(LLAMACPP_LEAD_SILENCE_S * 44100) :]
@@ -704,11 +705,11 @@ def test_llamacpp_model_synthesizes_through_the_speech_service(monkeypatch, tmp_
     assert np.max(np.abs(speech - expected)) < 0.01 * 32767
 
 
-def test_llamacpp_speech_opens_with_a_lead_silence_once_per_request(monkeypatch, tmp_path):
+def test_llamacpp_speech_opens_with_a_lead_silence_once_per_request(monkeypatch):
     """Pocket TTS speaks from its first frames: the audio opens with silence, then the speech, unbroken."""
     lead = round(LLAMACPP_LEAD_SILENCE_S * 44100)
     constant = lambda url, json, **kwargs: float_pcm_response(np.full(2400, 0.5), 64)  # noqa: E731
-    tts, _ = make_llamacpp_tts(monkeypatch, tmp_path, BlockingSpeaker(buffer_size=4), constant)
+    tts, _ = make_llamacpp_tts(monkeypatch, BlockingSpeaker(buffer_size=4), constant)
 
     chunks = [np.frombuffer(chunk, dtype="<i2") for chunk in tts.synthesize_pcm_stream("hello")]
 
@@ -718,10 +719,10 @@ def test_llamacpp_speech_opens_with_a_lead_silence_once_per_request(monkeypatch,
     assert np.all(speech == round(0.5 * 32767))
 
 
-def test_llamacpp_request_allows_frames_for_the_whole_chunk(monkeypatch, tmp_path):
+def test_llamacpp_request_allows_frames_for_the_whole_chunk(monkeypatch):
     """llama-server stops at 512 frames (41 s) unless told otherwise: a full chunk needs more."""
     speaker = BlockingSpeaker(buffer_size=4)
-    tts, requests = make_llamacpp_tts(monkeypatch, tmp_path, speaker, lambda url, json, **kwargs: float_pcm_response([0.0] * 8))
+    tts, requests = make_llamacpp_tts(monkeypatch, speaker, lambda url, json, **kwargs: float_pcm_response([0.0] * 8))
 
     tts.synthesize_pcm("a" * TTS_MAX_CHARS)
     tts.synthesize_pcm("ok")
@@ -731,47 +732,102 @@ def test_llamacpp_request_allows_frames_for_the_whole_chunk(monkeypatch, tmp_pat
     assert requests[1][2]["n_predict"] >= 64
 
 
-def test_llamacpp_stream_is_seamless_across_unaligned_chunks(monkeypatch, tmp_path):
+def test_llamacpp_stream_is_seamless_across_unaligned_chunks(monkeypatch):
     """HTTP chunks split float samples anywhere: the output is the one of the whole stream at once."""
     samples = np.random.default_rng(0).uniform(-1, 1, 1000)
-    whole, _ = make_llamacpp_tts(monkeypatch, tmp_path, BlockingSpeaker(buffer_size=4), lambda url, json, **kwargs: float_pcm_response(samples))
+    whole, _ = make_llamacpp_tts(monkeypatch, BlockingSpeaker(buffer_size=4), lambda url, json, **kwargs: float_pcm_response(samples))
     expected = whole.synthesize_pcm("hello")
-    pieces, _ = make_llamacpp_tts(monkeypatch, tmp_path, BlockingSpeaker(buffer_size=4), lambda url, json, **kwargs: float_pcm_response(samples, 7))
+    pieces, _ = make_llamacpp_tts(monkeypatch, BlockingSpeaker(buffer_size=4), lambda url, json, **kwargs: float_pcm_response(samples, 7))
 
     assert len(expected) > 0
     assert pieces.synthesize_pcm("hello") == expected
 
 
-def test_llamacpp_stream_without_a_sample_rate_is_an_error(monkeypatch, tmp_path):
+def test_llamacpp_stream_without_a_sample_rate_is_an_error(monkeypatch):
     response = FakeResponse(chunks=[b"\0" * 16], headers={"Content-Type": "audio/wav"})
-    tts, _ = make_llamacpp_tts(monkeypatch, tmp_path, BlockingSpeaker(buffer_size=4), lambda url, json, **kwargs: response)
+    tts, _ = make_llamacpp_tts(monkeypatch, BlockingSpeaker(buffer_size=4), lambda url, json, **kwargs: response)
 
     with pytest.raises(RuntimeError, match="audio/wav"):
         tts.synthesize_pcm("hello")
 
 
-def test_llamacpp_model_requires_a_voice_recording(monkeypatch, tmp_path):
-    """Without a reference Pocket TTS says a fraction of a second of noise (measured): refuse at init."""
+def test_llamacpp_model_speaks_with_its_first_voice_by_default(monkeypatch):
+    """The voice is named in every request, also when the app does not pick one."""
+    tts, requests = make_llamacpp_tts(monkeypatch, BlockingSpeaker(buffer_size=4), lambda url, json, **kwargs: float_pcm_response([0.0] * 8))
+
+    tts.synthesize_pcm("hello")
+
+    assert requests[0][2]["voice"] == "alba"
+
+
+def test_llamacpp_voice_must_be_one_of_the_model(monkeypatch):
     from arduino.app_bricks.tts import TTSError
     from arduino.app_utils import AppError
 
     no_audio = lambda url, json, **kwargs: float_pcm_response([0.0])  # noqa: E731
-    with pytest.raises(TTSError) as missing:
-        make_llamacpp_tts(monkeypatch, tmp_path, BlockingSpeaker(), no_audio, with_voice=False)
-    assert isinstance(missing.value, AppError)
-    assert "voice=" in (missing.value.hint or "")
+    with pytest.raises(TTSError, match="giovani") as unknown:
+        make_llamacpp_tts(monkeypatch, BlockingSpeaker(), no_audio, voice="giovani")
+    assert isinstance(unknown.value, AppError)
+    assert "alba, giovanni, vera" in (unknown.value.hint or "")
 
+
+def test_llamacpp_model_without_predefined_voices_needs_a_voice_reference(monkeypatch):
+    """Without a voice prompt Pocket TTS says a fraction of a second of noise (measured): refuse at init."""
+    from arduino.app_bricks.tts import TTSError
+
+    no_audio = lambda url, json, **kwargs: float_pcm_response([0.0])  # noqa: E731
+    with pytest.raises(TTSError, match="no predefined voices") as missing:
+        make_llamacpp_tts(monkeypatch, BlockingSpeaker(), no_audio, voices=[], clones=True)
+    assert "voice_reference=" in (missing.value.hint or "")
+
+
+def test_llamacpp_voice_reference_is_cloned_by_a_model_with_a_voice_encoder(monkeypatch, tmp_path):
+    recording = tmp_path / "voice.wav"
+    recording.write_bytes(b"RIFF fake voice")
+    silence = lambda url, json, **kwargs: float_pcm_response([0.0] * 8)  # noqa: E731
+    tts, requests = make_llamacpp_tts(monkeypatch, BlockingSpeaker(buffer_size=4), silence, voices=[], clones=True, voice_reference=recording)
+
+    tts.synthesize_pcm("hello")
+
+    payload = requests[0][2]
+    assert payload["speaker_ref_b64"] == base64.b64encode(b"RIFF fake voice").decode()
+    assert "voice" not in payload
+    assert tts._voice["name"] == "voice.wav"
+
+
+def test_llamacpp_voice_reference_is_refused_by_a_model_without_a_voice_encoder(monkeypatch, tmp_path):
+    """The catalog's Pocket TTS models have predefined voices and no voice encoder: they cannot clone."""
+    from arduino.app_bricks.tts import TTSError
+
+    recording = tmp_path / "voice.wav"
+    recording.write_bytes(b"RIFF fake voice")
+    no_audio = lambda url, json, **kwargs: float_pcm_response([0.0])  # noqa: E731
+    with pytest.raises(TTSError, match="cannot clone") as refused:
+        make_llamacpp_tts(monkeypatch, BlockingSpeaker(), no_audio, voice_reference=recording)
+    assert "giovanni" in (refused.value.hint or "")
+
+
+def test_llamacpp_unreadable_voice_reference_is_an_error(monkeypatch, tmp_path):
+    from arduino.app_bricks.tts import TTSError
+
+    no_audio = lambda url, json, **kwargs: float_pcm_response([0.0])  # noqa: E731
     with pytest.raises(TTSError, match="nowhere.wav"):
-        make_llamacpp_tts(monkeypatch, tmp_path, BlockingSpeaker(), no_audio, with_voice=False, voice=tmp_path / "nowhere.wav")
+        make_llamacpp_tts(monkeypatch, BlockingSpeaker(), no_audio, voices=[], clones=True, voice_reference=tmp_path / "nowhere.wav")
 
 
-def test_llamacpp_model_must_be_served_by_the_runner(monkeypatch, tmp_path):
+def test_voice_and_voice_reference_are_exclusive(monkeypatch, tmp_path):
+    no_audio = lambda url, json, **kwargs: float_pcm_response([0.0])  # noqa: E731
+    with pytest.raises(ValueError, match="voice_reference"):
+        make_llamacpp_tts(monkeypatch, BlockingSpeaker(), no_audio, clones=True, voice="giovanni", voice_reference=tmp_path / "voice.wav")
+
+
+def test_llamacpp_model_must_be_served_by_the_runner(monkeypatch):
     no_audio = lambda url, json, **kwargs: float_pcm_response([0.0])  # noqa: E731
     with pytest.raises(RuntimeError, match="llamacpp:pocket-tts-italian"):
-        make_llamacpp_tts(monkeypatch, tmp_path, BlockingSpeaker(), no_audio, served=("pocket-tts-en",))
+        make_llamacpp_tts(monkeypatch, BlockingSpeaker(), no_audio, served=("pocket-tts-english",))
 
 
-def test_llamacpp_cancel_closes_the_stream_without_a_cancel_request(monkeypatch, tmp_path):
+def test_llamacpp_cancel_closes_the_stream_without_a_cancel_request(monkeypatch):
     """llama-server has no cancel endpoint: it stops when the client goes away."""
     speaker = BlockingSpeaker(buffer_size=4)
     responses = []
@@ -780,7 +836,7 @@ def test_llamacpp_cancel_closes_the_stream_without_a_cancel_request(monkeypatch,
         responses.append(float_pcm_response(np.zeros(4800), 64))
         return responses[-1]
 
-    tts, _ = make_llamacpp_tts(monkeypatch, tmp_path, speaker, post_response)
+    tts, _ = make_llamacpp_tts(monkeypatch, speaker, post_response)
     speak_thread = threading.Thread(target=tts.speak, args=("hello",), daemon=True)
     speak_thread.start()
 
@@ -794,10 +850,8 @@ def test_llamacpp_cancel_closes_the_stream_without_a_cancel_request(monkeypatch,
     assert responses[0].close_called is True
 
 
-def test_a_voice_recording_is_ignored_by_models_with_a_voice_of_their_own(monkeypatch, tmp_path):
-    voice = tmp_path / "voice.wav"
-    voice.write_bytes(b"RIFF")
-    tts = make_tts(monkeypatch, BlockingSpeaker(buffer_size=4), lambda url, json, **kwargs: FakeResponse(content=b""), voice=voice)
+def test_a_voice_is_ignored_by_models_with_a_voice_of_their_own(monkeypatch):
+    tts = make_tts(monkeypatch, BlockingSpeaker(buffer_size=4), lambda url, json, **kwargs: FakeResponse(content=b""), voice="giovanni")
 
     assert tts.api_base_url.startswith("http://audio-analytics-runner:8085/")
     assert tts._voice["model"] == "pipertts_en"
@@ -841,4 +895,4 @@ def test_catalog_llamacpp_tts_ids_are_the_names_the_runner_serves():
             assert variables["models_repository"] == "llamacpp"
             assert variables["model_url"].rsplit("/", 1)[-1] == model_id.removeprefix("llamacpp:") + ".gguf"
             assert variables["model_mmproj_url"]
-    assert {"llamacpp:pocket-tts-en", "llamacpp:pocket-tts-italian"} <= set(ids)
+    assert {"llamacpp:pocket-tts-english", "llamacpp:pocket-tts-italian"} <= set(ids)

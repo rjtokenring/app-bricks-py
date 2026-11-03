@@ -115,23 +115,31 @@ class TextToSpeech:
         self,
         speaker: BaseSpeaker | None = None,
         max_queue_size: int = TTS_MAX_QUEUE_SIZE,
-        voice: str | os.PathLike[str] | None = None,
+        voice: str | None = None,
+        voice_reference: str | os.PathLike[str] | None = None,
     ) -> None:
         """Initialize the TextToSpeech brick.
         Args:
             speaker (BaseSpeaker, optional): Speaker instance to use for audio output. If not provided, a default Speaker will be used.
             max_queue_size (int): Maximum number of pending ``speak(block=False)`` requests. When the
                 queue is full, further non-blocking calls raise TTSBusyError instead of piling up.
-            voice (str | os.PathLike, optional): Path to a short recording (WAV, 3-5 seconds of clean
-                speech) of the voice to speak with. Required by the ``llamacpp:`` models (Pocket TTS),
-                which clone the voice of the recording; longer recordings delay the start of every
-                sentence. Ignored by the other models, which have a voice of their own.
+            voice (str, optional): Name of the predefined voice a ``llamacpp:`` model (Pocket TTS)
+                speaks with, e.g. ``"giovanni"``. By default the first voice of the model. Ignored by
+                the other models, which have a voice of their own.
+            voice_reference (str | os.PathLike, optional): Path to a short recording (WAV, 3-5 seconds
+                of clean speech) of a voice to clone instead, for the ``llamacpp:`` models that clone
+                voices (the catalog's Pocket TTS models do not). A longer recording delays the start of
+                every sentence. Ignored by the other models.
 
         Raises:
-            TTSError: If a ``llamacpp:`` model is configured without a readable ``voice`` recording.
+            ValueError: If both ``voice`` and ``voice_reference`` are given.
+            TTSError: If a ``llamacpp:`` model has no voice named ``voice``, or no predefined voices,
+                or cannot clone the ``voice_reference`` recording, or the recording cannot be read.
         """
         if max_queue_size <= 0:
             raise ValueError("max_queue_size must be greater than 0.")
+        if voice is not None and voice_reference is not None:
+            raise ValueError("Pass either voice or voice_reference, not both.")
 
         self._speaker = speaker or Speaker(0, sample_rate=Speaker.RATE_44K, shared=True)
 
@@ -159,11 +167,10 @@ class TextToSpeech:
         logger.debug(f"Initialized TextToSpeech with API base URL: {self.api_base_url}")
 
         if self._llamacpp:
-            self._voice_reference = self._read_voice_reference(voice)
-            self._voice = self._resolve_llamacpp_model(model_name, voice)
+            self._voice, self._llamacpp_voice = self._resolve_llamacpp_voice(model_name, voice, voice_reference)
         else:
-            if voice is not None:
-                logger.warning(f"TTS model '{model_name}' has a voice of its own: the voice recording '{voice}' is ignored.")
+            if voice is not None or voice_reference is not None:
+                logger.warning(f"TTS model '{model_name}' has a voice of its own: the voice '{voice or voice_reference}' is ignored.")
             self._voice = self._resolve_voice(model_name)
         logger.debug(f"Using TTS model '{self._voice['model']}' (language='{self._voice['language']}', voice='{self._voice['name']}').")
 
@@ -497,32 +504,50 @@ class TextToSpeech:
         raise RuntimeError(f"TTS model '{model_name}' is not available on the runner.")
 
     @staticmethod
-    def _read_voice_reference(voice: str | os.PathLike[str] | None) -> str:
-        """Return the voice recording a llama.cpp model clones, base64-encoded as the runner takes it."""
-        hint = "Pass voice='path/to/voice.wav' to TextToSpeech: a WAV with 3-5 seconds of clean speech in the voice to clone."
-        if voice is None:
-            raise TTSError("Pocket TTS models need a recording of the voice to speak with.", hint=hint)
+    def _read_voice_reference(voice_reference: str | os.PathLike[str]) -> str:
+        """Return the recording of the voice to clone, base64-encoded as the runner takes it."""
         try:
-            with open(voice, "rb") as f:
+            with open(voice_reference, "rb") as f:
                 return base64.b64encode(f.read()).decode("ascii")
         except OSError as e:
-            raise TTSError(f"Cannot read the voice recording '{voice}': {e}.", hint=hint) from e
+            hint = "Pass voice_reference='path/to/voice.wav': a WAV with 3-5 seconds of clean speech in the voice to clone."
+            raise TTSError(f"Cannot read the voice recording '{voice_reference}': {e}.", hint=hint) from e
 
-    def _resolve_llamacpp_model(self, model_name: str, voice: str | os.PathLike[str] | None) -> VoiceConfig:
-        """Check that the llama.cpp speech service serves `model_name` and return the voice config to synthesize with."""
+    def _resolve_llamacpp_voice(
+        self, model_name: str, voice: str | None, voice_reference: str | os.PathLike[str] | None
+    ) -> tuple[VoiceConfig, dict[str, str]]:
+        """Return the voice config for `model_name` on the llama.cpp speech service, and the voice field of its
+        requests: the recording `voice_reference` to clone, or else the predefined voice `voice`, by default the
+        first voice of the model. The service loads the model to answer, if it is not loaded yet."""
         name = model_name.removeprefix(LLAMACPP_MODEL_PREFIX)
         try:
-            response = http.get(f"{self.api_base_url}/v1/models")
+            response = http.get(f"{self.api_base_url}/props", params={"model": name})
         except Exception as e:
-            raise RuntimeError(f"Failed to fetch TTS models: {e}.")
+            raise RuntimeError(f"Failed to fetch TTS model '{model_name}': {e}.")
         if response.status_code != 200:
-            raise RuntimeError(f"Failed to fetch TTS models (HTTP {response.status_code}).")
+            raise RuntimeError(f"TTS model '{model_name}' is not available on the runner (HTTP {response.status_code}).")
 
-        listing: dict[str, Any] = response.json() or {}
-        entries: list[dict[str, Any]] = listing.get("data") or []
-        if not any(entry.get("id") == name for entry in entries):
-            raise RuntimeError(f"TTS model '{model_name}' is not available on the runner.")
-        return {"model": name, "name": os.path.basename(os.fspath(voice or "")), "language": None}
+        props: dict[str, Any] = response.json() or {}
+        voices: list[str] = props.get("voices") or []
+        voices_hint = f"Pass one of its voices as voice=: {', '.join(voices)}." if voices else None
+        if voice_reference is not None:
+            # A model clones with its voice encoder, the audio input of its mmproj
+            modalities: dict[str, Any] = props.get("modalities") or {}
+            if not modalities.get("audio"):
+                raise TTSError(f"TTS model '{model_name}' cannot clone a voice from a recording.", hint=voices_hint)
+            config: VoiceConfig = {"model": name, "name": os.path.basename(os.fspath(voice_reference)), "language": None}
+            return config, {"speaker_ref_b64": self._read_voice_reference(voice_reference)}
+
+        if not voices:
+            raise TTSError(
+                f"TTS model '{model_name}' has no predefined voices.",
+                hint="Use a model with predefined voices, like the catalog's Pocket TTS, or pass a recording to clone as voice_reference=.",
+            )
+        if voice is None:
+            voice = voices[0]
+        elif voice not in voices:
+            raise TTSError(f"TTS model '{model_name}' has no voice '{voice}'.", hint=voices_hint)
+        return {"model": name, "name": voice, "language": None}, {"voice": voice}
 
     def _chunk_text(self, text: str) -> list[str]:
         """Split text into chunks accepted by the local TTS service.
@@ -587,7 +612,7 @@ class TextToSpeech:
             payload: dict[str, Any] = {
                 "model": self._voice["model"],
                 "input": text,
-                "speaker_ref_b64": self._voice_reference,
+                **self._llamacpp_voice,
                 "n_predict": max(LLAMACPP_MIN_FRAMES, LLAMACPP_FRAMES_PER_CHAR * len(text)),
                 "response_format": "pcm",
                 "stream": True,

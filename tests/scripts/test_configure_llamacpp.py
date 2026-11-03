@@ -1280,11 +1280,12 @@ def test_models_ini_serves_a_gguf_with_a_projector_as_its_text_and_multimodal_mo
 
 
 def _install_speech_and_language_models(tmp_path: Path) -> None:
-    """A Pocket TTS pair (its mmproj generates audio, as the EryriLabs GGUF declares), a
-    vision model with its mmproj and a text-only model, as the models-downloader lays them out."""
-    pocket = tmp_path / "EryriLabs" / "pocket-tts-GGUF" / "italian"
+    """A Pocket TTS pair (its mmproj generates audio and, without voice cloning, has no audio encoder,
+    as the catalog's GGUF declares), a vision model with its mmproj and a text-only model, as the
+    models-downloader lays them out."""
+    pocket = tmp_path / "macolomb" / "pocket-tts-without-voice-cloning" / "italian"
     attention_model(pocket / "pocket-tts-italian.gguf", layers=6, architecture="pockettts")
-    speech_mmproj = {"general.architecture": "clip", "clip.has_audio_encoder": True, "clip.has_gen_audio_encoder": True}
+    speech_mmproj = {"general.architecture": "clip", "clip.has_audio_encoder": False, "clip.has_gen_audio_encoder": True}
     write_gguf(pocket / "mmproj-pocket-tts-italian.gguf", speech_mmproj, [])
     vision = tmp_path / "unsloth" / "gemma-4-E4B-it-GGUF"
     attention_model(vision / "gemma-4-E4B-it-Q4_0.gguf", layers=32)
@@ -1311,7 +1312,7 @@ def test_a_speech_gguf_is_one_model_served_with_its_projector(tmp_path):
 
 def test_an_unreadable_mmproj_leaves_its_model_with_the_language_models(tmp_path):
     _install_speech_and_language_models(tmp_path)
-    (tmp_path / "EryriLabs" / "pocket-tts-GGUF" / "italian" / "mmproj-pocket-tts-italian.gguf").write_bytes(b"\0")
+    (tmp_path / "macolomb" / "pocket-tts-without-voice-cloning" / "italian" / "mmproj-pocket-tts-italian.gguf").write_bytes(b"\0")
 
     assert configure_llamacpp.served_models(tmp_path, speech=True) == {}
     assert "pocket-tts-italian" in configure_llamacpp.served_models(tmp_path)
