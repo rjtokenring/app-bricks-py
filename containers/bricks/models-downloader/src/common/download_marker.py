@@ -27,6 +27,13 @@ before the field existed carries none — and its absence means the whole direct
 written when the handler knows it up front. The listing reports it for a download in
 progress that models-list.yaml does not size — an ad-hoc Hugging Face model — so such a
 model is sized before any of its files exist. It is optional as well.
+
+Several downloads can be in flight in one directory at once (``common/download_lock.py``).
+Each adds an entry to ``downloads`` with its own ``id``, ``model_url``, ``file_patterns``
+and ``size_mb``, and takes it out again when it ends. The top-level ``file_patterns`` is
+the union of theirs, and ``model_url`` and ``size_mb`` are set only while there is just
+one, so a reader that knows nothing of ``downloads`` still finds every file in flight
+covered. ``marker_downloads`` splits a marker back into one marker per download.
 """
 
 import json
@@ -59,12 +66,85 @@ def marker_payload(handler="", models_repository="", model_directory="", model_u
 
 def write_marker(model_dir, handler="", models_repository="", model_directory="", model_url="", file_patterns=None, size_mb=None):
     """Create ``<model_dir>/.download`` with the JSON payload and return its path."""
-    os.makedirs(model_dir, exist_ok=True)
     path = os.path.join(model_dir, MARKER_NAME)
-    with open(path, "w") as f:
-        json.dump(marker_payload(handler, models_repository, model_directory, model_url, file_patterns, size_mb), f)
-        f.write("\n")
+    _replace_marker(path, marker_payload(handler, models_repository, model_directory, model_url, file_patterns, size_mb))
     return path
+
+
+def _replace_marker(path, payload):
+    """Write *payload* to *path* by rename: a reader never sees half a marker."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def marker_downloads(marker):
+    """The downloads *marker* stands for, each as a marker of its own.
+
+    A marker without ``downloads`` (another handler, or one written before the field
+    existed) is a single download. Each entry of ``downloads`` comes back with the fields
+    every download of the directory shares filled in.
+    """
+    if not marker:
+        return []
+    entries = marker.get("downloads")
+    if not isinstance(entries, list) or not entries or not all(isinstance(e, dict) for e in entries):
+        return [marker]
+    return [{**_shared_fields(marker), **entry} for entry in entries]
+
+
+def add_download(model_dir, download_id, handler="", models_repository="", model_directory="", model_url="", file_patterns=None, size_mb=None):
+    """Add download *download_id* to ``<model_dir>/.download``, next to any already there.
+
+    Read-modify-write: callers serialize on the directory's bookkeeping lock.
+    """
+    path = os.path.join(model_dir, MARKER_NAME)
+    entry = {"id": download_id, **_download_fields(marker_payload(model_url=model_url, file_patterns=file_patterns, size_mb=size_mb))}
+    entries = [_download_fields(d) for d in marker_downloads(read_marker(path))]
+    _write_downloads(path, marker_payload(handler, models_repository, model_directory), [*entries, entry])
+    return path
+
+
+def remove_download(model_dir, download_id):
+    """Take download *download_id* out of ``<model_dir>/.download``; return the ones left.
+
+    The marker goes with the last of them. Serialized like ``add_download``.
+    """
+    path = os.path.join(model_dir, MARKER_NAME)
+    marker = read_marker(path)
+    left = [d for d in marker_downloads(marker) if d.get("id") != download_id]
+    if marker is not None and not left:
+        os.unlink(path)
+    elif marker is not None:
+        _write_downloads(path, _shared_fields(marker), [_download_fields(d) for d in left])
+    return left
+
+
+# What one download records, as opposed to what every download of a directory shares.
+DOWNLOAD_FIELDS = ("id", "model_url", "file_patterns", "size_mb")
+
+
+def _download_fields(marker):
+    return {k: v for k, v in marker.items() if k in DOWNLOAD_FIELDS}
+
+
+def _shared_fields(marker):
+    return {k: v for k, v in marker.items() if k != "downloads" and k not in DOWNLOAD_FIELDS}
+
+
+def _write_downloads(path, shared, entries):
+    """Write the marker of the downloads *entries* (see the module docstring)."""
+    payload = dict(shared)
+    if len(entries) == 1:
+        payload.update({k: v for k, v in entries[0].items() if k in ("model_url", "size_mb")})
+    patterns = list(dict.fromkeys(p for entry in entries for p in entry.get("file_patterns") or []))
+    if patterns:
+        payload["file_patterns"] = patterns
+    payload["downloads"] = entries
+    _replace_marker(path, payload)
 
 
 def read_marker(path):

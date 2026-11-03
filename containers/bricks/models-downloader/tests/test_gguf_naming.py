@@ -10,6 +10,7 @@ import pytest
 
 from common.gguf_naming import (
     GgufDeclaration,
+    bundled_projector,
     catalog_gguf_declarations,
     declaration_covers,
     declared_gguf_files,
@@ -115,23 +116,40 @@ def test_multimodal_model_name_suffixes_the_text_model_name():
     assert multimodal_model_name("unsloth/gemma-GGUF/gemma-Q4_0") == "unsloth/gemma-GGUF/gemma-Q4_0-multimodal"
 
 
+# The bricks whose models are one GGUF always loaded with its projector, the voice.
+SPEECH_BRICKS = {"arduino:tts"}
+
+
 def _catalog_gguf_ids():
-    """``(model id, GGUF stem, has projector)`` for every pinned llamacpp file of the real catalog."""
+    """``(model id, GGUF stem, has projector, speech)`` for every pinned llamacpp file of the real catalog."""
     if not os.path.isfile(REAL_MODELS_LIST):
         return []
     entries = set()
-    for model_id, _model, _platform, variables in _iter_platform_variables(load_models_list(REAL_MODELS_LIST)):
+    for model_id, model, _platform, variables in _iter_platform_variables(load_models_list(REAL_MODELS_LIST)):
         filename = gguf_basename(variables.get("model_url", ""))
+        speech = any(brick.get("id") in SPEECH_BRICKS for brick in model.get("bricks") or [])
         if variables.get("models_repository") == "llamacpp" and filename:
-            entries.add((model_id, filename[: -len(".gguf")], bool(variables.get("model_mmproj_url"))))
+            entries.add((model_id, filename[: -len(".gguf")], bool(variables.get("model_mmproj_url")), speech))
     return sorted(entries)
 
 
-@pytest.mark.parametrize(("model_id", "stem", "multimodal"), _catalog_gguf_ids())
-def test_a_catalog_gguf_entry_is_named_like_the_model_it_lists_as(model_id, stem, multimodal):
+@pytest.mark.parametrize(("model_id", "stem", "multimodal", "speech"), _catalog_gguf_ids())
+def test_a_catalog_gguf_entry_is_named_like_the_model_it_lists_as(model_id, stem, multimodal, speech):
     """The listing and models.ini name a curated GGUF by its stem, and its multimodal model
-    by the stem plus the suffix: a catalog id spelled any other way is never installed."""
-    assert model_id == f"llamacpp:{multimodal_model_name(stem) if multimodal else stem}"
+    by the stem plus the suffix: a catalog id spelled any other way is never installed. A
+    speech model is the one GGUF with a projector named by its stem alone (bundled)."""
+    assert model_id == f"llamacpp:{multimodal_model_name(stem) if multimodal and not speech else stem}"
+
+
+def test_a_projector_entry_without_the_suffix_is_one_bundled_model():
+    speech = GgufDeclaration("org/speech-GGUF", "voice.gguf", "llamacpp:voice", multimodal=True)
+    vision = GgufDeclaration("org/vision-GGUF", "vision.gguf", "llamacpp:vision-multimodal", multimodal=True)
+    text = GgufDeclaration("org/vision-GGUF", "vision.gguf", "llamacpp:vision")
+
+    assert speech.bundled and not vision.bundled and not text.bundled
+    assert bundled_projector([speech, vision, text], "org/speech-GGUF/italian", "voice.gguf")
+    assert not bundled_projector([speech, vision, text], "org/vision-GGUF", "vision.gguf")
+    assert not bundled_projector([speech], "org/speech-GGUF", "other.gguf")
 
 
 def test_gguf_model_name_stems_curated_and_recordless_files():

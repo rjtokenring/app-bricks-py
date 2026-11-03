@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 import list_models
-from common.download_marker import write_marker
+from common.download_marker import add_download, write_marker
 from common.model_metadata import METADATA_NAME, write_metadata
 
 
@@ -319,6 +319,28 @@ def test_find_llamacpp_marker_for_a_gguf_on_disk_lists_it_once(tmp_path):
     assert len(results) == 1
     assert results[0]["id"] == "llamacpp:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q3_K_S"
     assert results[0]["downloading"] is True
+
+
+def test_find_llamacpp_lists_each_download_sharing_a_marker(tmp_path):
+    """Two voices of one repository downloading at once: one marker, two pending models,
+    each sized and named by its own entry, and a landed file of a third still covered."""
+    base = tmp_path / "models"
+    repo = base / "llamacpp" / "org" / "voices"
+    _make_gguf(str(repo / "voice-it.gguf"))
+    for download_id, lang, size in (("a", "en", 200.0), ("b", "fr", 201.0), ("c", "it", 202.0)):
+        add_download(
+            str(repo),
+            download_id,
+            handler="hf-handler",
+            model_url=f"https://huggingface.co/org/voices/blob/main/voice-{lang}.gguf",
+            file_patterns=[f"voice-{lang}.gguf"],
+            size_mb=size,
+        )
+
+    results = {entry["id"]: entry for entry in list_models.find_llamacpp_models(str(base))}
+    assert sorted(results) == ["llamacpp:org/voices/voice-en", "llamacpp:org/voices/voice-fr", "llamacpp:org/voices/voice-it"]
+    assert all(entry["downloading"] and not entry["installed"] for entry in results.values())
+    assert [results[f"llamacpp:org/voices/voice-{lang}"]["size_mb"] for lang in ("en", "fr", "it")] == [200.0, 201.0, 202.0]
 
 
 def test_find_llamacpp_no_directory(tmp_path):
@@ -1715,3 +1737,80 @@ def test_an_ad_hoc_gguf_with_a_projector_lists_as_its_two_models(tmp_path):
 
     assert listed == ["llamacpp:unsloth/gemma-GGUF/gemma-Q4_0", "llamacpp:unsloth/gemma-GGUF/gemma-Q4_0-multimodal"]
     assert fallback_model_id("", files, str(base / "llamacpp")) == listed[1]
+
+
+# --------------------------------------------------------------------------- #
+# A speech model: one GGUF always loaded with its projector, the voice
+# --------------------------------------------------------------------------- #
+SPEECH_DIR = "macolomb/pocket-tts-without-voice-cloning"
+SPEECH_ID = "llamacpp:pocket-tts-italian"
+SPEECH_URL = f"https://huggingface.co/{SPEECH_DIR}/blob/cc72b003/italian/pocket-tts-italian.gguf"
+SPEECH_MMPROJ_URL = f"https://huggingface.co/{SPEECH_DIR}/blob/cc72b003/italian/mmproj-pocket-tts-italian.gguf"
+SPEECH_YAML = f"""\
+models:
+ - "{SPEECH_ID}":
+    name: "Pocket TTS (Italian)"
+    supported_boards: ["ventunoq"]
+    deployment:
+      handler: "hf-handler"
+      platforms:
+        - ventunoq:
+            variables:
+              model_url: "{SPEECH_URL}"
+              model_mmproj_url: "{SPEECH_MMPROJ_URL}"
+              models_repository: "llamacpp"
+              model_directory: "{SPEECH_DIR}"
+    metadata:
+      model_size_mb: 100
+"""
+
+
+def test_a_speech_model_is_listed_once_with_its_projector(tmp_path):
+    """A projector entry without the -multimodal suffix is one model: no text model is
+    listed next to it, under its id or qualified by location."""
+    yaml_path = tmp_path / "models-list.yaml"
+    yaml_path.write_text(SPEECH_YAML)
+    models_dir = tmp_path / "models"
+    repo = models_dir / "llamacpp" / SPEECH_DIR
+    _make_gguf(str(repo / "italian" / "pocket-tts-italian.gguf"), size_bytes=1024 * 1024)
+    _make_gguf(str(repo / "italian" / "mmproj-pocket-tts-italian.gguf"), size_bytes=1024 * 1024)
+    env = {"model_url": SPEECH_URL, "model_mmproj_url": SPEECH_MMPROJ_URL, "models_repository": "llamacpp", "model_directory": SPEECH_DIR}
+    write_metadata(
+        str(repo),
+        "hf-handler",
+        env=env,
+        models_list_path="",
+        identity={"model_id": SPEECH_ID, "model_origin": "built_in"},
+        files=["italian/mmproj-pocket-tts-italian.gguf", "italian/pocket-tts-italian.gguf"],
+    )
+
+    listed = {m["id"]: m for m in list_models.build_listing(str(models_dir), str(yaml_path), "ventunoq")}
+
+    assert list(listed) == [SPEECH_ID]
+    assert listed[SPEECH_ID]["installed"] is True
+    assert listed[SPEECH_ID]["mmproj"].endswith("mmproj-pocket-tts-italian.gguf")
+    assert listed[SPEECH_ID]["disk_size_mb"] == 2.0
+
+
+def test_a_speech_model_whose_projector_is_still_downloading_is_listed_once(tmp_path):
+    """The GGUF lands before its projector: until both are there the model is the
+    download in flight, never a text model of its own."""
+    yaml_path = tmp_path / "models-list.yaml"
+    yaml_path.write_text(SPEECH_YAML)
+    models_dir = tmp_path / "models"
+    repo = models_dir / "llamacpp" / SPEECH_DIR
+    _make_gguf(str(repo / "italian" / "pocket-tts-italian.gguf"), size_bytes=1024 * 1024)
+    write_marker(
+        str(repo),
+        handler="hf-handler",
+        models_repository="llamacpp",
+        model_directory=SPEECH_DIR,
+        model_url=SPEECH_URL,
+        file_patterns=["italian/pocket-tts-italian.gguf", "italian/mmproj-pocket-tts-italian.gguf"],
+    )
+
+    listed = {m["id"]: m for m in list_models.build_listing(str(models_dir), str(yaml_path), "ventunoq")}
+
+    assert list(listed) == [SPEECH_ID]
+    assert listed[SPEECH_ID]["downloading"] is True
+    assert listed[SPEECH_ID]["installed"] is False

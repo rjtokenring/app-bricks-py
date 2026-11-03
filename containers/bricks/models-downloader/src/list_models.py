@@ -51,9 +51,10 @@ import sys
 import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common.download_marker import read_marker
+from common.download_marker import marker_downloads, read_marker
 from common.gguf_naming import (
     LLAMACPP_SUBDIR,
+    bundled_projector,
     declaration_covers,
     declared_gguf_files,
     gguf_basename,
@@ -428,6 +429,8 @@ def find_llamacpp_models(models_base_dir, declarations=()):
     (``file_kinds``): a model whose files are there but was never downloaded — the
     text model deleted while the multimodal one stayed, a projector copied by hand —
     is listed as not installed. A GGUF without any record is installed by its files.
+    A GGUF a bundled declaration covers (``bundled_projector``) is one model only, its
+    name without the suffix, with the projector.
 
     Models are named with ``gguf_model_name`` from their ".arduino_metadata.yaml"
     download record, mirroring the models.ini sections: the path-qualified name for
@@ -452,18 +455,18 @@ def find_llamacpp_models(models_base_dir, declarations=()):
 
     for root, _dirs, files in os.walk(llamacpp_dir):
         gguf_files = sorted(f for f in files if f.endswith(".gguf"))
-        marker = read_marker(os.path.join(root, ".download"))
-        if not gguf_files and marker is None:
+        # One marker per directory, naming every download in flight there.
+        downloads = marker_downloads(read_marker(os.path.join(root, ".download")))
+        if not gguf_files and not downloads:
             continue
         rel_dir = os.path.relpath(root, llamacpp_dir).replace(os.sep, "/")
         rel_dir = "" if rel_dir == "." else rel_dir
         mmproj_files = [f for f in gguf_files if "mmproj" in f]
         mmproj_path = os.path.join(root, mmproj_files[0]) if mmproj_files else None
-        marker_multimodal = marker is not None and marker_is_multimodal(marker)
 
-        # Whether the marker was accounted for by a model listed below; if it was not, the
-        # download it stands for has nothing on disk yet and is reported on its own.
-        marker_listed = False
+        # The downloads not accounted for by a model listed below: they have nothing of
+        # their model on disk yet, and are reported on their own.
+        pending = list(downloads)
         for f in gguf_files:
             if "mmproj" in f:
                 continue
@@ -480,12 +483,20 @@ def find_llamacpp_models(models_base_dir, declarations=()):
             # A GGUF without any record is installed by its files alone.
             kinds = file_kinds(full_path, llamacpp_dir)
             # The text model, then the multimodal one when a projector is there: their
-            # files are summed in bytes, like the downloader sizes the same files.
-            models = [(False, [full_path])] + ([(True, [full_path, mmproj_path])] if mmproj_path else [])
+            # files are summed in bytes, like the downloader sizes the same files. A
+            # bundled GGUF is the model with the projector alone, and nothing until the
+            # projector is there: a download still fetching it is listed from its marker.
+            bundled = bundled_projector(declarations, rel_dir, f)
+            models = [] if bundled else [(False, [full_path])]
+            models += [(True, [full_path, mmproj_path])] if mmproj_path else []
             for multimodal, model_files in models:
-                downloading = marker is not None and any(marker_covers_file(marker, os.path.basename(p)) for p in model_files)
-                if downloading and multimodal == marker_multimodal:
-                    marker_listed = True
+                # The download fetching a file of this model, the one of its own kind
+                # first: a multimodal download over the GGUF fetches the text model's file too.
+                covering = [d for d in downloads if any(marker_covers_file(d, os.path.basename(p)) for p in model_files)]
+                marker = next((d for d in covering if marker_is_multimodal(d) == multimodal), covering[0] if covering else None)
+                downloading = marker is not None
+                if downloading and marker_is_multimodal(marker) == multimodal:
+                    pending = [d for d in pending if d is not marker]
                 kind = KIND_MULTIMODAL if multimodal else KIND_TEXT
                 installed = not downloading and (not kinds or kind in kinds)
                 model_name = gguf_model_name(rel_path, record)
@@ -495,7 +506,7 @@ def find_llamacpp_models(models_base_dir, declarations=()):
                     # a declared location keeps the stem, anything else is qualified.
                     if not any(declaration_covers(d, rel_dir, f, multimodal) for d in declarations):
                         model_name = rel_path[: -len(".gguf")]
-                if multimodal:
+                if multimodal and not bundled:
                     model_name = multimodal_model_name(model_name)
                 disk_size_mb = size_mb(paths_size_bytes(model_files))
                 # The text model's record, the multimodal one's, when each has its own;
@@ -511,14 +522,14 @@ def find_llamacpp_models(models_base_dir, declarations=()):
                     "name": model_name,
                     "handler": HANDLER_HUGGING_FACE,
                     "runtime": model_runtime(HANDLER_HUGGING_FACE),
-                    "model_publisher": scanned_publisher(own_record, marker if downloading else None, rel_dir),
+                    "model_publisher": scanned_publisher(own_record, marker, rel_dir),
                     # Found on disk. main() overrides this when the id matches a
                     # models-list.yaml entry, which makes it a curated model instead.
                     "model_origin": ORIGIN_USER,
                     "path": full_path,
                     "installed": installed,
                     "downloading": downloading,
-                    "size_mb": listed_size_mb(installed, disk_size_mb, None, marker.get("size_mb") if downloading and marker else None),
+                    "size_mb": listed_size_mb(installed, disk_size_mb, None, marker.get("size_mb") if marker else None),
                     "_rel_dir": rel_dir,
                     "_filename": f,
                     "_multimodal": multimodal,
@@ -534,7 +545,8 @@ def find_llamacpp_models(models_base_dir, declarations=()):
         # Download in progress with nothing of its model on disk yet — no GGUF at all,
         # or, for a multimodal download, no projector next to the GGUF: surface the
         # pending model from the marker so it still shows up in the listing.
-        if marker is not None and not marker_listed:
+        for marker in pending:
+            marker_multimodal = marker_is_multimodal(marker)
             model_name = llamacpp_name_from_marker(marker, root)
             filename = gguf_basename(marker.get("model_url"))
             # Same naming as an installed file: declared downloads keep the marker
@@ -542,7 +554,7 @@ def find_llamacpp_models(models_base_dir, declarations=()):
             # by location so the id matches the one the finished install will get.
             if not any(declaration_covers(d, rel_dir, filename, marker_multimodal) for d in declarations):
                 model_name = f"{rel_dir}/{model_name}" if rel_dir else model_name
-            if marker_multimodal:
+            if marker_multimodal and not bundled_projector(declarations, rel_dir, filename):
                 model_name = multimodal_model_name(model_name)
             # A record for the file being fetched is a previous install of the same
             # model (a re-download); a record naming only other files is a sibling's,

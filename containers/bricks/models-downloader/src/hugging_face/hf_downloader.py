@@ -107,6 +107,7 @@ import re
 import shutil
 import sys
 import time
+import uuid
 
 from huggingface_hub import HfApi, hf_hub_download
 from huggingface_hub.errors import (
@@ -128,8 +129,9 @@ from urllib.parse import unquote, urlsplit
 import json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from common.download_marker import MARKER_NAME, read_marker, write_marker
-from common.gguf_naming import catalog_gguf_declarations, declaration_covers, gguf_model_name, multimodal_model_name
+from common.download_lock import DirectoryDownloads
+from common.download_marker import MARKER_NAME, add_download, read_marker, remove_download
+from common.gguf_naming import bundled_projector, catalog_gguf_declarations, declaration_covers, gguf_model_name, multimodal_model_name
 from common.model_size import paths_size_mb, size_mb
 from common.model_metadata import (
     KIND_MULTIMODAL,
@@ -470,6 +472,28 @@ def discard_incomplete_download(output_dir: str, base_dir: str, patterns: list[s
         path.unlink()
     # The marker would otherwise keep flagging the surviving models as in progress.
     (Path(output_dir) / MARKER_NAME).unlink(missing_ok=True)
+
+
+def leave_download(downloads: DirectoryDownloads, output_dir: str, base_dir: str, download_id: str, discard: list[str] | None = None) -> None:
+    """Take download *download_id* out of *output_dir*; call under its bookkeeping lock.
+
+    *discard* is set for a failed download: the patterns of its files, which go with it.
+    The ".cache" tree and the directory itself belong to every download running there, so
+    only the last one out removes them. A failed one does it ``discard_incomplete_download``'s
+    way, together with whatever runs killed earlier left; a completed one only drops
+    ".cache", and a killed run still in the marker is left to the next download to discard.
+    """
+    downloads.leave()
+    remove_download(output_dir, download_id)
+    if downloads.others_running():
+        for path in matching_files(output_dir, discard or []):
+            path.unlink()
+    elif discard is not None:
+        marker = Path(output_dir) / MARKER_NAME
+        killed = interrupted_patterns(marker) if marker.is_file() else []
+        discard_incomplete_download(output_dir, base_dir, [*discard, *killed])
+    else:
+        shutil.rmtree(Path(output_dir) / ".cache", ignore_errors=True)
 
 
 def prune_emptied_repo_dir(output_dir: str, base_dir: str) -> bool:
@@ -1507,7 +1531,8 @@ def delete_model(output_dir: str, models_base: str, allow_pattern: str, mmproj_a
     projector alone; deleting the text model while the multimodal one was downloaded
     removes nothing. The deleted model's record goes either way, and a projector another
     installed quantization's record names stays. A GGUF with no record at all — an
-    install the downloader never recorded — loses the files the patterns name.
+    install the downloader never recorded — loses the files the patterns name. A bundled
+    GGUF (``bundled_projector``) is one model: it goes with its whole record.
     """
     base = Path(output_dir)
     if not base.is_dir():
@@ -1521,12 +1546,19 @@ def delete_model(output_dir: str, models_base: str, allow_pattern: str, mmproj_a
         return [p for p in model_files(output_dir) if matches_pattern(p.relative_to(base).as_posix(), pattern)]
 
     records = read_metadata(output_dir)
+    declarations = catalog_gguf_declarations()
     going: list[Path] = []
     ggufs = [p for p in named(allow_pattern) if not is_mmproj_file(p.name)]
     if not ggufs:
         emit_json_info(f"No files matching '{allow_pattern}' found in {output_dir}")
     for gguf in ggufs:
         rel = gguf.relative_to(base).as_posix()
+        rel_dir = gguf.parent.relative_to(models_base).as_posix()
+        if bundled_projector(declarations, "" if rel_dir == "." else rel_dir, gguf.name):
+            going.append(gguf)
+            for model_kind in (KIND_TEXT, KIND_MULTIMODAL):
+                forget_model_record(output_dir, rel, model_kind)
+            continue
         if other in recorded_kinds(records, rel):
             emit_json_info(f"Keeping {rel}: its {other} model stays installed")
         else:
@@ -1667,21 +1699,29 @@ def generate_models_ini(models_dir: Path, models_list_path: str = MODELS_LIST_PA
 
     A GGUF with a projector in its directory gets two sections: ``<name>``, which loads
     the text model alone, and ``<name>-multimodal`` (``multimodal_model_name``), which
-    loads it with the projector.
+    loads it with the projector. A bundled GGUF (``bundled_projector``) gets one,
+    ``<name>`` with the projector.
     """
     backfill_ootb_records(models_dir, models_list_path)
+    declarations = catalog_gguf_declarations(models_list_path)
     config = configparser.ConfigParser()
 
     gguf_files = [p for p in sorted(models_dir.rglob("*.gguf")) if "mmproj" not in p.name]
     for gguf_file in gguf_files:
         record = file_record(str(gguf_file), str(models_dir))
-        section = gguf_model_name(gguf_file.relative_to(models_dir).as_posix(), record)
+        rel = gguf_file.relative_to(models_dir)
+        section = gguf_model_name(rel.as_posix(), record)
         config[section] = {"model": str(gguf_file.as_posix())}
 
         # A projector in the same directory makes the multimodal model of this GGUF
         mmproj_files = sorted(gguf_file.parent.glob("*mmproj*.gguf"))
         if mmproj_files:
-            config[multimodal_model_name(section)] = {"model": str(gguf_file.as_posix()), "mmproj": str(mmproj_files[0].as_posix())}
+            rel_dir = "" if rel.parent.as_posix() == "." else rel.parent.as_posix()
+            bundled = bundled_projector(declarations, rel_dir, gguf_file.name)
+            config[section if bundled else multimodal_model_name(section)] = {
+                "model": str(gguf_file.as_posix()),
+                "mmproj": str(mmproj_files[0].as_posix()),
+            }
 
     output_path = models_dir / "models.ini"
     with open(output_path, "w") as f:
@@ -1908,52 +1948,63 @@ def main():
         # lowercase download variable; chaining delegates the lookup instead.
         metadata_env = ChainMap({"model_directory": model_directory}, os.environ)
 
-        # Per-repo ".download" marker: present => prior run killed mid-download, discard
-        # what it left and retry; absent but the requested files present => complete.
-        # Marker first, files second — the reverse of --check, because the leftovers of
-        # the interrupted run have to go before the directory can be judged.
-        marker = Path(output_dir) / MARKER_NAME
-        if marker.is_file():
-            refresh_listing_at_exit()
-            emit_json_info(f"Removing incomplete previous download: {repo_id}")
-            discard_incomplete_download(output_dir, args.output_dir, interrupted_patterns(marker))
-        if is_installed(output_dir, patterns):
-            present = sorted(str(p.resolve()) for p in matching_files(output_dir, patterns) if p.suffix == ".gguf")
-            installed = ", ".join(Path(p).name for p in present)
-            # Named here as well as after a transfer: a caller asking for a model gets
-            # its id back whether this run had to fetch anything or not — derived from
-            # the files this request matched, the same way the download path derives
-            # it, so the two cannot disagree about a repository holding several
-            # quantizations.
-            identity = identify_model(metadata_env, fallback_model_id=fallback_model_id(source["model_type"], present, args.output_dir))
-            # The files can be there without this model's record: the projector landed
-            # with a sibling quantization, or the text model was deleted while the
-            # multimodal one stayed. Downloading it again is what records it.
-            kind = KIND_MULTIMODAL if mmproj_allow_pattern else KIND_TEXT
-            repo_dir = Path(output_dir).resolve()
-            recorded_files = sorted(Path(p).relative_to(repo_dir).as_posix() for p in present)
-            main_gguf = next((f for f in recorded_files if not is_mmproj_file(f)), None)
-            if main_gguf and kind not in recorded_kinds(read_metadata(output_dir), main_gguf):
+        # The repository directory is shared by every download from the repository, and
+        # several can run at once: they transfer in parallel, but change the shared
+        # bookkeeping under the directory's lock, and only a download that finds no
+        # other running there may take what it finds for a killed run's leftovers.
+        downloads = DirectoryDownloads(args.output_dir, repo_id)
+        with downloads.bookkeeping():
+            idle = not downloads.others_running()
+            # Per-repo ".download" marker: present with no download running => a run
+            # killed mid-download, discard what it left and retry; absent but the
+            # requested files present => complete. Marker first, files second — the
+            # reverse of --check, because the leftovers of the interrupted run have to
+            # go before the directory can be judged.
+            marker = Path(output_dir) / MARKER_NAME
+            if idle and marker.is_file():
                 refresh_listing_at_exit()
-                if write_metadata(output_dir, handler="hf-handler", env=metadata_env, identity=identity, files=recorded_files) is None:
-                    emit_json_error(f"Found {repo_id} installed, but its metadata record could not be written")
-                    raise SystemExit(1)
-                generate_models_ini(Path(args.output_dir))
-            emit_json_info(
-                f"Model exists: {repo_id} ({installed})",
-                artifacts=present,
-                model_id=identity["model_id"],
-                size_mb=downloaded_size_mb(present),
-            )
-            return
-        if os.path.isdir(output_dir) and not has_model_content(output_dir):
-            # Bookkeeping-only leftover (e.g. killed between makedirs and the marker
-            # write, or a deleted model): wipe it so the download starts clean.
-            refresh_listing_at_exit()
-            emit_json_info(f"Removing incomplete previous download: {repo_id}")
-            remove_model_dir(output_dir, args.output_dir)
+                emit_json_info(f"Removing incomplete previous download: {repo_id}")
+                discard_incomplete_download(output_dir, args.output_dir, interrupted_patterns(marker))
+            # With a download running the marker stays, and a file a killed run landed
+            # without its record is not installed: the download below records it.
+            if is_installed(output_dir, patterns) and not unfinished_files(output_dir, patterns):
+                present = sorted(str(p.resolve()) for p in matching_files(output_dir, patterns) if p.suffix == ".gguf")
+                installed = ", ".join(Path(p).name for p in present)
+                # Named here as well as after a transfer: a caller asking for a model gets
+                # its id back whether this run had to fetch anything or not — derived from
+                # the files this request matched, the same way the download path derives
+                # it, so the two cannot disagree about a repository holding several
+                # quantizations.
+                identity = identify_model(metadata_env, fallback_model_id=fallback_model_id(source["model_type"], present, args.output_dir))
+                # The files can be there without this model's record: the projector landed
+                # with a sibling quantization, or the text model was deleted while the
+                # multimodal one stayed. Downloading it again is what records it.
+                kind = KIND_MULTIMODAL if mmproj_allow_pattern else KIND_TEXT
+                repo_dir = Path(output_dir).resolve()
+                recorded_files = sorted(Path(p).relative_to(repo_dir).as_posix() for p in present)
+                main_gguf = next((f for f in recorded_files if not is_mmproj_file(f)), None)
+                if main_gguf and kind not in recorded_kinds(read_metadata(output_dir), main_gguf):
+                    refresh_listing_at_exit()
+                    if write_metadata(output_dir, handler="hf-handler", env=metadata_env, identity=identity, files=recorded_files) is None:
+                        emit_json_error(f"Found {repo_id} installed, but its metadata record could not be written")
+                        raise SystemExit(1)
+                    generate_models_ini(Path(args.output_dir))
+                emit_json_info(
+                    f"Model exists: {repo_id} ({installed})",
+                    artifacts=present,
+                    model_id=identity["model_id"],
+                    size_mb=downloaded_size_mb(present),
+                )
+                return
+            if idle and os.path.isdir(output_dir) and not has_model_content(output_dir):
+                # Bookkeeping-only leftover (e.g. killed between makedirs and the marker
+                # write, or a deleted model): wipe it so the download starts clean.
+                refresh_listing_at_exit()
+                emit_json_info(f"Removing incomplete previous download: {repo_id}")
+                remove_model_dir(output_dir, args.output_dir)
         # Anything else the directory holds is another quantization of the same
-        # repository: the requested files are downloaded alongside it.
+        # repository, installed or on its way: the requested files are downloaded
+        # alongside it.
 
         # Nothing has been written yet, and the model URL or key comes from the host
         # configuration: check what it points at before creating a directory for it.
@@ -1969,23 +2020,28 @@ def main():
         # shares its GGUF with has only the projector left to fetch. Only the missing
         # files are fetched, marked as in flight and discarded on failure, so the part
         # already there stays installed throughout; the record and the completion event
-        # still describe the whole model.
-        fetch = [pattern for pattern in patterns if not matching_files(output_dir, [pattern])]
+        # still describe the whole model. A file a killed run landed without its record
+        # is missing too: it is fetched again.
+        fetch = [pattern for pattern in patterns if not matching_files(output_dir, [pattern]) or unfinished_files(output_dir, [pattern])]
         model_bytes = expected_size_bytes(repo_id, patterns)
 
-        os.makedirs(output_dir, exist_ok=True)
-        write_marker(
-            output_dir,
-            handler="hf-handler",
-            models_repository=os.environ.get("models_repository", ""),
-            model_directory=model_directory,
-            model_url=args.model_url or "",
-            # Which files of a shared repository directory this download is for, so a
-            # quantization already installed there is not reported as in progress.
-            file_patterns=fetch,
-            # The size of the model, not of the transfer: the listing reports it.
-            size_mb=size_mb(model_bytes),
-        )
+        download_id = uuid.uuid4().hex
+        with downloads.bookkeeping():
+            os.makedirs(output_dir, exist_ok=True)
+            add_download(
+                output_dir,
+                download_id,
+                handler="hf-handler",
+                models_repository=os.environ.get("models_repository", ""),
+                model_directory=model_directory,
+                model_url=args.model_url or "",
+                # Which files of a shared repository directory this download is for, so a
+                # quantization already installed there is not reported as in progress.
+                file_patterns=fetch,
+                # The size of the model, not of the transfer: the listing reports it.
+                size_mb=size_mb(model_bytes),
+            )
+            downloads.join()
         # The listing now reports the model as downloading, and reports it again
         # however this run ends: installed (after the marker is cleared), or discarded.
         refresh_listing()
@@ -2047,11 +2103,6 @@ def main():
                             )
                         download_matched_files(repo_id, mmproj_allow_pattern, output_dir, tqdm_class, verbose=args.verbose)
 
-            # Remove download caches
-            cache_path = Path(output_dir) / ".cache"
-            if cache_path.is_dir():
-                shutil.rmtree(cache_path)
-
             # The absolute path(s) of the downloaded model file(s): the files this request
             # named, not every quantization the shared repository directory holds — a
             # sibling was not downloaded now, and must not name this model either.
@@ -2069,15 +2120,18 @@ def main():
 
             # Record what was downloaded, then clear the in-progress marker: while the
             # marker is still there the repo directory counts as incomplete, so a crash
-            # in between makes the next run retry instead of leaving it unrecorded.
-            recorded = write_metadata(output_dir, handler="hf-handler", env=metadata_env, identity=identity, files=recorded_files)
+            # in between makes the next run retry instead of leaving it unrecorded. The
+            # record file holds every download of the directory, so it is rewritten
+            # under the lock.
+            with downloads.bookkeeping():
+                recorded = write_metadata(output_dir, handler="hf-handler", env=metadata_env, identity=identity, files=recorded_files)
         except BaseException as exc:
             # Network/extraction errors and SIGINT/SIGTERM-driven KeyboardInterrupt
             # leave an unrecorded download behind; discard it before exiting, without
-            # taking another quantization of the same repository, or the part of this
-            # model that was installed before, down with it.
-            if os.path.isdir(output_dir):
-                discard_incomplete_download(output_dir, args.output_dir, fetch)
+            # taking another quantization of the same repository, installed or still
+            # downloading, or the part of this model that was installed before, down with it.
+            with downloads.bookkeeping():
+                leave_download(downloads, output_dir, args.output_dir, download_id, discard=fetch)
             if not isinstance(exc, KeyboardInterrupt):
                 # KeyboardInterrupt gets its own event from the top-level handler.
                 emit_json_error(f"Download failed: {exc}", code=error_code(exc))
@@ -2086,28 +2140,29 @@ def main():
         if recorded is None:
             # The record is required, not best-effort: the host deletes an ad-hoc model
             # by the inputs recorded here, so an installed-but-unrecorded model could
-            # never be removed through the API. Keeping the marker makes the next
-            # run discard and retry.
+            # never be removed through the API. Keeping its entry in the marker makes
+            # the next run, once this one is gone, discard and retry.
+            downloads.leave()
             emit_json_error(f"Downloaded {repo_id}, but its metadata record could not be written; the download will be retried")
             raise SystemExit(1)
 
-        # After the record write on purpose: the scan names every file from its
-        # record, so the model downloaded just now needs its own to be indexed
-        # under the id reported below.
-        generate_models_ini(Path(args.output_dir))
+        with downloads.bookkeeping():
+            # After the record write on purpose: the scan names every file from its
+            # record, so the model downloaded just now needs its own to be indexed
+            # under the id reported below. Under the lock, so of two downloads
+            # finishing together the one writing last has seen both records.
+            generate_models_ini(Path(args.output_dir))
 
-        # Reported after the record write on purpose: a failed record fails the
-        # download, and a completion event before the error would contradict it.
-        emit_json_info(
-            f"Downloaded to: {output_dir}",
-            artifacts=downloaded,
-            model_id=identity["model_id"],
-            size_mb=downloaded_size_mb(downloaded),
-        )
+            # Reported after the record write on purpose: a failed record fails the
+            # download, and a completion event before the error would contradict it.
+            emit_json_info(
+                f"Downloaded to: {output_dir}",
+                artifacts=downloaded,
+                model_id=identity["model_id"],
+                size_mb=downloaded_size_mb(downloaded),
+            )
 
-        marker = Path(output_dir) / MARKER_NAME
-        if marker.exists():
-            marker.unlink()
+            leave_download(downloads, output_dir, args.output_dir, download_id)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,13 @@ the text model ``<name>``, loaded alone, and ``<name>-multimodal``
 (``multimodal_model_name``), loaded with the projector. The catalog declares them as
 two entries on the same file, the second one with a ``model_mmproj_url``.
 
+A catalog entry with a ``model_mmproj_url`` and an id without the suffix is the one
+exception: its GGUF is a single model ``<name>``, always loaded with its projector — a
+speech model, whose projector generates the voice (``GgufDeclaration.bundled``,
+``bundled_projector``). The llamacpp runners tell the same models apart by the mmproj
+header. A speech model downloaded ad hoc, outside the catalog, is named like any other
+GGUF with a projector.
+
 The same rule must name a model everywhere it appears: the listing id
 (``llamacpp:<name>``), the models.ini section (``<name>``) and the fallback metadata
 id. The LLM brick resolves ``llamacpp:<name>`` to the model llama-server serves under
@@ -63,6 +70,11 @@ class GgufDeclaration(NamedTuple):
     filename: str | None
     model_id: str
     multimodal: bool = False
+
+    @property
+    def bundled(self) -> bool:
+        """Whether the entry is one model loaded with its projector: a projector and no suffix."""
+        return self.multimodal and not self.model_id.endswith(MULTIMODAL_SUFFIX)
 
 
 # The subdirectory of the models mount that holds GGUF models, and the id namespace
@@ -126,6 +138,13 @@ def declaration_covers(declaration, rel_dir, filename, multimodal=False):
     if rel_dir != declaration.directory and not rel_dir.startswith(declaration.directory + "/"):
         return False
     return declaration.filename is None or declaration.filename == filename
+
+
+def bundled_projector(declarations, rel_dir, filename):
+    """Whether the GGUF at *rel_dir*/*filename* is one model with its projector, as a
+    bundled declaration (``GgufDeclaration.bundled``) says: no text model and no
+    ``-multimodal`` one, only ``<name>`` loading both files."""
+    return any(d.bundled and declaration_covers(d, rel_dir, filename, multimodal=True) for d in declarations)
 
 
 def gguf_model_name(rel_path, record):

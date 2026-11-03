@@ -11,6 +11,7 @@ tested explicitly here. The rest covers the local filesystem bookkeeping: what c
 an installed model, and what the delete path leaves behind.
 """
 
+import configparser
 import json
 import os
 import sys
@@ -27,7 +28,8 @@ from huggingface_hub.errors import (
     RevisionNotFoundError,
 )
 
-from common.download_marker import MARKER_NAME, read_marker
+from common.download_lock import DirectoryDownloads
+from common.download_marker import MARKER_NAME, add_download, read_marker
 from common.gguf_naming import GgufDeclaration
 from common.model_metadata import METADATA_NAME, metadata_records, read_metadata
 from hugging_face import hf_downloader
@@ -1752,6 +1754,94 @@ def test_each_quantization_keeps_its_own_metadata_record(tmp_path, monkeypatch, 
     ]
 
 
+# --------------------------------------------------------------------------- #
+# main(): downloads running at once into the same repository directory
+# --------------------------------------------------------------------------- #
+def _transfer_through_cache(during):
+    """Stub the transfer the way huggingface_hub runs one into a ``local_dir``.
+
+    The bytes land in ``.cache/huggingface/download/<file>.incomplete`` and are moved
+    into place once complete. *during* maps a pattern to what happens while its file is
+    still in flight: another download started from the same directory.
+    """
+
+    def _download(_repo_id, allow_pattern, output_dir, _tqdm_class, ignore_pattern=None, verbose=False):
+        name = allow_pattern.replace("*", "")
+        partial = Path(output_dir, ".cache", "huggingface", "download", f"{name}.incomplete")
+        partial.parent.mkdir(parents=True, exist_ok=True)
+        partial.write_bytes(b"GGUF")
+        if allow_pattern in during:
+            during[allow_pattern]()
+        partial.replace(Path(output_dir, name))
+
+    return _download
+
+
+def test_a_download_started_next_to_one_in_flight_leaves_it_alone(tmp_path, monkeypatch, stub_download):
+    """The reported bug: two voices of one repository downloaded at once. The second
+    took the first's marker for a killed run, and on finishing removed the ".cache" tree
+    holding the first's partial file, which then failed with ENOENT."""
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    repo = models_dir / "unsloth" / "Qwen3-0.6B-GGUF"
+
+    def _second():
+        _run_main(monkeypatch, "--model-url", "unsloth/Qwen3-0.6B-GGUF:Q8_0", "--output-dir", str(models_dir))
+        # Finished, but not the last one out: the marker still names the first.
+        assert interrupted_patterns(repo / MARKER_NAME) == ["*Q4_0*.gguf"]
+
+    monkeypatch.setattr(hf_downloader, "download_matched_files", _transfer_through_cache({"*Q4_0*.gguf": _second}))
+    _run_main(monkeypatch, "--model-url", "unsloth/Qwen3-0.6B-GGUF:Q4_0", "--output-dir", str(models_dir))
+
+    assert (repo / "Q4_0.gguf").is_file()
+    assert (repo / "Q8_0.gguf").is_file()
+    assert sorted(r["files"][0] for r in metadata_records(read_metadata(str(repo)))) == ["Q4_0.gguf", "Q8_0.gguf"]
+    # The last one out cleans up what the transfers shared.
+    assert not (repo / MARKER_NAME).exists()
+    assert not (repo / ".cache").exists()
+
+
+def test_a_failed_download_leaves_the_one_in_flight_next_to_it_alone(tmp_path, monkeypatch, stub_download):
+    """A failure discards its own files only, while another download still runs there."""
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    repo = models_dir / "unsloth" / "Qwen3-0.6B-GGUF"
+
+    def _second():
+        with pytest.raises(OSError):
+            _run_main(monkeypatch, "--model-url", "unsloth/Qwen3-0.6B-GGUF:Q8_0", "--output-dir", str(models_dir))
+
+    def _fail():
+        raise OSError("connection reset")
+
+    monkeypatch.setattr(hf_downloader, "download_matched_files", _transfer_through_cache({"*Q4_0*.gguf": _second, "*Q8_0*.gguf": _fail}))
+    _run_main(monkeypatch, "--model-url", "unsloth/Qwen3-0.6B-GGUF:Q4_0", "--output-dir", str(models_dir))
+
+    assert (repo / "Q4_0.gguf").is_file()
+    assert not (repo / "Q8_0.gguf").exists()
+    assert [r["files"] for r in metadata_records(read_metadata(str(repo)))] == [["Q4_0.gguf"]]
+    assert not (repo / MARKER_NAME).exists()
+    assert not (repo / ".cache").exists()
+
+
+def test_a_killed_runs_unrecorded_file_is_fetched_again_while_another_download_runs(tmp_path, monkeypatch, stub_download):
+    """With a download running the killed run's marker entry cannot be discarded, so the
+    file it landed without a record must not pass for installed: it is downloaded and
+    recorded instead."""
+    models_dir, repo = _qwen_repo(tmp_path, "Q4_0.gguf")
+    add_download(str(repo), "killed", handler="hf-handler", file_patterns=["*Q4_0*.gguf"])
+    running = DirectoryDownloads(str(models_dir), "unsloth/Qwen3-0.6B-GGUF")
+    with running.bookkeeping():
+        running.join()
+    try:
+        _run_main(monkeypatch, "--model-url", "unsloth/Qwen3-0.6B-GGUF:Q4_0", "--output-dir", str(models_dir))
+    finally:
+        running.leave()
+
+    assert stub_download == ["*Q4_0*.gguf"]
+    assert [r["files"] for r in metadata_records(read_metadata(str(repo)))] == [["Q4_0.gguf"]]
+
+
 def test_delete_drops_only_the_deleted_quantizations_record(tmp_path, monkeypatch, stub_download):
     models_dir = tmp_path / "models"
     models_dir.mkdir()
@@ -1901,20 +1991,21 @@ def test_an_interrupted_projector_download_keeps_the_installed_model(tmp_path, m
     models_dir = tmp_path / "models"
     _download_gemma(monkeypatch, models_dir, multimodal=False)
     repo = models_dir / GEMMA_REPO
-    discard = hf_downloader.discard_incomplete_download
+    leave = hf_downloader.leave_download
 
     def _killed(**_kwargs):
         raise KeyboardInterrupt("received signal 9")
 
-    # A SIGKILL mid-transfer: none of the run's own cleanup gets to run.
+    # A SIGKILL mid-transfer: none of the run's own cleanup gets to run, only the kernel
+    # releasing its presence lock.
     monkeypatch.setattr(hf_downloader, "hf_hub_download", _killed)
-    monkeypatch.setattr(hf_downloader, "discard_incomplete_download", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hf_downloader, "leave_download", lambda downloads, *args, **kwargs: downloads.leave())
     with pytest.raises(KeyboardInterrupt):
         _download_gemma(monkeypatch, models_dir, multimodal=True)
     assert (repo / MARKER_NAME).is_file()
 
     # The next request for the text model finds the marker that run left behind.
-    monkeypatch.setattr(hf_downloader, "discard_incomplete_download", discard)
+    monkeypatch.setattr(hf_downloader, "leave_download", leave)
     fetched: list[str] = []
     monkeypatch.setattr(hf_downloader, "hf_hub_download", lambda **kwargs: fetched.append(kwargs["filename"]))
     _download_gemma(monkeypatch, models_dir, multimodal=False)
@@ -2872,3 +2963,44 @@ def test_a_hub_rejection_reaches_the_host_with_its_code(tmp_path, monkeypatch, c
     assert event["event"] == "error"
     assert event["code"] == "model_private_or_gated"
     assert "is gated" in event["description"]
+
+
+# --------------------------------------------------------------------------- #
+# A speech model: one GGUF always loaded with its projector, the voice
+# --------------------------------------------------------------------------- #
+SPEECH_REPO = "org/speech-GGUF"
+SPEECH_FILE = "voice.gguf"
+SPEECH_MMPROJ_FILE = "mmproj-voice.gguf"
+SPEECH_ID = "llamacpp:voice"
+
+
+def _download_speech(monkeypatch, models_dir, *, delete=False):
+    """Download (or delete) the speech model the catalog declares as one bundled entry."""
+    declaration = GgufDeclaration(SPEECH_REPO, SPEECH_FILE, SPEECH_ID, multimodal=True)
+    monkeypatch.setattr(hf_downloader, "catalog_gguf_declarations", lambda *a, **k: [declaration])
+    monkeypatch.setenv("model_id", SPEECH_ID)
+    argv = ["--delete"] if delete else []
+    argv += ["--model-url", f"https://huggingface.co/{SPEECH_REPO}/blob/abc123/{SPEECH_FILE}", "--output-dir", str(models_dir)]
+    argv += ["--model-mmproj-url", f"https://huggingface.co/{SPEECH_REPO}/blob/abc123/{SPEECH_MMPROJ_FILE}"]
+    _run_main(monkeypatch, *argv)
+
+
+def test_a_speech_model_gets_one_models_ini_section_with_its_projector(tmp_path, monkeypatch, stub_hub_download):
+    models_dir = tmp_path / "models"
+
+    _download_speech(monkeypatch, models_dir)
+
+    config = configparser.ConfigParser()
+    config.read(models_dir / "models.ini")
+    assert config.sections() == ["voice"]
+    assert config["voice"]["mmproj"].endswith(SPEECH_MMPROJ_FILE)
+
+
+def test_deleting_a_speech_model_removes_its_gguf_projector_and_record(tmp_path, monkeypatch, stub_hub_download):
+    """No text model stays behind: the GGUF goes with the projector."""
+    models_dir = tmp_path / "models"
+    _download_speech(monkeypatch, models_dir)
+
+    _download_speech(monkeypatch, models_dir, delete=True)
+
+    assert not (models_dir / SPEECH_REPO).exists()
