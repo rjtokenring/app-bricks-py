@@ -17,7 +17,7 @@ import numpy as np
 
 from arduino.app_utils import http
 from arduino.app_peripherals.speaker import Speaker, BaseSpeaker
-from arduino.app_internal.core import resolve_address, get_brick_config, get_brick_configured_model
+from arduino.app_internal.core import resolve_address, get_brick_config, get_brick_configured_model, load_model_list
 from arduino.app_utils import brick, AppError, Logger
 
 logger = Logger("TextToSpeech")
@@ -120,8 +120,9 @@ class TextToSpeech:
             max_queue_size (int): Maximum number of pending ``speak(block=False)`` requests. When the
                 queue is full, further non-blocking calls raise TTSBusyError instead of piling up.
             voice (str, optional): Name of the predefined voice a ``llamacpp:`` model (Pocket TTS)
-                speaks with, e.g. ``"giovanni"``. By default the first voice of the model. Ignored by
-                the other models, which have a voice of their own.
+                speaks with, e.g. ``"giovanni"``. By default the voice the models list declares for the
+                model (``giovanni`` for Italian, ``alba`` for English), or else its first voice. Ignored
+                by the other models, which have a voice of their own.
             voice_reference (str | os.PathLike, optional): Path to a short recording (WAV, 3-5 seconds
                 of clean speech) of a voice to clone instead, for the ``llamacpp:`` models that clone
                 voices (the catalog's Pocket TTS models do not). A longer recording delays the start of
@@ -458,7 +459,7 @@ class TextToSpeech:
     ) -> tuple[VoiceConfig, dict[str, str]]:
         """Return the voice config for `model_name` on the llama.cpp speech service, and the voice field of its
         requests: the recording `voice_reference` to clone, or else the predefined voice `voice`, by default the
-        first voice of the model. The service loads the model to answer, if it is not loaded yet."""
+        one the models list declares for the model, or else its first. The service loads the model to answer, if it is not loaded yet."""
         name = model_name.removeprefix(LLAMACPP_MODEL_PREFIX)
         try:
             response = http.get(f"{self.api_base_url}/props", params={"model": name})
@@ -484,10 +485,20 @@ class TextToSpeech:
                 hint="Use a model with predefined voices, like the catalog's Pocket TTS, or pass a recording to clone as voice_reference=.",
             )
         if voice is None:
-            voice = voices[0]
+            voice = self._default_llamacpp_voice(model_name, voices)
         elif voice not in voices:
             raise TTSError(f"TTS model '{model_name}' has no voice '{voice}'.", hint=voices_hint)
         return {"model": name, "name": voice, "language": None}, {"voice": voice}
+
+    @staticmethod
+    def _default_llamacpp_voice(model_name: str, voices: list[str]) -> str:
+        """Return the voice of `voices` the models list declares as the default of `model_name`, or else the first."""
+        entry = (load_model_list() or {}).get(model_name)
+        declared = entry.metadata.get("default_voice") if entry else None
+        if declared is not None and declared not in voices:
+            logger.warning(f"TTS model '{model_name}' has no voice '{declared}', its default in the models list: speaking with '{voices[0]}'.")
+            declared = None
+        return declared or voices[0]
 
     def _chunk_text(self, text: str) -> list[str]:
         """Split text into chunks accepted by the local TTS service.

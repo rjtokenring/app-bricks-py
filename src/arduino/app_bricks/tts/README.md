@@ -5,8 +5,8 @@ The `TextToSpeech` brick provides a completely offline text-to-speech (TTS) solu
 ## Features
 
 - **Offline Operation:** All text-to-speech functions are performed locally, ensuring data privacy and eliminating network dependencies.
-- **Multiple Language Support:** Select a language by configuring the corresponding TTS model (e.g. `melo-tts-en`, `melo-tts-es`, `melo-tts-zh`, `piper-tts-de`, `piper-tts-en`, `piper-tts-it`, `llamacpp:pocket-tts-english`, `llamacpp:pocket-tts-italian`) in `brick_config.yaml` or override per-app in `app.yaml`.
-- **Predefined Voices:** The Pocket TTS models (`llamacpp:pocket-tts-english`, `llamacpp:pocket-tts-italian`) run on the NPU with llama.cpp and speak with one of 25 predefined voices (see [Pocket TTS voices](#pocket-tts-voices)).
+- **Multiple Language Support:** Select a language by configuring the corresponding TTS model (e.g. `melo-tts-en`, `melo-tts-es`, `melo-tts-zh`, `piper-tts-de`, `piper-tts-en`, `piper-tts-it`, `llamacpp:pocket-tts-english`, `llamacpp:pocket-tts-french`, `llamacpp:pocket-tts-german`, `llamacpp:pocket-tts-italian`, `llamacpp:pocket-tts-spanish`) in `brick_config.yaml` or override per-app in `app.yaml`.
+- **Predefined Voices:** The Pocket TTS models (`llamacpp:pocket-tts-english`, `llamacpp:pocket-tts-french`, `llamacpp:pocket-tts-german`, `llamacpp:pocket-tts-italian`, `llamacpp:pocket-tts-spanish`) run on the NPU with llama.cpp and speak with one of 25 predefined voices (see [Pocket TTS voices](#pocket-tts-voices)).
 - **Audio Output Formats:** Directly output synthesized speech to a Speaker instance or to WAV, PCM, or PCM audio.
 - **Long Text Support:** `speak()` splits long input into sentence-aware chunks of up to 1024 characters before synthesis.
 - **Streaming Playback:** `speak()` plays PCM chunks as they arrive from the local TTS service instead of waiting for the full rendered response.
@@ -80,7 +80,15 @@ with open("synthesized_speech.wav", "wb") as f:
 
 ### Pocket TTS voices
 
-The Pocket TTS models speak with one of their predefined voices: pass its name as `voice`, and select the model in `app.yaml`. Without `voice`, a model speaks with its first voice, `alba`.
+The Pocket TTS models speak with one of their predefined voices: pass its name as `voice`, and select the model in `app.yaml`. Without `voice`, a model speaks with the default voice of its language:
+
+| Model | Default voice |
+|---|---|
+| `llamacpp:pocket-tts-english` | `alba` |
+| `llamacpp:pocket-tts-french` | `estelle` |
+| `llamacpp:pocket-tts-german` | `juergen` |
+| `llamacpp:pocket-tts-italian` | `giovanni` |
+| `llamacpp:pocket-tts-spanish` | `lola` |
 
 ```yaml
 bricks:

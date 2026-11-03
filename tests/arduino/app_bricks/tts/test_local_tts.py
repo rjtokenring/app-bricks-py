@@ -561,9 +561,13 @@ LLAMACPP_PCM = "audio/pcm;rate=24000;encoding=float;bits=32"
 POCKET_VOICES = ["alba", "giovanni", "vera"]
 
 
-def make_llamacpp_tts(monkeypatch, speaker, post_response, served=("pocket-tts-italian",), voices=POCKET_VOICES, clones=False, **tts_kwargs):
+def make_llamacpp_tts(
+    monkeypatch, speaker, post_response, served=("pocket-tts-italian",), voices=POCKET_VOICES, clones=False, default_voice=None, **tts_kwargs
+):
     """A TextToSpeech configured with llamacpp:pocket-tts-italian, whose runner serves *served*, each with the
-    predefined *voices*, and with a voice encoder when it *clones*."""
+    predefined *voices*, and with a voice encoder when it *clones*. The models list declares *default_voice* for it."""
+    from arduino.app_internal.core.module import ModelEntry
+
     requests = []
 
     @contextlib.contextmanager
@@ -585,7 +589,10 @@ def make_llamacpp_tts(monkeypatch, speaker, post_response, served=("pocket-tts-i
     def post(url, json=None, **kwargs):
         raise AssertionError(f"{url}: llama.cpp is never sent a POST outside of the synthesis stream")
 
+    metadata = {"default_voice": default_voice} if default_voice else {}
+    catalog = {"llamacpp:pocket-tts-italian": ModelEntry(model_id="llamacpp:pocket-tts-italian", metadata=metadata)}
     monkeypatch.setattr("arduino.app_bricks.tts.local_tts.get_brick_configured_model", lambda brick_id: "llamacpp:pocket-tts-italian")
+    monkeypatch.setattr("arduino.app_bricks.tts.local_tts.load_model_list", lambda: catalog)
     monkeypatch.setattr("arduino.app_utils.http.get", get)
     monkeypatch.setattr("arduino.app_utils.http.post", post)
     monkeypatch.setattr("arduino.app_utils.http.stream", stream)
@@ -670,13 +677,44 @@ def test_llamacpp_stream_without_a_sample_rate_is_an_error(monkeypatch):
         tts.synthesize_pcm("hello")
 
 
-def test_llamacpp_model_speaks_with_its_first_voice_by_default(monkeypatch):
+def test_llamacpp_model_speaks_with_the_default_voice_of_the_models_list(monkeypatch):
     """The voice is named in every request, also when the app does not pick one."""
+    silence = lambda url, json, **kwargs: float_pcm_response([0.0] * 8)  # noqa: E731
+    tts, requests = make_llamacpp_tts(monkeypatch, BlockingSpeaker(buffer_size=4), silence, default_voice="giovanni")
+
+    tts.synthesize_pcm("ciao")
+
+    assert requests[0][2]["voice"] == "giovanni"
+
+
+def test_llamacpp_voice_of_the_app_wins_over_the_default_of_the_models_list(monkeypatch):
+    silence = lambda url, json, **kwargs: float_pcm_response([0.0] * 8)  # noqa: E731
+    tts, requests = make_llamacpp_tts(monkeypatch, BlockingSpeaker(buffer_size=4), silence, default_voice="giovanni", voice="vera")
+
+    tts.synthesize_pcm("ciao")
+
+    assert requests[0][2]["voice"] == "vera"
+
+
+def test_llamacpp_model_speaks_with_its_first_voice_without_a_default_in_the_models_list(monkeypatch):
+    """A hand-installed model has no entry in the models list."""
     tts, requests = make_llamacpp_tts(monkeypatch, BlockingSpeaker(buffer_size=4), lambda url, json, **kwargs: float_pcm_response([0.0] * 8))
 
     tts.synthesize_pcm("hello")
 
     assert requests[0][2]["voice"] == "alba"
+
+
+def test_llamacpp_default_voice_the_model_lacks_falls_back_to_its_first_voice(monkeypatch):
+    warnings = []
+    monkeypatch.setattr("arduino.app_bricks.tts.local_tts.logger.warning", lambda msg, *args, **kwargs: warnings.append(msg))
+    silence = lambda url, json, **kwargs: float_pcm_response([0.0] * 8)  # noqa: E731
+    tts, requests = make_llamacpp_tts(monkeypatch, BlockingSpeaker(buffer_size=4), silence, default_voice="cosette")
+
+    tts.synthesize_pcm("ciao")
+
+    assert requests[0][2]["voice"] == "alba"
+    assert len(warnings) == 1 and "cosette" in warnings[0]
 
 
 def test_llamacpp_voice_must_be_one_of_the_model(monkeypatch):
@@ -814,4 +852,16 @@ def test_catalog_llamacpp_tts_ids_are_the_names_the_runner_serves():
             assert variables["models_repository"] == "llamacpp"
             assert variables["model_url"].rsplit("/", 1)[-1] == model_id.removeprefix("llamacpp:") + ".gguf"
             assert variables["model_mmproj_url"]
-    assert {"llamacpp:pocket-tts-english", "llamacpp:pocket-tts-italian"} <= set(ids)
+    languages = ("english", "french", "german", "italian", "spanish")
+    assert {f"llamacpp:pocket-tts-{language}" for language in languages} <= set(ids)
+
+
+def test_catalog_pocket_tts_models_declare_the_default_voice_of_their_language():
+    """Kyutai's defaults (DEFAULT_VOICE_FOR_LANGUAGE in pocket_tts/default_parameters.py), alba for English."""
+    import yaml
+
+    catalog = yaml.safe_load((REPO_ROOT / "models" / "models-list.yaml").read_text(encoding="utf-8"))
+    defaults = {model_id: (model.get("metadata") or {}).get("default_voice") for entry in catalog["models"] for model_id, model in entry.items()}
+
+    expected = {"english": "alba", "french": "estelle", "german": "juergen", "italian": "giovanni", "spanish": "lola"}
+    assert {language: defaults[f"llamacpp:pocket-tts-{language}"] for language in expected} == expected

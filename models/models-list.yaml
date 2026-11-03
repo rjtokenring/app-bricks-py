@@ -1944,6 +1944,53 @@ models:
               model_directory: "macolomb/pocket-tts-without-voice-cloning"
     metadata:
       model_size_mb: 203
+      default_voice: "alba"
+      source: "huggingface"
+      source-model-id: "pocket-tts-without-voice-cloning"
+      source-model-url: "https://huggingface.co/macolomb/pocket-tts-without-voice-cloning"
+ - "llamacpp:pocket-tts-french":
+    name : "Pocket TTS (French)"
+    description: >-
+      Pocket TTS is a compact text-to-speech model developed by Kyutai - French version.
+      It speaks with one of 25 predefined voices, and runs on the NPU with llama.cpp.
+    supported_boards: ["ventunoq"]
+    bricks:
+      - id: "arduino:tts"
+    deployment:
+      handler: "hf-handler"
+      platforms:
+        - ventunoq:
+            variables:
+              model_url: "https://huggingface.co/macolomb/pocket-tts-without-voice-cloning/blob/cc72b003783a2f9c07ff92e2b3cc610b628de47e/french/pocket-tts-french.gguf"
+              model_mmproj_url: "https://huggingface.co/macolomb/pocket-tts-without-voice-cloning/blob/cc72b003783a2f9c07ff92e2b3cc610b628de47e/french/mmproj-pocket-tts-french.gguf"
+              models_repository: "llamacpp"
+              model_directory: "macolomb/pocket-tts-without-voice-cloning"
+    metadata:
+      model_size_mb: 203
+      default_voice: "estelle"
+      source: "huggingface"
+      source-model-id: "pocket-tts-without-voice-cloning"
+      source-model-url: "https://huggingface.co/macolomb/pocket-tts-without-voice-cloning"
+ - "llamacpp:pocket-tts-german":
+    name : "Pocket TTS (German)"
+    description: >-
+      Pocket TTS is a compact text-to-speech model developed by Kyutai - German version.
+      It speaks with one of 25 predefined voices, and runs on the NPU with llama.cpp.
+    supported_boards: ["ventunoq"]
+    bricks:
+      - id: "arduino:tts"
+    deployment:
+      handler: "hf-handler"
+      platforms:
+        - ventunoq:
+            variables:
+              model_url: "https://huggingface.co/macolomb/pocket-tts-without-voice-cloning/blob/cc72b003783a2f9c07ff92e2b3cc610b628de47e/german/pocket-tts-german.gguf"
+              model_mmproj_url: "https://huggingface.co/macolomb/pocket-tts-without-voice-cloning/blob/cc72b003783a2f9c07ff92e2b3cc610b628de47e/german/mmproj-pocket-tts-german.gguf"
+              models_repository: "llamacpp"
+              model_directory: "macolomb/pocket-tts-without-voice-cloning"
+    metadata:
+      model_size_mb: 203
+      default_voice: "juergen"
       source: "huggingface"
       source-model-id: "pocket-tts-without-voice-cloning"
       source-model-url: "https://huggingface.co/macolomb/pocket-tts-without-voice-cloning"
@@ -1966,6 +2013,30 @@ models:
               model_directory: "macolomb/pocket-tts-without-voice-cloning"
     metadata:
       model_size_mb: 203
+      default_voice: "giovanni"
+      source: "huggingface"
+      source-model-id: "pocket-tts-without-voice-cloning"
+      source-model-url: "https://huggingface.co/macolomb/pocket-tts-without-voice-cloning"
+ - "llamacpp:pocket-tts-spanish":
+    name : "Pocket TTS (Spanish)"
+    description: >-
+      Pocket TTS is a compact text-to-speech model developed by Kyutai - Spanish version.
+      It speaks with one of 25 predefined voices, and runs on the NPU with llama.cpp.
+    supported_boards: ["ventunoq"]
+    bricks:
+      - id: "arduino:tts"
+    deployment:
+      handler: "hf-handler"
+      platforms:
+        - ventunoq:
+            variables:
+              model_url: "https://huggingface.co/macolomb/pocket-tts-without-voice-cloning/blob/cc72b003783a2f9c07ff92e2b3cc610b628de47e/spanish/pocket-tts-spanish.gguf"
+              model_mmproj_url: "https://huggingface.co/macolomb/pocket-tts-without-voice-cloning/blob/cc72b003783a2f9c07ff92e2b3cc610b628de47e/spanish/mmproj-pocket-tts-spanish.gguf"
+              models_repository: "llamacpp"
+              model_directory: "macolomb/pocket-tts-without-voice-cloning"
+    metadata:
+      model_size_mb: 203
+      default_voice: "lola"
       source: "huggingface"
       source-model-id: "pocket-tts-without-voice-cloning"
       source-model-url: "https://huggingface.co/macolomb/pocket-tts-without-voice-cloning"
