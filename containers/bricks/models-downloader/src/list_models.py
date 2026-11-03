@@ -43,7 +43,7 @@ import sys
 import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common.download_marker import read_marker
+from common.download_marker import marker_downloads, read_marker
 from common.gguf_naming import LLAMACPP_SUBDIR, declaration_covers, declared_gguf_files, gguf_basename, gguf_model_name
 from common.model_metadata import (
     ORIGIN_BUILTIN,
@@ -415,21 +415,23 @@ def find_llamacpp_models(models_base_dir, declarations=()):
 
     for root, _dirs, files in os.walk(llamacpp_dir):
         gguf_files = sorted(f for f in files if f.endswith(".gguf"))
-        marker = read_marker(os.path.join(root, ".download"))
-        if not gguf_files and marker is None:
+        # One marker per directory, naming every download in flight there.
+        downloads = marker_downloads(read_marker(os.path.join(root, ".download")))
+        if not gguf_files and not downloads:
             continue
         rel_dir = os.path.relpath(root, llamacpp_dir).replace(os.sep, "/")
         rel_dir = "" if rel_dir == "." else rel_dir
         mmproj_files = [f for f in gguf_files if "mmproj" in f]
 
-        # Whether the marker was accounted for by a GGUF listed below; if it was not, the
-        # download it stands for has nothing on disk yet and is reported on its own.
-        marker_listed = False
+        # The downloads not accounted for by a GGUF listed below: they have nothing on
+        # disk yet, and are reported on their own.
+        pending = list(downloads)
         for f in gguf_files:
             if "mmproj" in f:
                 continue
-            downloading = marker is not None and marker_covers_file(marker, f)
-            marker_listed = marker_listed or downloading
+            marker = next((d for d in downloads if marker_covers_file(d, f)), None)
+            downloading = marker is not None
+            pending = [d for d in pending if d is not marker]
             full_path = os.path.join(root, f)
             rel_path = f"{rel_dir}/{f}" if rel_dir else f
             # The record can sit above a nested per-quantization folder, so it is
@@ -453,14 +455,14 @@ def find_llamacpp_models(models_base_dir, declarations=()):
                 "name": model_name,
                 "handler": HANDLER_HUGGING_FACE,
                 "runtime": model_runtime(HANDLER_HUGGING_FACE),
-                "model_publisher": scanned_publisher(record, marker if downloading else None, rel_dir),
+                "model_publisher": scanned_publisher(record, marker, rel_dir),
                 # Found on disk. main() overrides this when the id matches a
                 # models-list.yaml entry, which makes it a curated model instead.
                 "model_origin": ORIGIN_USER,
                 "path": full_path,
                 "installed": not downloading,
                 "downloading": downloading,
-                "size_mb": listed_size_mb(not downloading, disk_size_mb, None, marker.get("size_mb") if downloading and marker else None),
+                "size_mb": listed_size_mb(not downloading, disk_size_mb, None, marker.get("size_mb") if marker else None),
                 "_rel_dir": rel_dir,
                 "_filename": f,
             }
@@ -474,7 +476,7 @@ def find_llamacpp_models(models_base_dir, declarations=()):
 
         # Download in progress but no main GGUF on disk yet: surface the
         # pending model from the marker so it still shows up in the listing.
-        if marker is not None and not marker_listed:
+        for marker in pending:
             model_name = llamacpp_name_from_marker(marker, root)
             filename = gguf_basename(marker.get("model_url"))
             # Same naming as an installed file: declared downloads keep the marker

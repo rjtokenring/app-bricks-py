@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 import list_models
-from common.download_marker import write_marker
+from common.download_marker import add_download, write_marker
 from common.model_metadata import METADATA_NAME, write_metadata
 
 
@@ -316,6 +316,28 @@ def test_find_llamacpp_marker_for_a_gguf_on_disk_lists_it_once(tmp_path):
     assert len(results) == 1
     assert results[0]["id"] == "llamacpp:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q3_K_S"
     assert results[0]["downloading"] is True
+
+
+def test_find_llamacpp_lists_each_download_sharing_a_marker(tmp_path):
+    """Two voices of one repository downloading at once: one marker, two pending models,
+    each sized and named by its own entry, and a landed file of a third still covered."""
+    base = tmp_path / "models"
+    repo = base / "llamacpp" / "org" / "voices"
+    _make_gguf(str(repo / "voice-it.gguf"))
+    for download_id, lang, size in (("a", "en", 200.0), ("b", "fr", 201.0), ("c", "it", 202.0)):
+        add_download(
+            str(repo),
+            download_id,
+            handler="hf-handler",
+            model_url=f"https://huggingface.co/org/voices/blob/main/voice-{lang}.gguf",
+            file_patterns=[f"voice-{lang}.gguf"],
+            size_mb=size,
+        )
+
+    results = {entry["id"]: entry for entry in list_models.find_llamacpp_models(str(base))}
+    assert sorted(results) == ["llamacpp:org/voices/voice-en", "llamacpp:org/voices/voice-fr", "llamacpp:org/voices/voice-it"]
+    assert all(entry["downloading"] and not entry["installed"] for entry in results.values())
+    assert [results[f"llamacpp:org/voices/voice-{lang}"]["size_mb"] for lang in ("en", "fr", "it")] == [200.0, 201.0, 202.0]
 
 
 def test_find_llamacpp_no_directory(tmp_path):

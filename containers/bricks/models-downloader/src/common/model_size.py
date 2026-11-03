@@ -38,10 +38,11 @@ _MIB = 1024 * 1024
 def is_bookkeeping_name(name):
     """True when *name* is a metadata/marker file rather than model content.
 
-    Matches the ``.arduino_metadata.yaml.tmp`` sibling of an interrupted atomic
-    write too, so a directory holding only that is still treated as incomplete.
+    Matches the ``.download.tmp`` and ``.arduino_metadata.yaml.tmp`` siblings of an
+    interrupted atomic write too, so a directory holding only those is still treated
+    as incomplete.
     """
-    return name == MARKER_NAME or name.startswith(METADATA_NAME)
+    return name.startswith(MARKER_NAME) or name.startswith(METADATA_NAME)
 
 
 def size_mb(size_bytes):
