@@ -1339,7 +1339,8 @@ def test_main_reports_only_handlers_models_handlers_defines(monkeypatch, capsys,
 @pytest.mark.skipif(not os.path.isfile(MODELS_HANDLERS), reason="models/models-handlers.yaml not available")
 def test_catalog_declares_only_defined_handlers():
     entries = list_models.load_models_list(os.path.join(REPO_MODELS_DIR, "models-list.yaml"))
-    declared = {data["deployment"]["handler"] for entry in entries for data in entry.values() if data.get("deployment")}
+    # A pre-loaded model may declare no handler: nothing has to download it
+    declared = {handler for entry in entries for data in entry.values() if (handler := (data.get("deployment") or {}).get("handler"))}
     assert declared <= _defined_handlers()
 
 

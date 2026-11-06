@@ -2,11 +2,18 @@ id: arduino:asr
 name: Automatic Speech Recognition (ASR)
 description: Automatic Speech Recognition brick for offline speech-to-text processing
 category: audio
-requires_services: ["arduino:genie_audio"]
-model: whisper-small-quantized
+requires_services:
+  - id: arduino:genie_audio
+    when:
+      model: "whisper-*"
+model_by_boards:
+    - platform: ventunoq
+      model: whisper-small-quantized
+    - platform: unoq
+      model: whistle
 ai_frameworks_compatibility:
   - qnn
-supported_boards: ["ventunoq"]
+supported_boards: ["unoq", "ventunoq"]
 variables:
 - name: VAD_LEN_HANGOVER
   description: Length of hangover for Voice Activity Detection (in number of frames of 10ms duration)

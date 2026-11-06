@@ -2,11 +2,29 @@
 
 The ASR brick provides on-device automatic speech recognition (ASR) capabilities for audio streams and files. It offers a high-level interface for transcribing audio using a local model, with support for both real-time microphone capture (`AutomaticSpeechRecognition`) and in-memory audio (`WAVAutomaticSpeechRecognition`). With the possibility to use multiple languages.
 
+## Models and Boards
+
+| model | boards | default on | runs on | languages | translate | keywords |
+|---|---|---|---|---|---|---|
+| `whistle` | UNO Q, VENTUNO Q | UNO Q | CPU, inside the app process | en, de, fr, es, it, nl, pl | no | yes |
+| `whisper-small-quantized` | VENTUNO Q | VENTUNO Q | NPU, in the audio inference service | 99 | to English | no |
+
+The brick uses the default model of the board. To use another one, set it for the brick in `app.yaml`:
+
+```yaml
+bricks:
+  - arduino:asr:
+      model: whistle
+```
+
+`whistle` ships inside the app image, so it needs no download. `whisper-small-quantized` is downloaded once, like the other NPU models. Neither sends audio off the board.
+
 ## Features
 
 - **Offline Operation:** All transcriptions are performed locally, ensuring data privacy and eliminating network dependencies.
-- **Multi-Language Support:** Supports the transcription of multiple spoken languages. Language is auto-detected by default and can be overridden with the `language` constructor argument (e.g. `"en"`).
-- **Speech Translation:** With `translate=True` the brick returns English text instead of a transcription in the spoken language. Valid only for models that support translation, such as the Whisper models this brick runs, including the default `whisper-small-quantized`. The ASR model itself does the translating, so it needs no additional model and no network. English is the only possible target language.
+- **Multi-Language Support:** Supports the transcription of multiple spoken languages. Language is auto-detected by default and can be overridden with the `language` constructor argument (e.g. `"en"`). With `whistle`, every `ASREvent` also carries the language of its text, detected or given, in `event.language`.
+- **Speech Translation:** With `translate=True` the brick returns English text instead of a transcription in the spoken language. Valid only for models that support translation, such as `whisper-small-quantized`; `whistle` does not translate. The ASR model itself does the translating, so it needs no additional model and no network. English is the only possible target language.
+- **Keywords:** With `whistle`, `keywords` lists words or phrases the transcription should favour, such as product or place names that the model would otherwise misspell.
 - **Flexible Audio Input:** `AutomaticSpeechRecognition` accepts a `BaseMicrophone` instance or `None` to use a default `Microphone()`. `WAVAutomaticSpeechRecognition` accepts a `bytes` WAV container or a raw `np.ndarray` of PCM samples (16 kHz mono).
 - **Single-Session Semantics:** Each instance handles one transcription session at a time. For concurrent transcriptions on different microphones, create multiple `AutomaticSpeechRecognition` instances.
 
@@ -85,6 +103,26 @@ session that is already running.
 asr.translate = True
 ```
 
+This example, for the `whistle` model, favours product names in the transcription and
+prints the language that was detected for each sentence.
+
+```python
+from arduino.app_utils import App
+from arduino.app_bricks.asr import AutomaticSpeechRecognition
+
+asr = AutomaticSpeechRecognition(keywords=["UNO Q", "Arduino UNO Q"])
+
+
+def listen():
+    with asr.transcribe_sentence_stream(timeout=10) as stream:
+        for event in stream:
+            if event.type == "full_text":
+                print(f"[{event.language}] {event.data}")
+
+
+App.run(user_loop=listen)
+```
+
 ## Methods
 
 Both classes share the same transcription API (durations/timeouts apply to the microphone class; the WAV class always consumes the whole buffer):
@@ -101,18 +139,27 @@ Both classes share the same transcription API (durations/timeouts apply to the m
 
 Both classes accept these, on top of their own audio source (`mic` / `wav`):
 
-- `language: str | None = None`: ISO 639-1 code of the spoken language (e.g. `"it"`). `None` lets the model detect it.
-- `translate: bool = False`: return English instead of the spoken language. Valid only for models that support translation. The Whisper models this brick runs, including the default `whisper-small-quantized`, support it; their translate task always targets English, from any of their supported source languages.
+- `language: str | None = None`: ISO 639-1 code of the spoken language (e.g. `"it"`). `None` lets the model detect it. `whistle` accepts only `en`, `de`, `fr`, `es`, `it`, `nl` and `pl`.
+- `translate: bool = False`: return English instead of the spoken language. Valid only for models that support translation. `whisper-small-quantized` supports it; its translate task always targets English, from any of its supported source languages. `whistle` does not.
+- `keywords: list[str] | None = None`: words or phrases the transcription should favour. Only `whistle` takes them.
 
-Both are exposed as attributes of the same name and can be reassigned at runtime. A
-change takes effect on the next transcription session.
+They are exposed as attributes of the same name and can be reassigned at runtime. A
+change takes effect on the next transcription session. An option the configured model
+does not support raises `ASRError`, at construction or when the next session starts.
+
+## Events
+
+Each `ASREvent` has a `type`, the text in `data`, and `language`.
+
+- With `whisper-small-quantized` a sentence arrives as consecutive `partial_text` pieces, then a `full_text` with the whole sentence. `language` is `None`.
+- With `whistle` each sentence, cut at a pause of the speaker, arrives as one `full_text`; there are no `partial_text` events. A sentence longer than 29 seconds is cut there. `language` is the language of the text.
 
 ## Errors
 
 - `ASRBusyError`: raised if you call `transcribe()` / `transcribe_stream()` while the instance already has a session running. A session stopped with `cancel()` does not count: the new one waits for it to close. Fix by cancelling or awaiting the current session, or by using a separate instance.
 - `ASRServiceBusyError`: raised when the inference server rejects session creation because it is currently serving another client. The caller decides whether to retry.
-- `ASRUnavailableError`: raised when the inference service is unreachable (container down, network error) or the WebSocket connection drops mid-session. The caller decides whether to retry.
-- `ASRError`: base class for all of the above.
+- `ASRUnavailableError`: raised when the inference service is unreachable (container down, network error) or the WebSocket connection drops mid-session. With `whistle`, raised by `start()` when the model cannot be loaded. The caller decides whether to retry.
+- `ASRError`: base class for all of the above. Raised as is for an option the configured model does not support (for example `translate=True` with `whistle`); its `hint` tells how to fix it.
 
 ## Source Ownership
 
