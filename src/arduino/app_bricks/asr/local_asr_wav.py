@@ -86,36 +86,49 @@ class WAVAutomaticSpeechRecognition(BaseASR):
         wav: np.ndarray | bytes,
         language: str | None = None,
         translate: bool = False,
+        keywords: list[str] | None = None,
     ) -> None:
         """
         ASR brick that transcribes a finite in-memory audio buffer.
+
+        The model is the board default (``whistle`` on UNO Q, ``whisper-small-quantized``
+        on VENTUNO Q) unless app.yaml sets another one for the brick.
 
         Args:
             wav: WAV data to be used for transcription. One of:
                 np.ndarray: treated as raw PCM samples at 16 kHz mono.
                 bytes: treated as a WAV container.
-            language (str): Language code for the ASR model (e.g. "en" for
-                English). This is typically auto-detected by the model,
-                but can be overridden here if needed. It is exposed as
-                the public ``language`` attribute and may be reassigned at
-                runtime; the new value takes effect on the next session.
+            language (str): ISO 639-1 code of the spoken language (e.g. "en"
+                for English). ``None`` lets the model detect it. ``whistle``
+                transcribes en, de, fr, es, it, nl and pl, and raises ASRError
+                for any other code. It is exposed as the public ``language``
+                attribute and may be reassigned at runtime; the new value takes
+                effect on the next session.
             translate (bool): If ``True``, speech is translated to English instead
-                of being transcribed in the language it was spoken in. It is valid
-                only for models that support translation, so it costs no extra
-                model: the ASR model itself does the translating. The Whisper
-                models this brick runs, including the default
-                ``whisper-small-quantized``, support it, and their translate task
-                always targets English. Any of their source languages can be
-                translated, but English is the only possible target. Set
-                ``language`` as well to skip source auto-detection. It is exposed
-                as the public ``translate`` attribute and may be reassigned at
-                runtime; the new value takes effect on the next session.
+                of being transcribed in the language it was spoken in. The ASR
+                model itself does the translating, so it costs no extra model.
+                The Whisper models, including ``whisper-small-quantized``, support
+                it from any of their source languages, and always to English; set
+                ``language`` as well to skip source detection. ``whistle`` does
+                not translate and raises ASRError. It is exposed as the public
+                ``translate`` attribute and may be reassigned at runtime; the new
+                value takes effect on the next session.
                 Default: ``False``.
+            keywords (list[str] | None): Words or phrases the transcription should
+                favour, such as product or place names (e.g. ``["UNO Q"]``). Only
+                ``whistle`` takes them; other models raise ASRError. It is exposed
+                as the public ``keywords`` attribute and may be reassigned at
+                runtime; the new value takes effect on the next session.
+                Default: ``None``.
+
+        Raises:
+            ASRError: If the configured model does not support ``language``,
+                ``translate`` or ``keywords`` as given.
 
         Note:
             Only one transcription can be active at a time.
         """
-        super().__init__(source=wav, language=language, translate=translate)
+        super().__init__(source=wav, language=language, translate=translate, keywords=keywords)
 
     def _build_source(self, source: object) -> tuple[InMemoryAudioSource, bool]:
         match source:

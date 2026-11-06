@@ -25,6 +25,9 @@ from arduino.app_internal.core.module import get_brick_config, get_brick_configu
 from arduino.app_peripherals.microphone import BaseMicrophone, Microphone, SpeechSegmenter, chunk_level
 from arduino.app_utils import AppError, Logger, brick
 
+from .whistle import LANGUAGES as WHISTLE_LANGUAGES
+from .whistle import WHISTLE_MODEL, UtteranceCollector, WhistleEngine
+
 logger = Logger("ASR")
 
 
@@ -106,6 +109,8 @@ def _dtype_to_pcm_format(dtype: np.dtype, is_packed: bool = False) -> str:
 class ASREvent:
     type: Literal["partial_text", "full_text"]
     data: str
+    language: str | None = None
+    """ISO 639-1 code of the language of ``data``, detected or given, when the model reports it (``whistle``); None otherwise."""
 
 
 class TranscriptionStream[T](AbstractContextManager["TranscriptionStream[T]"], Iterator[T]):
@@ -139,6 +144,8 @@ class SessionInfo:
     chunk_queue: queue.Queue[bytes | object]  # object is for _END_SENTINEL
     cancelled: threading.Event
     language: str | None = None
+    keywords: list[str] | None = None
+    vad_ms: int | None = None
     reader_thread: threading.Thread | None = None
     # Set by the reader when the flush policy asks for an early transcript
     flush_requested: threading.Event = field(default_factory=threading.Event)
@@ -178,24 +185,33 @@ class BaseASR:
     # for that rather than failing, up to the close timeout plus the WebSocket teardown.
     _CLOSING_WAIT_SECONDS = 30.0
 
-    def __init__(self, source: object, language: str | None = None, translate: bool = False) -> None:
-        # API configuration
-        self.api_host = resolve_address(self._APP_SERVICE_NAME)
-        if not self.api_host:
-            raise RuntimeError("Host address could not be resolved. Please check your configuration.")
+    # Live microphone audio waiting while an utterance is transcribed in process: up to a
+    # minute at the Microphone() default chunk, so the speaker is never cut while it runs
+    _IN_PROCESS_QUEUE_CHUNKS = 1000
 
-        self.api_port = 8085
-        self.api_base_url = f"http://{self.api_host}:{self.api_port}/audio-analytics/v1/api"
-        self.ws_url = f"ws://{self.api_host}:{self.api_port}/stream"
-
-        # Load the model configured at bricks level: app.yaml override first, then the brick default
+    def __init__(self, source: object, language: str | None = None, translate: bool = False, keywords: list[str] | None = None) -> None:
+        # Load the model configured at bricks level: app.yaml override first, then the board default
         brick_config = get_brick_config(self.__class__)
         self.model = get_brick_configured_model(brick_config.get("id") if brick_config else None, brick_config=brick_config)
         if not self.model:
             raise ValueError("Model name must be provided via the brick configuration.")
 
+        # Whistle runs in this process; every other model in the audio-analytics service
+        self._in_process = self.model == WHISTLE_MODEL
+        self._engine: WhistleEngine | None = None
+        if not self._in_process:
+            self.api_host = resolve_address(self._APP_SERVICE_NAME)
+            if not self.api_host:
+                raise RuntimeError("Host address could not be resolved. Please check your configuration.")
+
+            self.api_port = 8085
+            self.api_base_url = f"http://{self.api_host}:{self.api_port}/audio-analytics/v1/api"
+            self.ws_url = f"ws://{self.api_host}:{self.api_port}/stream"
+
         self.language = language
         self.translate = translate
+        self.keywords = keywords
+        self._check_options(language, translate, keywords)
 
         self._source, self._owns_source = self._build_source(source)
 
@@ -217,7 +233,11 @@ class BaseASR:
         self._pending_starts: set[threading.Event] = set()
 
     def start(self) -> None:
-        """Prepare the ASR for transcription. Starts the owned mic if applicable."""
+        """Prepare the ASR for transcription. Starts the owned mic if applicable and loads the model.
+
+        Raises:
+            ASRUnavailableError: If the ``whistle`` model cannot be loaded.
+        """
         logger.debug("Starting ASR and preparing resources...")
         self._stop_worker.clear()
         if self._worker_loop.done():
@@ -269,6 +289,39 @@ class BaseASR:
     def _build_source(self, source: object) -> tuple[AudioSource, bool]:
         """Bind the audio source. Subclasses must override."""
         raise NotImplementedError("Subclasses must override _build_source")
+
+    def _check_options(self, language: str | None, translate: bool, keywords: list[str] | None) -> None:
+        """Raise ASRError for options the configured model does not support."""
+        if self._in_process:
+            if translate:
+                raise ASRError(
+                    "The whistle model does not translate speech.",
+                    hint="Set translate=False, or use the whisper-small-quantized model on VENTUNO Q to translate speech to English.",
+                )
+            if language is not None and language not in WHISTLE_LANGUAGES:
+                raise ASRError(
+                    f"The whistle model does not transcribe language {language!r}.",
+                    hint=f"Use one of {', '.join(WHISTLE_LANGUAGES)}, or language=None to detect it.",
+                )
+        elif keywords:
+            raise ASRError(
+                f"The {self.model} model does not take keywords.",
+                hint="Set keywords=None, or use the whistle model to favour words in the transcription.",
+            )
+
+    def _whistle_engine(self) -> WhistleEngine:
+        """The in-process engine, loaded on the first call."""
+        if self._engine is None:
+            try:
+                self._engine = WhistleEngine.shared()
+            except FileNotFoundError as e:
+                raise ASRUnavailableError(
+                    f"The whistle model is not installed: {e}",
+                    hint="Update Arduino App Lab: the app runs on an image that does not ship the whistle model.",
+                ) from None
+            except (OSError, RuntimeError) as e:
+                raise ASRUnavailableError(f"The whistle model could not be loaded: {e}") from None
+        return self._engine
 
     def _ensure_source_started(self) -> None:
         if not self._source.is_started():
@@ -328,11 +381,18 @@ class BaseASR:
             logger.debug("Asyncio event loop stopped")
 
     def _warmup(self) -> None:
-        """Best-effort warmup: create and immediately close a transcription session so the
-        inference container loads the ASR model before the first real transcription."""
+        """Load the model before the first transcription.
+
+        The in-process model is loaded here, and an error loading it is raised: it would fail
+        every transcription. For the service, best effort: create and immediately close a
+        transcription session so the inference container loads the ASR model."""
         if self._stop_worker.is_set():
             return
         started_at = time.perf_counter()
+        if self._in_process:
+            self._whistle_engine()
+            logger.debug(f"Whistle model loaded in {(time.perf_counter() - started_at) * 1000:.0f} ms")
+            return
         try:
             session_id = self._create_transcription_session(language=self.language, translate=self.translate)
         except Exception as e:
@@ -374,27 +434,32 @@ class BaseASR:
                 logger.debug("Transcription cancelled before it started")
                 return
 
-            # Snapshot current language and translate flag for the session
+            # Snapshot the current options for the session
             session_language = self.language
             session_translate = self.translate
-            session_id = self._create_transcription_session(vad_ms=vad_ms, language=session_language, translate=session_translate)
+            session_keywords = list(self.keywords) if self.keywords else None
+            self._check_options(session_language, session_translate, session_keywords)
+            if self._in_process:
+                session_id = f"whistle-{time.monotonic_ns()}"
+            else:
+                session_id = self._create_transcription_session(vad_ms=vad_ms, language=session_language, translate=session_translate)
             session_info = SessionInfo(
                 session_id=session_id,
                 duration=duration,
                 start_time=time.time(),
                 result_queue=queue.Queue(),
-                chunk_queue=queue.Queue(maxsize=100),
+                chunk_queue=queue.Queue(maxsize=self._IN_PROCESS_QUEUE_CHUNKS if self._in_process else 100),
                 language=session_language,
+                keywords=session_keywords,
+                vad_ms=vad_ms,
                 cancelled=cancelled,
             )
             with self._state_lock:
                 self._active_session = session_info
                 self._pending_starts.discard(cancelled)
 
-            future = asyncio.run_coroutine_threadsafe(
-                self._transcription_session_handler(session_info),
-                worker_loop,
-            )
+            handler = self._in_process_session_handler if self._in_process else self._transcription_session_handler
+            future = asyncio.run_coroutine_threadsafe(handler(session_info), worker_loop)
 
             while not future.done():
                 try:
@@ -621,6 +686,72 @@ class BaseASR:
             await asyncio.to_thread(reader.join, join_timeout)
             if reader.is_alive():
                 logger.warning(f"Reader thread for session {session_id} did not exit within {join_timeout}s; leaking as daemon")
+
+    async def _in_process_session_handler(self, session_info: SessionInfo) -> None:
+        reader = threading.Thread(
+            target=self._reader_thread_body,
+            args=(session_info,),
+            daemon=True,
+            name=f"ASRReader-{session_info.session_id}",
+        )
+        session_info.reader_thread = reader
+        reader.start()
+        try:
+            await asyncio.to_thread(self._run_in_process_session, session_info)
+        finally:
+            session_info.cancelled.set()
+            join_timeout = 2.0
+            await asyncio.to_thread(reader.join, join_timeout)
+            if reader.is_alive():
+                logger.warning(f"Reader thread for session {session_info.session_id} did not exit within {join_timeout}s; leaking as daemon")
+
+    def _run_in_process_session(self, session_info: SessionInfo) -> None:
+        """
+        Transcribe the session audio in this process, one utterance at a time.
+
+        Each utterance, cut at a pause of the speaker, becomes one ``full_text`` event; there
+        are no ``partial_text`` events. A running transcription is not interrupted by a
+        cancel, its text is dropped.
+        """
+        engine = self._whistle_engine()
+        vad_ms = session_info.vad_ms if session_info.vad_ms is not None else self._DEFAULT_VAD_MS
+        collector = UtteranceCollector(
+            self._source.sample_rate,
+            self._source.channels,
+            self._source.format_is_packed,
+            pause_s=vad_ms / 1000,
+            gate=isinstance(self._source, BaseMicrophone),
+        )
+        first = True
+
+        def transcribe(pcm: np.ndarray) -> None:
+            nonlocal first
+            try:
+                result = engine.transcribe(pcm, session_info.language, session_info.keywords)
+            except RuntimeError as e:
+                raise ASRError(str(e)) from None
+            text = str(result.get("text") or "").strip()
+            if not text or session_info.cancelled.is_set():
+                return
+            language = result.get("language") or session_info.language
+            session_info.result_queue.put(ASREvent("full_text", text if first else f" {text}", language=str(language) if language else None))
+            first = False
+
+        while not self._stop_worker.is_set() and not session_info.cancelled.is_set():
+            try:
+                item = session_info.chunk_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if item is _END_SENTINEL:
+                pcm = collector.finish()
+                if pcm is not None:
+                    transcribe(pcm)
+                break
+            if not isinstance(item, bytes):
+                continue  # _FLUSH_MARK: the collector finds its own cuts
+            pcm = collector.push(np.frombuffer(item, dtype=self._source.format))
+            if pcm is not None:
+                transcribe(pcm)
 
     def _reader_thread_body(self, session_info: SessionInfo) -> None:
         session_id = session_info.session_id
@@ -883,9 +1014,13 @@ class AutomaticSpeechRecognition(BaseASR):
         mic: BaseMicrophone | None = None,
         language: str | None = None,
         translate: bool = False,
+        keywords: list[str] | None = None,
     ) -> None:
         """
         ASR brick that transcribes a live audio stream from a microphone.
+
+        The model is the board default (``whistle`` on UNO Q, ``whisper-small-quantized``
+        on VENTUNO Q) unless app.yaml sets another one for the brick.
 
         Args:
             mic: Microphone to be captured for transcription. One of:
@@ -894,28 +1029,37 @@ class AutomaticSpeechRecognition(BaseASR):
                 None: ASR constructs a default Microphone() and owns its
                     lifecycle (started on start(), stopped on stop()).
                 Default: None.
-            language (str): Language code for the ASR model (e.g. "en" for
-                English). This is typically auto-detected by the model,
-                but can be overridden here if needed. It is exposed as
-                the public ``language`` attribute and may be reassigned at
-                runtime; the new value takes effect on the next session.
+            language (str): ISO 639-1 code of the spoken language (e.g. "en"
+                for English). ``None`` lets the model detect it. ``whistle``
+                transcribes en, de, fr, es, it, nl and pl, and raises ASRError
+                for any other code. It is exposed as the public ``language``
+                attribute and may be reassigned at runtime; the new value takes
+                effect on the next session.
             translate (bool): If ``True``, speech is translated to English instead
-                of being transcribed in the language it was spoken in. It is valid
-                only for models that support translation, so it costs no extra
-                model: the ASR model itself does the translating. The Whisper
-                models this brick runs, including the default
-                ``whisper-small-quantized``, support it, and their translate task
-                always targets English. Any of their source languages can be
-                translated, but English is the only possible target. Set
-                ``language`` as well to skip source auto-detection. It is exposed
-                as the public ``translate`` attribute and may be reassigned at
-                runtime; the new value takes effect on the next session.
+                of being transcribed in the language it was spoken in. The ASR
+                model itself does the translating, so it costs no extra model.
+                The Whisper models, including ``whisper-small-quantized``, support
+                it from any of their source languages, and always to English; set
+                ``language`` as well to skip source detection. ``whistle`` does
+                not translate and raises ASRError. It is exposed as the public
+                ``translate`` attribute and may be reassigned at runtime; the new
+                value takes effect on the next session.
                 Default: ``False``.
+            keywords (list[str] | None): Words or phrases the transcription should
+                favour, such as product or place names (e.g. ``["UNO Q"]``). Only
+                ``whistle`` takes them; other models raise ASRError. It is exposed
+                as the public ``keywords`` attribute and may be reassigned at
+                runtime; the new value takes effect on the next session.
+                Default: ``None``.
+
+        Raises:
+            ASRError: If the configured model does not support ``language``,
+                ``translate`` or ``keywords`` as given.
 
         Note:
             Only one transcription can be active at a time.
         """
-        super().__init__(source=mic, language=language, translate=translate)
+        super().__init__(source=mic, language=language, translate=translate, keywords=keywords)
 
     def _build_source(self, source: object) -> tuple[BaseMicrophone, bool]:
         if source is None:

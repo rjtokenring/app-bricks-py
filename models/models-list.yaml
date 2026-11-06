@@ -1781,6 +1781,32 @@ models:
       - ba
       - jw
       - su
+ - whistle:
+    name : "Whistle"
+    description: >-
+      Whistle is a compact speech-to-text model by Cactus Compute that runs on the CPU, inside the app,
+      with no inference service. It transcribes seven languages and detects the spoken one by itself,
+      and it can favour given words or phrases such as product or place names.
+      It transcribes up to 30 seconds of audio at a time: the brick cuts longer speech at the pauses of the speaker.
+    supported_boards: ["unoq", "ventunoq"]
+    bricks:
+      - id: "arduino:asr"
+    deployment:
+      pre-loaded: true
+    metadata:
+      model_size_mb: 17
+      source: "huggingface"
+      source-model-id: "Cactus-Compute/whistle"
+      source-model-url: "https://huggingface.co/Cactus-Compute/whistle"
+      model_publisher: "cactus-compute"
+    supported_languages:
+      - en
+      - de
+      - fr
+      - es
+      - it
+      - nl
+      - pl
  - melo-tts-en:
     name : "Melo TTS (English)"
     description: >-
