@@ -25,6 +25,11 @@ logger = Logger("TextToSpeech")
 TTS_MAX_CHARS = 1024
 TTS_MAX_QUEUE_SIZE = 128
 
+# speak() plays a synthesis stream once this much of its audio is there, or all of it. A language
+# model generating on the same NPU makes the TTS model slower than real time: the wait leaves a
+# pause before the sentence, which sounds natural, instead of gaps inside it.
+TTS_PREBUFFER_S = 3.0
+
 # Where speak_stream() cuts streamed text for the voice: after the end of a sentence, or at a line break.
 _SENTENCE_END = re.compile(r"(?<=[.!?…])\s+|\n+")
 # How often wait_until_done() checks whether the speech is over, in seconds.
@@ -86,6 +91,20 @@ class SynthesisStream(AbstractContextManager["SynthesisStream"], Iterator[bytes]
 
     def close(self) -> None:
         self._generator.close()
+
+
+def _prebuffered(chunks: Iterator[bytes], size: int) -> Generator[bytes]:
+    """Yield the first *size* bytes of *chunks* as one chunk once they are all there (or the stream ended), then the rest as it comes."""
+    held: list[bytes] = []
+    held_size = 0
+    for chunk in chunks:
+        held.append(chunk)
+        held_size += len(chunk)
+        if held_size >= size:
+            break
+    if held:
+        yield b"".join(held)
+    yield from chunks
 
 
 class _LinearResampler:
@@ -392,8 +411,9 @@ class TextToSpeech:
                     cancelled=cancelled,
                     keep_alive=True,
                 )
+                prebuffer = round(TTS_PREBUFFER_S * self._speaker.sample_rate) * self._speaker.channels * self._speaker.format.itemsize
                 try:
-                    self._play_pcm_stream(pcm_stream, cancelled)
+                    self._play_pcm_stream(_prebuffered(pcm_stream, prebuffer), cancelled)
                 finally:
                     pcm_stream.close()
         finally:

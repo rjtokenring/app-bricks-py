@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from arduino.app_bricks.tts import TextToSpeech, TTSBusyError
-from arduino.app_bricks.tts.local_tts import LLAMACPP_LEAD_SILENCE_S, TTS_MAX_CHARS
+from arduino.app_bricks.tts.local_tts import LLAMACPP_LEAD_SILENCE_S, TTS_MAX_CHARS, TTS_PREBUFFER_S
 from arduino.app_peripherals.speaker import BaseSpeaker, FormatPlain, FormatPacked
 from arduino.app_utils import App
 
@@ -731,6 +731,79 @@ def test_llamacpp_speak_stream_still_speaks_a_lone_word(monkeypatch):
 
     assert tts.speak_stream(iter(["Ciao!"])) == "Ciao!"
     assert [payload["input"] for _method, _url, payload in requests] == ["Ciao!"]
+
+
+class RecordingSpeaker(BlockingSpeaker):
+    """A speaker that records, at its first write, how much audio the runner had streamed by then."""
+
+    def __init__(self, streamed, **kwargs):
+        super().__init__(**kwargs)
+        self.release_first_chunk.set()
+        self._streamed = streamed
+        self.streamed_at_first_write = None
+
+    def _write_audio(self, audio_chunk):
+        if self.streamed_at_first_write is None:
+            self.streamed_at_first_write = sum(self._streamed)
+        super()._write_audio(audio_chunk)
+
+
+def test_llamacpp_speak_plays_a_request_once_its_prebuffer_is_there(monkeypatch):
+    """With the NPU shared with a language model, Pocket TTS streams slower than real time: speak() waits for
+    TTS_PREBUFFER_S of audio (the lead silence included), so a sentence pauses before it rather than inside it."""
+    streamed = []
+    piece = np.full(2400, 0.25, dtype="<f4").tobytes()  # 0.1 s at 24 kHz
+
+    def pieces():
+        for _ in range(50):  # 5 s of speech
+            streamed.append(0.1)
+            yield piece
+
+    speaker = RecordingSpeaker(streamed, buffer_size=4)
+    response = lambda url, json, **kwargs: FakeResponse(chunks=pieces(), headers={"Content-Type": LLAMACPP_PCM})  # noqa: E731
+    tts, _ = make_llamacpp_tts(monkeypatch, speaker, response)
+
+    tts.speak("Ciao a tutti, come state oggi?")
+
+    assert speaker.streamed_at_first_write >= TTS_PREBUFFER_S - LLAMACPP_LEAD_SILENCE_S - 1e-9
+    played = sum(chunk.size for chunk in speaker.chunks_written)
+    assert abs(played - round((LLAMACPP_LEAD_SILENCE_S + 5.0) * 44100)) <= 2  # all of it, nothing held back
+
+
+def test_speak_plays_an_audio_analytics_stream_once_its_prebuffer_is_there(monkeypatch):
+    """The audio analytics runner streams 16-bit PCM at the speaker rate: speak() waits for TTS_PREBUFFER_S of it too."""
+    streamed = []
+    piece = np.full(4410, 1000, dtype="<i2").tobytes()  # 0.1 s at 44.1 kHz
+
+    def pieces():
+        for _ in range(50):  # 5 s of speech
+            streamed.append(0.1)
+            yield piece
+
+    speaker = RecordingSpeaker(streamed, buffer_size=4)
+    tts = make_tts(monkeypatch, speaker, lambda url, json, **kwargs: FakeResponse(chunks=pieces()))
+
+    tts.speak("Hello everyone, how are you today?")
+
+    assert speaker.streamed_at_first_write >= TTS_PREBUFFER_S - 1e-9
+    assert sum(chunk.size for chunk in speaker.chunks_written) == 50 * 4410  # all of it, nothing held back
+
+
+def test_llamacpp_speak_plays_a_request_shorter_than_its_prebuffer_whole(monkeypatch):
+    streamed = []
+
+    def pieces():
+        streamed.append(0.5)
+        yield np.full(12000, 0.25, dtype="<f4").tobytes()  # 0.5 s
+
+    speaker = RecordingSpeaker(streamed, buffer_size=4)
+    response = lambda url, json, **kwargs: FakeResponse(chunks=pieces(), headers={"Content-Type": LLAMACPP_PCM})  # noqa: E731
+    tts, _ = make_llamacpp_tts(monkeypatch, speaker, response)
+
+    tts.speak("Ciao a tutti.")
+
+    played = sum(chunk.size for chunk in speaker.chunks_written)
+    assert abs(played - round((LLAMACPP_LEAD_SILENCE_S + 0.5) * 44100)) <= 2
 
 
 def test_llamacpp_speech_opens_with_a_lead_silence_once_per_request(monkeypatch):
