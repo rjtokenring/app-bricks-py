@@ -29,6 +29,7 @@ TTS_MAX_QUEUE_SIZE = 128
 _SENTENCE_END = re.compile(r"(?<=[.!?…])\s+|\n+")
 # How often wait_until_done() checks whether the speech is over, in seconds.
 _WAIT_POLL_S = 0.02
+
 LLAMACPP_MODEL_PREFIX = "llamacpp:"
 """Models with this prefix are synthesized by the llama.cpp speech service, the others by the audio analytics one."""
 
@@ -38,6 +39,11 @@ LLAMACPP_MODEL_PREFIX = "llamacpp:"
 # cuts a TTS_MAX_CHARS chunk short.
 LLAMACPP_FRAMES_PER_CHAR = 2
 LLAMACPP_MIN_FRAMES = 128
+
+# The fewest words speak_stream() sends to the llama.cpp speech service in one request: a sentence
+# with fewer goes together with the next one. A single word comes out distorted (Pocket TTS draws
+# "Ciao!" out, two words already sound right).
+LLAMACPP_MIN_WORDS = 2
 
 # Pocket TTS starts speaking within its first frames: the synthesized audio opens with this much
 # silence, so that the first syllable is neither clipped by a waking speaker nor heard as abrupt.
@@ -248,7 +254,8 @@ class TextToSpeech:
         is queued for playback as soon as it is complete, so the voice starts after the first
         sentence instead of after the whole answer. The chunks are read in the calling
         thread; a sentence can span several of them. ``cancel()`` also ends the stream: the
-        rest of the chunks is not read.
+        rest of the chunks is not read. With a ``llamacpp:`` model a sentence of a single word,
+        which the llama.cpp speech service would distort, is spoken together with the next one.
 
         Args:
             text_chunks (Iterable[str]): The text, in pieces of any length, in order.
@@ -264,18 +271,25 @@ class TextToSpeech:
         """
         with self._worker_lock:
             epoch = self._cancel_epoch
+        min_words = LLAMACPP_MIN_WORDS if self._llamacpp else 1
         spoken: list[str] = []
         pending = ""
+        # The complete sentences too short to be spoken alone
+        held = ""
         for chunk in text_chunks:
             if self._cancel_epoch != epoch:
                 return " ".join(spoken)
             *sentences, pending = _SENTENCE_END.split(pending + chunk)
             for sentence in filter(str.strip, sentences):
-                self.speak(sentence, block=False)
-                spoken.append(sentence.strip())
-        if pending.strip() and self._cancel_epoch == epoch:
-            self.speak(pending, block=False)
-            spoken.append(pending.strip())
+                held = f"{held} {sentence.strip()}".strip()
+                if len(held.split()) >= min_words:
+                    self.speak(held, block=False)
+                    spoken.append(held)
+                    held = ""
+        rest = f"{held} {pending.strip()}".strip()
+        if rest and self._cancel_epoch == epoch:
+            self.speak(rest, block=False)
+            spoken.append(rest)
         if block:
             self.wait_until_done()
         return " ".join(spoken)

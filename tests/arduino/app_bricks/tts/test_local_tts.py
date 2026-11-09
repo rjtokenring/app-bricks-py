@@ -712,6 +712,27 @@ def test_llamacpp_model_synthesizes_through_the_speech_service(monkeypatch):
     assert np.max(np.abs(speech - expected)) < 0.01 * 32767
 
 
+def test_llamacpp_speak_stream_sends_a_one_word_sentence_with_the_next_one(monkeypatch):
+    """The llama.cpp speech service distorts a request of a single word ("Ciao!"): it is spoken together with what follows."""
+    speaker = BlockingSpeaker(buffer_size=4)
+    speaker.release_first_chunk.set()
+    tts, requests = make_llamacpp_tts(monkeypatch, speaker, lambda url, json, **kwargs: float_pcm_response([0.0] * 8))
+
+    spoken = tts.speak_stream(iter(["Ciao! ", "Come stai? Bene", ", grazie.\nPerfetto!\n", "A dopo."]))
+
+    assert [payload["input"] for _method, _url, payload in requests] == ["Ciao! Come stai?", "Bene, grazie.", "Perfetto! A dopo."]
+    assert spoken == "Ciao! Come stai? Bene, grazie. Perfetto! A dopo."
+
+
+def test_llamacpp_speak_stream_still_speaks_a_lone_word(monkeypatch):
+    speaker = BlockingSpeaker(buffer_size=4)
+    speaker.release_first_chunk.set()
+    tts, requests = make_llamacpp_tts(monkeypatch, speaker, lambda url, json, **kwargs: float_pcm_response([0.0] * 8))
+
+    assert tts.speak_stream(iter(["Ciao!"])) == "Ciao!"
+    assert [payload["input"] for _method, _url, payload in requests] == ["Ciao!"]
+
+
 def test_llamacpp_speech_opens_with_a_lead_silence_once_per_request(monkeypatch):
     """Pocket TTS speaks from its first frames: the audio opens with silence, then the speech, unbroken."""
     lead = round(LLAMACPP_LEAD_SILENCE_S * 44100)
