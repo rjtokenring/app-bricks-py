@@ -13,8 +13,7 @@ services:
       - LLAMA_ARG_HOST=0.0.0.0
       - LLAMA_ARG_PORT=9998
       - LLAMA_ARG_POLL=0
-      # Two voices (e.g. Italian and English) stay loaded together
-      - LLAMA_ARG_MODELS_MAX=${LLAMA_ARG_MODELS_MAX:-2}
+      - LLAMA_ARG_MODELS_MAX=${LLAMA_ARG_MODELS_MAX:-4}
       # Reference voice + text of one request fit with room to spare
       - LLAMA_ARG_CTX_SIZE=${LLAMA_ARG_CTX_SIZE:-4096}
       - LLAMA_ARG_THREADS=${LLAMA_ARG_THREADS:-4}
