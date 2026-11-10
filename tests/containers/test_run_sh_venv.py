@@ -26,6 +26,7 @@ if [ "$1" = pip ] && [ "$2" = show ]; then exit 1; fi
 """,
     "python": """#!/bin/sh
 echo "python $* VIRTUAL_ENV=${VIRTUAL_ENV:-none}" >> "$FAKE_LOG"
+printf '%s' "${PYTHONPATH:-}" > "$FAKE_LOG.pythonpath"
 """,
     "streamlit": """#!/bin/sh
 echo "streamlit $*" >> "$FAKE_LOG"
@@ -36,13 +37,25 @@ WEB_APP_YAML = "name: t\nbricks:\n- arduino:web_ui: {}\n"
 STREAMLIT_APP_YAML = "name: t\nbricks:\n- arduino:streamlit_ui: {}\n"
 
 
-def _run(app: Path, tmp_path: Path) -> list[str]:
-    """Run run.sh against an app folder with the tools replaced by loggers; return the commands they saw."""
-    # The script serves /app, where the container mounts the app: a copy pointed at the test folder stands in
+def _run(app: Path, tmp_path: Path, third_party_bricks: Path | None = None, pythonpath: str | None = None) -> list[str]:
+    """Run run.sh against an app folder with the tools replaced by loggers; return the commands they saw.
+
+    The PYTHONPATH the fake python was started with is left in `calls.log.pythonpath`, what the script
+    wrote on stderr in `run.stderr`.
+    """
+    # The script serves /app and /3rd-party-bricks, where the container mounts the app and the third-party
+    # bricks: a copy pointed at the test folders stands in
     script = RUN_SH.read_text().replace("\r\n", "\n")
-    assert script.count('BASE_DIR="/app"\n') == 1, "run.sh no longer sets BASE_DIR the way this test rewrites it"
+    mounts = {
+        'BASE_DIR="/app"\n': f'BASE_DIR="{app}"\n',
+        'THIRD_PARTY_BRICKS_DIR="/3rd-party-bricks"\n': f'THIRD_PARTY_BRICKS_DIR="{third_party_bricks or tmp_path / "not-mounted"}"\n',
+        'THIRD_PARTY_BRICKS_AWK="/third-party-bricks.awk"\n': f'THIRD_PARTY_BRICKS_AWK="{RUN_SH.parent / "third-party-bricks.awk"}"\n',
+    }
+    for line, replacement in mounts.items():
+        assert script.count(line) == 1, f"run.sh no longer sets {line.strip()} the way this test rewrites it"
+        script = script.replace(line, replacement)
     run_sh = tmp_path / "run.sh"
-    run_sh.write_text(script.replace('BASE_DIR="/app"\n', f'BASE_DIR="{app}"\n'))
+    run_sh.write_text(script)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     for name, body in FAKE_TOOLS.items():
@@ -54,15 +67,19 @@ def _run(app: Path, tmp_path: Path) -> list[str]:
     (home / ".asoundrc").write_text("# baked\n")  # As in the image: no ALSA provisioning at start
     log = tmp_path / "calls.log"
     log.write_text("")
+    Path(f"{log}.pythonpath").unlink(missing_ok=True)
     # Without the venv pytest itself runs in (`uv run` exports it): in the container nothing activates one
     env = {
-        **{k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"},
+        **{k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "PYTHONPATH")},
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "HOME": str(home),
         "FAKE_LOG": str(log),
     }
+    if pythonpath is not None:
+        env["PYTHONPATH"] = pythonpath
     result = subprocess.run(["sh", str(run_sh)], env=env, capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
+    (tmp_path / "run.stderr").write_text(result.stderr)
     return log.read_text().splitlines()
 
 

@@ -23,6 +23,9 @@ PYTHON_SCRIPT="$BASE_DIR/python/main.py"
 REQUIREMENTS_FILE="$BASE_DIR/python/requirements.txt"
 PYTHON_LIBS_DIR="$BASE_DIR/python-libraries"
 INSTALLED_REQUIREMENTS_FILE="$CACHE_DIR/installed_requirements.txt"
+# One folder per brick: <name>-<version>/src/<package>/brick_config.yaml
+THIRD_PARTY_BRICKS_DIR="/3rd-party-bricks"
+THIRD_PARTY_BRICKS_AWK="/third-party-bricks.awk"
 
 # Set when a dependency install fails: only `prepare` acts on it, starting the
 # app stays best-effort as before.
@@ -175,13 +178,25 @@ fi
 # unavailable, the app still starts.
 sh /provision-fastrpc-dsp.sh || echo "Warning: fastrpc DSP provisioning failed"
 
+add_to_pythonpath() { # <paths>: appended, unless empty
+  [ -z "$1" ] || export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}$1"
+}
+
+third_party_brick_sources() { # the src folders of the mounted third-party bricks app.yaml declares, ':' joined
+  set -- "$THIRD_PARTY_BRICKS_DIR"/*/src/*/brick_config.yaml
+  [ -f "$1" ] || return 0
+  awk -f "$THIRD_PARTY_BRICKS_AWK" "$APP_YAML" "$@"
+}
+
 # Load custom bricks if present
 if [ -d "$BASE_DIR/bricks" ]; then
-    if [ -z "$PYTHONPATH" ]; then
-        export PYTHONPATH="$BASE_DIR/bricks"
-    else
-        export PYTHONPATH="$PYTHONPATH:$BASE_DIR/bricks"
-    fi
+  add_to_pythonpath "$BASE_DIR/bricks"
+fi
+
+# Load the third-party bricks the app declares, if any is mounted: only the
+# sources of a brick, whatever else its folder holds
+if [ -d "$THIRD_PARTY_BRICKS_DIR" ]; then
+  add_to_pythonpath "$(third_party_brick_sources)"
 fi
 
 install_streamlit() {
