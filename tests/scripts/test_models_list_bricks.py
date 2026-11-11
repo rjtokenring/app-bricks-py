@@ -75,3 +75,23 @@ def test_a_brick_can_run_every_runner_model_listed_under_it(model_id: str, brick
 
     assert framework in (config.get("ai_frameworks_compatibility") or []), f"{brick_id} does not declare the {framework} framework"
     assert f"arduino:{framework}" in _required_services(config, model_id), f"{brick_id} does not require arduino:{framework} for {model_id}"
+
+
+def _models_of_bricks_with_per_model_services() -> list[tuple[str, str]]:
+    """``(model id, brick id)`` for the models listed under a brick that picks its services by model."""
+    configs = (yaml.safe_load(path.read_text(encoding="utf-8")) for path in BRICKS_DIR.glob("*/brick_config.yaml"))
+    per_model = {config["id"] for config in configs if any(isinstance(requirement, dict) for requirement in config.get("requires_services") or [])}
+    return sorted(
+        (model_id, brick["id"]) for model_id, model in _catalog().items() for brick in model.get("bricks") or [] if brick["id"] in per_model
+    )
+
+
+@pytest.mark.parametrize(("model_id", "brick_id"), _models_of_bricks_with_per_model_services())
+def test_a_brick_picking_its_services_by_model_requires_one_for_every_model_listed_under_it(model_id: str, brick_id: str):
+    assert _required_services(_brick_config(brick_id), model_id), f"{brick_id} starts no service for {model_id}: no when.model pattern matches it"
+
+
+def test_the_tts_brick_requires_the_kokoro_service_only_for_the_kokoro_models():
+    config = _brick_config("arduino:tts")
+    assert _required_services(config, "kokoro-82m") == {"arduino:kokoro_tts"}
+    assert _required_services(config, config["model"]) == {"arduino:genie_audio"}

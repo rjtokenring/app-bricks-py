@@ -152,6 +152,7 @@ group "default" {
     "tps",
     "aihub-onnx-models-runner",
     "ocr-runner",
+    "kokoro-tts-runner",
     "edge-impulse-runner",
     "qairt-common-base",
     "aihub-litert-models-runner",
@@ -258,6 +259,18 @@ target "ocr-runner" {
   contexts = merge(
     { licenses = "LICENSES" },
     parent_context("aihub-onnx-models-runner"),
+  )
+}
+
+target "kokoro-tts-runner" {
+  inherits   = ["_downstream"]
+  context    = "containers/ai/kokoro-tts-runner"
+  tags       = image_tags("kokoro-tts-runner")
+  cache-from = cache_from("kokoro-tts-runner")
+  cache-to   = cache_to("kokoro-tts-runner")
+  contexts = merge(
+    { licenses = "LICENSES" },
+    parent_context("python-slim"),
   )
 }
 

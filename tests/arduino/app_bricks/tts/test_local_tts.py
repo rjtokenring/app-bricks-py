@@ -10,7 +10,7 @@ import time
 import numpy as np
 import pytest
 
-from arduino.app_bricks.tts import TextToSpeech, TTSBusyError
+from arduino.app_bricks.tts import TextToSpeech, TTSBusyError, TTSError, TTSVoiceError
 from arduino.app_bricks.tts.local_tts import TTS_MAX_CHARS
 from arduino.app_peripherals.speaker import BaseSpeaker, FormatPlain, FormatPacked
 from arduino.app_utils import App
@@ -629,3 +629,167 @@ def test_wait_until_done_waits_for_queued_speech(monkeypatch):
     speaker.release_first_chunk.set()
     assert tts.wait_until_done(timeout=2) is True
     assert not tts.is_speaking()
+
+
+# --- Kokoro models, synthesized by the Kokoro service
+
+KOKORO_VOICES = {
+    "voices": [{"name": "af_heart", "language": "en-us"}, {"name": "if_sara", "language": "it"}],
+    "default_voice": "af_heart",
+    "sample_rate": 24000,
+}
+
+
+def make_kokoro_tts(monkeypatch, speaker, post_response, **tts_kwargs):
+    """A TextToSpeech configured in app.yaml with the kokoro-82m model. The runner calls are recorded in ``tts.calls``."""
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append(("GET", url))
+        return FakeResponse(json_data=KOKORO_VOICES)
+
+    def post(url, json=None, **kwargs):
+        calls.append(("POST", url))
+        return FakeResponse(content=b"")
+
+    @contextlib.contextmanager
+    def stream(method, url, json=None, **kwargs):
+        calls.append((method, url))
+        response = post_response(url, json, **kwargs)
+        try:
+            yield response
+        finally:
+            response.close()
+
+    monkeypatch.setattr("arduino.app_bricks.tts.local_tts.get_brick_configured_model", lambda brick_id: "kokoro-82m")
+    monkeypatch.setattr("arduino.app_utils.http.get", get)
+    monkeypatch.setattr("arduino.app_utils.http.post", post)
+    monkeypatch.setattr("arduino.app_utils.http.stream", stream)
+
+    tts = TextToSpeech(speaker=speaker, **tts_kwargs)
+    App.unregister(tts)
+    speaker.start()
+    tts.calls = calls
+    return tts
+
+
+def test_kokoro_model_is_synthesized_by_the_kokoro_service_with_its_default_voice(monkeypatch):
+    pcm_audio = np.arange(8, dtype=np.int16)
+    payloads = []
+
+    def post_response(url, json, **kwargs):
+        payloads.append(json)
+        return FakeResponse(content=pcm_audio.tobytes())
+
+    tts = make_kokoro_tts(monkeypatch, BlockingSpeaker(sample_rate=48000), post_response)
+
+    assert tts.synthesize_pcm("hello") == pcm_audio.tobytes()
+    assert tts.calls == [("GET", "http://kokoro-tts-runner:9100/voices"), ("POST", "http://kokoro-tts-runner:9100/synthesize")]
+    assert payloads == [{"text": "hello", "voice": "af_heart", "sample_rate": 48000}]
+
+
+def test_kokoro_voice_is_chosen_by_name(monkeypatch):
+    payloads = []
+
+    def post_response(url, json, **kwargs):
+        payloads.append(json)
+        return FakeResponse(content=np.arange(4, dtype=np.int16).tobytes())
+
+    tts = make_kokoro_tts(monkeypatch, BlockingSpeaker(), post_response, voice="if_sara")
+    tts.synthesize_pcm("ciao")
+
+    assert tts._voice == {"model": "kokoro-82m", "name": "if_sara", "language": "it"}
+    assert payloads[0]["voice"] == "if_sara"
+
+
+def test_kokoro_unknown_voice_raises_with_the_available_voices(monkeypatch):
+    assert issubclass(TTSVoiceError, TTSError)
+
+    with pytest.raises(TTSVoiceError, match="has no voice named 'giovanni'") as error:
+        make_kokoro_tts(monkeypatch, BlockingSpeaker(), None, voice="giovanni")
+
+    assert error.value.hint == "Pass one of these to TextToSpeech(voice=...): af_heart, if_sara."
+
+
+def test_kokoro_cancel_closes_the_stream_and_sends_no_cancel_request(monkeypatch):
+    speaker = BlockingSpeaker(buffer_size=4)
+    response = FakeResponse(content=np.arange(12, dtype=np.int16).tobytes())
+    tts = make_kokoro_tts(monkeypatch, speaker, lambda url, json, **kwargs: response)
+
+    speak_thread = threading.Thread(target=tts.speak, args=("hello",), daemon=True)
+    speak_thread.start()
+    assert speaker.first_chunk_written.wait(timeout=2)
+    tts.cancel()
+    speaker.release_first_chunk.set()
+    speak_thread.join(timeout=2)
+
+    assert speak_thread.is_alive() is False
+    assert len(speaker.chunks_written) == 1
+    assert response.close_called is True
+    assert [method for method, url in tts.calls] == ["GET", "POST"], "one voices listing and one synthesis, no cancel request"
+
+
+def test_voice_is_ignored_by_a_model_with_a_voice_of_its_own(monkeypatch):
+    payloads = []
+
+    def post_response(url, json, **kwargs):
+        payloads.append(json)
+        return FakeResponse(content=np.arange(4, dtype=np.int16).tobytes())
+
+    tts = make_tts(monkeypatch, BlockingSpeaker(), post_response, voice="if_sara")
+    tts.synthesize_pcm("hello")
+
+    assert payloads == [{"text": "hello", "voice": "default", "sample_rate": 44100, "model": "pipertts_en", "language": "en", "keep_alive": False}]
+
+
+@pytest.fixture
+def kokoro_runner(monkeypatch):
+    """The kokoro-tts-runner container's HTTP server on a loopback port, with a scripted model and phonemizer."""
+    import sys
+    from pathlib import Path
+
+    runner_src = Path(__file__).resolve().parents[4] / "containers" / "ai" / "kokoro-tts-runner" / "src"
+    if not runner_src.is_dir():
+        pytest.skip("the kokoro-tts-runner sources are not in this checkout")
+    runner_modules = ("server", "synthesizer", "text")
+    monkeypatch.syspath_prepend(str(runner_src))
+    for name in runner_modules:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    import server as runner_server
+    import synthesizer as runner_synthesizer
+    import text as runner_text
+
+    class Session:
+        def run(self, output_names, input_feed):
+            return [np.full(input_feed["input_ids"].shape[1] * 240, 0.25, dtype=np.float32)]
+
+    styles = np.zeros((510, 1, 256), dtype=np.float32)
+    synth = runner_synthesizer.Synthesizer(
+        Session(), {"af_heart": styles, "if_sara": styles}, runner_text.load_vocab(), espeak=lambda piece, language: piece
+    )
+    http_server = runner_server.make_server(synth, 0, host="127.0.0.1")
+    threading.Thread(target=http_server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    yield http_server.server_address[1]
+    http_server.shutdown()
+    http_server.server_close()
+    for name in runner_modules:
+        sys.modules.pop(name, None)
+
+
+def test_kokoro_brick_and_runner_speak_the_same_protocol(monkeypatch, kokoro_runner):
+    """No mock on either side: the brick against the runner's own HTTP server."""
+    monkeypatch.setattr("arduino.app_bricks.tts.local_tts.get_brick_configured_model", lambda brick_id: "kokoro-82m")
+    monkeypatch.setattr("arduino.app_bricks.tts.local_tts.resolve_address", lambda host: "127.0.0.1")
+    monkeypatch.setattr(TextToSpeech, "_KOKORO_SERVICE_PORT", kokoro_runner)
+
+    tts = TextToSpeech(speaker=BlockingSpeaker(sample_rate=48000), voice="if_sara")
+    App.unregister(tts)
+    assert tts._voice == {"model": "kokoro-82m", "name": "if_sara", "language": "it"}
+
+    # "ciao." and "ok.": 5 and 3 tokens plus two pads each, 10 ms of audio per token at 48 kHz
+    samples = np.frombuffer(tts.synthesize_pcm("ciao. ok."), dtype=np.int16)
+    assert samples.size == (7 + 5) * 480
+    assert set(samples.tolist()) == {8191}
+
+    with pytest.raises(TTSVoiceError, match="no voice named 'jf_alpha'"):
+        TextToSpeech(speaker=BlockingSpeaker(), voice="jf_alpha")

@@ -1925,6 +1925,24 @@ models:
       source: "qualcomm-ai-hub"
       source-model-id: "pipertts_en"
       source-model-url: "https://aihub.qualcomm.com/models/pipertts_en"
+ - kokoro-82m:
+    name : "Kokoro TTS"
+    description: >-
+      Kokoro is an open-weight text-to-speech model of 82 million parameters with natural sounding voices
+      in American and British English, Spanish, French, Hindi, Italian and Brazilian Portuguese.
+      It runs on the CPU and comes with its runner: no download is needed.
+    supported_boards: ["ventunoq"]
+    bricks:
+      - id: "arduino:tts"
+    deployment:
+      handler: "hf-handler"
+      pre-loaded: true
+    metadata:
+      model_size_mb: 332
+      source: "huggingface"
+      model_publisher: "hexgrad"
+      source-model-id: "Kokoro-82M"
+      source-model-url: "https://huggingface.co/hexgrad/Kokoro-82M"
  - "ei:efficientnet-b4":
     name : "General purpose object classification - EfficientNet-B4"
     description: "EfficientNetB4 is a machine learning model that can classify images from the Imagenet dataset. It can also be used as a backbone in building more complex models for specific use cases. This version of the model is optimized for NPU acceleration on supported devices, providing faster inference times while maintaining accuracy."

@@ -1,0 +1,8 @@
+service_id: arduino:kokoro_tts
+name: Kokoro speech synthesis service
+description: |
+  Kokoro speech synthesis service runs the Kokoro text-to-speech model on the CPU and serves it over REST.
+  The model and its voices are part of the service image: no model download is needed.
+category: ai
+supported_boards: ["ventunoq"]
+supported_model_types: ["kokoro*"]

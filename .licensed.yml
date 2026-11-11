@@ -79,6 +79,15 @@ apps:
     venv:
       project: containers/ai/llamacpp-runner
 
+  - name: kokoro-tts-runner
+    source_path: .
+    sources:
+      pip: true
+    python:
+      virtual_env_dir: "/venvs/kokoro-tts-runner"
+    venv:
+      project: containers/ai/kokoro-tts-runner
+
   - name: llamacpp-npu-runner
     source_path: .
     sources:

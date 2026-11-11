@@ -39,6 +39,7 @@ container by globbing `containers/*/<name>/Dockerfile`, so names must be unique 
 | `pose-estimation-runner` | ai | `aihub-litert-models-runner` | Body pose estimation on the PoseNet MobileNet model, 17 keypoints per person, custom pose models supported |
 | `aihub-onnx-models-runner` | ai | `python-slim` | Same framework on ONNX Runtime: the QNN execution provider plus Debian's FastRPC libraries and OpenCV, without the QAIRT SDK |
 | `ocr-runner` | ai | `aihub-onnx-models-runner` | EasyOCR text detection and recognition on the Hexagon NPU |
+| `kokoro-tts-runner` | ai | `python-slim` | Kokoro-82M text-to-speech on ONNX Runtime (CPU), with the model and its voices in the image, served over HTTP as streamed PCM |
 | `ei-models-runner` | ai | Edge Impulse inference image | Edge Impulse inference with the bundled out-of-the-box models |
 | `ei-qnn-models-runner` | ai | Edge Impulse QNN inference image | Same, on the NPU-accelerated (QNN) models |
 | `llamacpp-runner` | ai | `python-slim` | llama.cpp model router, CPU build |
@@ -55,6 +56,7 @@ graph LR
   ei[ei-models-runner]
   eiqnn[ei-qnn-models-runner]
   slim --> tps[tps]
+  slim --> kokoro[kokoro-tts-runner]
   slim --> aihubonnx[aihub-onnx-models-runner] --> ocr[ocr-runner]
   fw[aihub-framework] -.-> aihub
   fw -.-> aihubonnx

@@ -2,6 +2,6 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
-from .local_tts import SynthesisStream, TextToSpeech, TTSBusyError, TTSError
+from .local_tts import SynthesisStream, TextToSpeech, TTSBusyError, TTSError, TTSVoiceError
 
-__all__ = ["TextToSpeech", "TTSError", "TTSBusyError", "SynthesisStream"]
+__all__ = ["TextToSpeech", "TTSError", "TTSBusyError", "TTSVoiceError", "SynthesisStream"]

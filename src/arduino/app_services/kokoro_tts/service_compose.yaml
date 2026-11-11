@@ -1,0 +1,21 @@
+services:
+  kokoro-tts-runner:
+    image: ${DOCKER_REGISTRY_BASE:-ghcr.io/arduino/}app-bricks/kokoro-tts-runner:__BRICKS_RELEASE_VERSION__
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:9100:9100
+      - ${BIND_ADDRESS_IPV6:-[::1]}:9100:9100
+    healthcheck:
+      # The runner listens once the model is loaded
+      test: [ "CMD-SHELL", "nc -z localhost 9100 || exit 1" ]
+      interval: 5s
+      start_period: 30s
+      start_interval: 250ms
+      timeout: 5s
+      retries: 5
+    # Pinned on cores 0-3 like the LLM service; the runner uses one inference thread per core it is given
+    cpuset: "0-3"

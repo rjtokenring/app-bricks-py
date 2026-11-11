@@ -10,6 +10,7 @@ updates:
       - /containers/ai/aihub-litert-models-runner
       - /containers/ai/aihub-onnx-models-runner
       - /containers/ai/ei-qnn-models-runner
+      - /containers/ai/kokoro-tts-runner
       - /containers/ai/llamacpp-npu-runner
       - /containers/ai/llamacpp-runner
       - /containers/base/python-base

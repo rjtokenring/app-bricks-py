@@ -28,6 +28,9 @@ _SENTENCE_END = re.compile(r"(?<=[.!?…])\s+|\n+")
 # How often wait_until_done() checks whether the speech is over, in seconds.
 _WAIT_POLL_S = 0.02
 
+KOKORO_MODEL_PREFIX = "kokoro"
+"""Models with this prefix are synthesized by the Kokoro service, the others by the audio analytics one."""
+
 
 class VoiceConfig(TypedDict):
     """Voice the runner synthesizes with, resolved from the configured model."""
@@ -43,6 +46,10 @@ class TTSError(AppError):
 
 class TTSBusyError(TTSError):
     """Raised when this TTS instance already has an active speech session."""
+
+
+class TTSVoiceError(TTSError):
+    """Raised when the configured model has no voice with the requested name."""
 
 
 class SynthesisStream(AbstractContextManager["SynthesisStream"], Iterator[bytes]):
@@ -72,39 +79,60 @@ class TextToSpeech:
     """Text-to-Speech brick for offline speech synthesis using local TTS service."""
 
     _APP_SERVICE_NAME = "audio-analytics-runner"
+    _KOKORO_SERVICE_NAME = "kokoro-tts-runner"
+    _KOKORO_SERVICE_PORT = 9100
 
-    def __init__(self, speaker: BaseSpeaker | None = None, max_queue_size: int = TTS_MAX_QUEUE_SIZE) -> None:
+    def __init__(self, speaker: BaseSpeaker | None = None, max_queue_size: int = TTS_MAX_QUEUE_SIZE, voice: str | None = None) -> None:
         """Initialize the TextToSpeech brick.
         Args:
             speaker (BaseSpeaker, optional): Speaker instance to use for audio output. If not provided, a default Speaker will be used.
             max_queue_size (int): Maximum number of pending ``speak(block=False)`` requests. When the
                 queue is full, further non-blocking calls raise TTSBusyError instead of piling up.
+            voice (str, optional): Name of the voice a Kokoro model (``kokoro-82m``) speaks with, e.g.
+                ``"if_sara"``. The first letter of the name is the language of the voice (``a`` American
+                English, ``b`` British English, ``e`` Spanish, ``f`` French, ``h`` Hindi, ``i`` Italian,
+                ``p`` Brazilian Portuguese), the second its gender (``f`` or ``m``). By default the
+                voice the Kokoro service declares as its default (``af_heart``). Ignored by the
+                other models, which have a voice of their own.
+
+        Raises:
+            TTSVoiceError: If the Kokoro model has no voice named ``voice``.
         """
         if max_queue_size <= 0:
             raise ValueError("max_queue_size must be greater than 0.")
 
         self._speaker = speaker or Speaker(0, sample_rate=Speaker.RATE_44K, shared=True)
 
-        # API configuration
-        self.api_host = resolve_address(self._APP_SERVICE_NAME)
-        if not self.api_host:
-            raise RuntimeError("Host address could not be resolved. Please check your configuration.")
-
-        self.api_port = 8085
-        self.api_base_url = f"http://{self.api_host}:{self.api_port}/audio-analytics/v1/api"
-
-        logger.debug(f"Initialized TextToSpeech with API base URL: {self.api_base_url}")
-
-        # Resolve the model: app.yaml override (per-brick `model:`) takes precedence over the brick default.
+        # Resolve the model first, it decides the runner: app.yaml override (per-brick `model:`) takes precedence over the brick default.
         brick_config = get_brick_config(self.__class__) or {}
         brick_id = brick_config.get("id")
         override = get_brick_configured_model(brick_id) if brick_id else None
         model_name = override or brick_config.get("model")
         if not model_name:
             raise RuntimeError("No TTS model configured for the TextToSpeech brick.")
+        self._kokoro = model_name.startswith(KOKORO_MODEL_PREFIX)
 
-        self._voice = self._resolve_voice(model_name)
-        logger.debug(f"Using TTS model '{self._voice['model']}' (language='{self._voice['language']}').")
+        # API configuration
+        self.api_host = resolve_address(self._KOKORO_SERVICE_NAME if self._kokoro else self._APP_SERVICE_NAME)
+        if not self.api_host:
+            raise RuntimeError("Host address could not be resolved. Please check your configuration.")
+
+        if self._kokoro:
+            self.api_port = self._KOKORO_SERVICE_PORT
+            self.api_base_url = f"http://{self.api_host}:{self.api_port}"
+        else:
+            self.api_port = 8085
+            self.api_base_url = f"http://{self.api_host}:{self.api_port}/audio-analytics/v1/api"
+
+        logger.debug(f"Initialized TextToSpeech with API base URL: {self.api_base_url}")
+
+        if self._kokoro:
+            self._voice = self._resolve_kokoro_voice(model_name, voice)
+        else:
+            if voice is not None:
+                logger.warning(f"TTS model '{model_name}' has a voice of its own: the voice '{voice}' is ignored.")
+            self._voice = self._resolve_voice(model_name)
+        logger.debug(f"Using TTS model '{self._voice['model']}' (language='{self._voice['language']}', voice='{self._voice['name']}').")
 
         self._active_session_lock = threading.Lock()
         self._cancelled: threading.Event | None = None
@@ -435,6 +463,26 @@ class TextToSpeech:
 
         raise RuntimeError(f"TTS model '{model_name}' is not available on the runner.")
 
+    def _resolve_kokoro_voice(self, model_name: str, voice: str | None) -> VoiceConfig:
+        """Fetch the voices of the Kokoro service and return the config of `voice`, or of the service's default voice."""
+        try:
+            response = http.get(f"{self.api_base_url}/voices")
+        except Exception as e:
+            raise RuntimeError(f"Failed to fetch TTS voices: {e}.")
+        if response.status_code != 200:
+            raise RuntimeError(f"Failed to fetch TTS voices: HTTP {response.status_code}.")
+
+        catalog: dict[str, Any] = response.json() or {}
+        voices: list[dict[str, Any]] = catalog.get("voices") or []
+        languages: dict[str, str | None] = {entry["name"]: entry.get("language") for entry in voices}
+        name: str | None = voice or catalog.get("default_voice")
+        if name is None or name not in languages:
+            raise TTSVoiceError(
+                f"TTS model '{model_name}' has no voice named '{name}'.",
+                hint=f"Pass one of these to TextToSpeech(voice=...): {', '.join(sorted(languages))}.",
+            )
+        return {"model": model_name, "name": name, "language": languages[name]}
+
     def _chunk_text(self, text: str) -> list[str]:
         """Split text into chunks accepted by the local TTS service.
 
@@ -493,15 +541,12 @@ class TextToSpeech:
             logger.debug("Speech session cancelled before synthesis")
             return
 
-        payload = {
-            "text": text,
-            "model": self._voice["model"],
-            "language": self._voice["language"],
-            "voice": self._voice["name"],
-            "sample_rate": self._speaker.sample_rate,
-            "keep_alive": keep_alive,
-        }
-        url = f"{self.api_base_url}/tts/synthesize"
+        payload: dict[str, Any] = {"text": text, "voice": self._voice["name"], "sample_rate": self._speaker.sample_rate}
+        if self._kokoro:
+            url = f"{self.api_base_url}/synthesize"
+        else:
+            payload |= {"model": self._voice["model"], "language": self._voice["language"], "keep_alive": keep_alive}
+            url = f"{self.api_base_url}/tts/synthesize"
         started_at = time.perf_counter()
         total_audio_bytes = 0
         first_chunk_logged = False
@@ -550,6 +595,9 @@ class TextToSpeech:
                 )
 
     def _cancel_remote_tts(self) -> None:
+        if self._kokoro:
+            # The Kokoro service stops when the response stream of the synthesis is closed
+            return
         try:
             response = http.post(f"{self.api_base_url}/tts/cancel")
             if response.status_code >= 400:
