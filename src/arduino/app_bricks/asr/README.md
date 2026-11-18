@@ -2,23 +2,6 @@
 
 The ASR brick provides on-device automatic speech recognition (ASR) capabilities for audio streams and files. It offers a high-level interface for transcribing audio using a local model, with support for both real-time microphone capture (`AutomaticSpeechRecognition`) and in-memory audio (`WAVAutomaticSpeechRecognition`). With the possibility to use multiple languages.
 
-## Models and Boards
-
-| model | boards | default on | runs on | languages | translate | keywords |
-|---|---|---|---|---|---|---|
-| `whistle` | UNO Q, VENTUNO Q | UNO Q | CPU, inside the app process | en, de, fr, es, it, nl, pl | no | yes |
-| `whisper-small-quantized` | VENTUNO Q | VENTUNO Q | NPU, in the audio inference service | 99 | to English | no |
-
-The brick uses the default model of the board. To use another one, set it for the brick in `app.yaml`:
-
-```yaml
-bricks:
-  - arduino:asr:
-      model: whistle
-```
-
-`whistle` ships inside the app image, so it needs no download. `whisper-small-quantized` is downloaded once, like the other NPU models. Neither sends audio off the board.
-
 ## Features
 
 - **Offline Operation:** All transcriptions are performed locally, ensuring data privacy and eliminating network dependencies.
