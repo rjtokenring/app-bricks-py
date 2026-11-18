@@ -2686,6 +2686,7 @@ models:
       pre-loaded: true
     metadata:
       model_size_mb: 17
+      model_parameters: "55.2M"
       source: "huggingface"
       source-model-id: "Cactus-Compute/whistle"
       source-model-url: "https://huggingface.co/Cactus-Compute/whistle"
