@@ -2,22 +2,21 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
-"""Whistle speech-to-text, run in this process through the C API of the Cactus runtime (cactus.h).
+"""Whistle speech-to-text, served by the whistle-runner container of the arduino:whistle service.
 
-The runtime library and the model ship in the app image; nothing is downloaded and
-nothing leaves the board.
+The runtime library and the model ship in that image; nothing is downloaded and nothing
+leaves the board. The brick cuts the audio into utterances at the pauses of the speaker
+and sends them one at a time.
 """
 
-import ctypes
-import json
-import threading
+import base64
 from collections import deque
-from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
 
 from arduino.app_peripherals.microphone import SpeechSegmenter, chunk_level
+from arduino.app_utils import http
 
 WHISTLE_MODEL = "whistle"
 """Catalog id of the Whistle model."""
@@ -31,82 +30,29 @@ SAMPLE_RATE = 16000
 MAX_UTTERANCE_SECONDS = 29.0
 """Longest utterance transcribed at once: one runtime call takes at most 30 s of audio."""
 
-_LIB_PATH = Path("/usr/local/lib/cactus/libcactus.so")
-_MODEL_PATH = Path("/models/ootb/cactus/whistle.cact")
-_OUT_CAPACITY = 1 << 16
 
+class WhistleClient:
+    """The Whistle server of the arduino:whistle service, which transcribes one utterance per request."""
 
-class WhistleEngine:
-    """
-    The Whistle model loaded in the Cactus runtime.
+    _HEALTH_RETRIES = 6
+    _TRANSCRIBE_TIMEOUT_S = 60.0
 
-    The runtime keeps one process-wide model state (``cactus_load`` returns no handle), so
-    there is a single engine per process: :meth:`shared` loads it on first use and returns
-    the same instance to every caller. Transcriptions are serialized.
-    """
-
-    _shared: "WhistleEngine | None" = None
-    _shared_lock = threading.Lock()
-
-    @classmethod
-    def shared(cls) -> "WhistleEngine":
+    def __init__(self, base_url: str) -> None:
         """
-        The engine of this process, loaded on the first call.
-
-        Raises:
-            FileNotFoundError: If the runtime library or the model is not in the image.
-            OSError: If the runtime library cannot be loaded.
-            RuntimeError: If the runtime rejects the model.
-        """
-        with cls._shared_lock:
-            if cls._shared is None:
-                cls._shared = cls(_LIB_PATH, _MODEL_PATH)
-            return cls._shared
-
-    def __init__(self, lib_path: Path, model_path: Path) -> None:
-        """
-        Load the runtime library and the model.
-
         Args:
-            lib_path (Path): The Cactus runtime shared library.
-            model_path (Path): The ``.cact`` model file.
+            base_url (str): URL of the server, e.g. ``http://whistle-runner:8087``.
+        """
+        self._base_url = base_url
+
+    def wait_ready(self) -> None:
+        """
+        Wait until the server answers, for a few seconds: it loads the model before it listens.
 
         Raises:
-            FileNotFoundError: If one of the files is missing.
-            OSError: If the runtime library cannot be loaded.
-            RuntimeError: If the runtime rejects the model.
+            http.ConnectionFailed: If the server does not answer.
+            http.HTTPStatusError: If it answers with an error.
         """
-        for path in (lib_path, model_path):
-            if not path.is_file():
-                raise FileNotFoundError(f"{path} not found")
-        lib = ctypes.CDLL(str(lib_path))
-        self._load = lib.cactus_load
-        self._load.argtypes = [ctypes.c_char_p, ctypes.c_ulonglong]
-        self._load.restype = ctypes.c_int
-        self._last_error = lib.cactus_last_error
-        self._last_error.argtypes = []
-        self._last_error.restype = ctypes.c_char_p
-        self._transcribe = lib.cactus_transcribe
-        self._transcribe.argtypes = [
-            ctypes.POINTER(ctypes.c_float),  # pcm
-            ctypes.c_int,  # samples
-            ctypes.c_char_p,  # language, NULL to detect it
-            ctypes.c_char_p,  # keywords, one per line, or NULL
-            ctypes.c_int,  # word timestamps
-            ctypes.c_char_p,  # out: JSON result
-            ctypes.c_int,  # out capacity
-        ]
-        self._transcribe.restype = ctypes.c_int
-        self._lock = threading.Lock()
-        self._out = ctypes.create_string_buffer(_OUT_CAPACITY)
-        # Kept alive with the engine: the runtime may keep pointers into the buffer it loaded
-        self._model = model_path.read_bytes()
-        if self._load(self._model, len(self._model)) < 0:
-            raise RuntimeError(f"The runtime rejected {model_path}: {self._error()}")
-
-    def _error(self) -> str:
-        message = cast(bytes | None, self._last_error())
-        return message.decode(errors="replace") if message else "unknown error"
+        http.get(f"{self._base_url}/health", timeout=2, retries=self._HEALTH_RETRIES, backoff_factor=0.25).raise_for_status()
 
     def transcribe(self, pcm: np.ndarray, language: str | None = None, keywords: list[str] | None = None) -> dict[str, Any]:
         """
@@ -122,17 +68,19 @@ class WhistleEngine:
                 given) and timing fields.
 
         Raises:
-            RuntimeError: If the runtime fails.
+            http.ConnectionFailed: If the server does not answer.
+            RuntimeError: If the server fails the transcription.
         """
-        samples = np.ascontiguousarray(pcm[: 30 * SAMPLE_RATE], dtype=np.float32)
-        lang = language.encode() if language else None
-        words = "\n".join(keywords).encode() if keywords else None
-        with self._lock:
-            ret = self._transcribe(samples.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), samples.size, lang, words, 0, self._out, _OUT_CAPACITY)
-            if ret < 0:
-                raise RuntimeError(f"Whistle transcription failed: {self._error()}")
-            raw = self._out.value
-        return cast(dict[str, Any], json.loads(raw))
+        samples = np.ascontiguousarray(pcm[: 30 * SAMPLE_RATE], dtype="<f4")
+        body = {"pcm": base64.b64encode(samples.tobytes()).decode(), "language": language, "keywords": keywords}
+        response = http.post(f"{self._base_url}/transcribe", json=body, timeout=self._TRANSCRIBE_TIMEOUT_S)
+        if response.status_code != 200:
+            try:
+                error = str(response.json().get("error"))
+            except ValueError:
+                error = response.text[:200]
+            raise RuntimeError(f"Whistle transcription failed (HTTP {response.status_code}): {error}")
+        return cast(dict[str, Any], response.json())
 
 
 def to_float_mono(samples: np.ndarray, sample_rate: int, channels: int = 1, is_packed: bool = False) -> np.ndarray:

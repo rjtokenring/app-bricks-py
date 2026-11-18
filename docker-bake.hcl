@@ -153,6 +153,7 @@ group "default" {
     "aihub-onnx-models-runner",
     "ocr-runner",
     "edge-impulse-runner",
+    "whistle-runner",
     "qairt-common-base",
     "aihub-litert-models-runner",
     "gesture-recognition-runner",
@@ -271,6 +272,15 @@ target "edge-impulse-runner" {
     parent_context("python-slim"),
     parent_context("edge-impulse-server"),
   )
+}
+
+target "whistle-runner" {
+  inherits   = ["_downstream"]
+  context    = "containers/ai/whistle-runner"
+  tags       = image_tags("whistle-runner")
+  cache-from = cache_from("whistle-runner")
+  cache-to   = cache_to("whistle-runner")
+  contexts   = parent_context("python-slim")
 }
 
 target "qairt-common-base" {

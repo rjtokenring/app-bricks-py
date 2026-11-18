@@ -141,7 +141,7 @@ Each `ASREvent` has a `type`, the text in `data`, and `language`.
 
 - `ASRBusyError`: raised if you call `transcribe()` / `transcribe_stream()` while the instance already has a session running. A session stopped with `cancel()` does not count: the new one waits for it to close. Fix by cancelling or awaiting the current session, or by using a separate instance.
 - `ASRServiceBusyError`: raised when the inference server rejects session creation because it is currently serving another client. The caller decides whether to retry.
-- `ASRUnavailableError`: raised when the inference service is unreachable (container down, network error) or the WebSocket connection drops mid-session. With `whistle`, raised by `start()` when the model cannot be loaded. The caller decides whether to retry.
+- `ASRUnavailableError`: raised when the inference service is unreachable (container down, network error) or the WebSocket connection drops mid-session. The caller decides whether to retry.
 - `ASRError`: base class for all of the above. Raised as is for an option the configured model does not support (for example `translate=True` with `whistle`); its `hint` tells how to fix it.
 
 ## Source Ownership

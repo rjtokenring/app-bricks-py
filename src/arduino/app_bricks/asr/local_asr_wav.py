@@ -91,9 +91,6 @@ class WAVAutomaticSpeechRecognition(BaseASR):
         """
         ASR brick that transcribes a finite in-memory audio buffer.
 
-        The model is the board default (``whistle`` on UNO Q, ``whisper-small-quantized``
-        on VENTUNO Q) unless app.yaml sets another one for the brick.
-
         Args:
             wav: WAV data to be used for transcription. One of:
                 np.ndarray: treated as raw PCM samples at 16 kHz mono.

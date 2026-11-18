@@ -1,0 +1,9 @@
+services:
+  # No published ports: the app reaches the server as whistle-runner:8087 on the network of its compose project only
+  whistle-runner:
+    image: ${DOCKER_REGISTRY_BASE:-ghcr.io/arduino/}app-bricks/whistle-runner:__BRICKS_RELEASE_VERSION__
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"

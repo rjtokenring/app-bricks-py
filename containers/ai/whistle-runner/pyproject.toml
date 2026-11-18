@@ -1,0 +1,10 @@
+# The image installs no Python packages: the server runs on the standard library of python-slim.
+# This project only gives the tests their environment, task test runs them with the test group.
+[project]
+name = "whistle-runner"
+version = "0"
+requires-python = "==3.13.*"
+dependencies = []
+
+[dependency-groups]
+test = ["pytest"]

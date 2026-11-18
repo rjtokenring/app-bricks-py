@@ -1,0 +1,7 @@
+service_id: arduino:whistle
+name: Whistle speech-to-text service
+description: |
+  Whistle speech-to-text service runs the Whistle model on the CPU for the Automatic Speech Recognition brick.
+category: ai
+supported_boards: ["unoq", "ventunoq"]
+supported_model_types: ["whistle"]

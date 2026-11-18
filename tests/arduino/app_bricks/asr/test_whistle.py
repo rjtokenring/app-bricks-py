@@ -2,19 +2,22 @@
 #
 # SPDX-License-Identifier: MPL-2.0
 
-"""The whistle model runs in the app process: utterances are cut locally at the pauses of the
-speaker and transcribed one at a time by the Cactus runtime, here replaced by a fake engine."""
+"""The whistle model runs in the whistle-runner service: utterances are cut in the brick at the
+pauses of the speaker and sent to it one at a time. The service is replaced by a fake client, and
+the client is checked against the real server of the container with a fake engine."""
 
 import asyncio
+import importlib.util
 import threading
+from http.server import HTTPServer
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from arduino.app_bricks.asr import ASRError, ASRUnavailableError, AutomaticSpeechRecognition, WAVAutomaticSpeechRecognition
-from arduino.app_bricks.asr import whistle
-from arduino.app_bricks.asr.whistle import MAX_UTTERANCE_SECONDS, UtteranceCollector, WhistleEngine, to_float_mono
+from arduino.app_bricks.asr.whistle import MAX_UTTERANCE_SECONDS, UtteranceCollector, WhistleClient, to_float_mono
+from arduino.app_utils import http
 
 from conftest import _FakeMic, _wav_bytes
 
@@ -48,17 +51,17 @@ def _seconds(pcm: np.ndarray) -> float:
 
 @pytest.fixture
 def whistle_model(monkeypatch: pytest.MonkeyPatch):
-    """Configure the brick with the whistle model; the service must never be looked up."""
+    """Configure the brick with the whistle model; the audio-analytics service must never be looked up."""
 
     def no_service(host):
-        raise AssertionError("the whistle model needs no service address")
+        raise AssertionError("the whistle model does not use the audio-analytics service")
 
     monkeypatch.setattr("arduino.app_bricks.asr.local_asr.get_brick_configured_model", lambda _id, brick_config=None: "whistle")
     monkeypatch.setattr("arduino.app_bricks.asr.local_asr.resolve_address", no_service)
 
 
 class _FakeEngine:
-    """Stands in for WhistleEngine: records the calls, answers with the given texts in turn."""
+    """Stands in for the Whistle service: records the calls, answers with the given texts in turn."""
 
     def __init__(self, texts: list[str], language: str = "it"):
         self.texts = list(texts)
@@ -73,7 +76,8 @@ class _FakeEngine:
 @pytest.fixture
 def fake_engine(monkeypatch: pytest.MonkeyPatch, whistle_model):
     engine = _FakeEngine(["Accendi la luce.", "Grazie!"])
-    monkeypatch.setattr(WhistleEngine, "shared", classmethod(lambda cls: engine))
+    monkeypatch.setattr(WhistleClient, "transcribe", lambda self, *args: engine.transcribe(*args))
+    monkeypatch.setattr(WhistleClient, "wait_ready", lambda self: None)
     return engine
 
 
@@ -177,7 +181,7 @@ class TestUtteranceCollectorRecording:
 
 
 class TestOptions:
-    def test_no_service_is_needed(self, whistle_model):
+    def test_the_audio_analytics_service_is_not_looked_up(self, whistle_model):
         asr = AutomaticSpeechRecognition(mic=_FakeMic())
         assert asr.model == "whistle"
 
@@ -207,23 +211,94 @@ class TestOptions:
             asr.transcribe()
 
 
-class TestEngineLoading:
-    def test_missing_files_raise_file_not_found(self, tmp_path: Path):
-        with pytest.raises(FileNotFoundError):
-            WhistleEngine(tmp_path / "libcactus.so", tmp_path / "whistle.cact")
+def _load_server_module():
+    """The server of the whistle-runner container, imported from its source."""
+    path = Path(__file__).parents[4] / "containers" / "ai" / "whistle-runner" / "src" / "whistle_server.py"
+    spec = importlib.util.spec_from_file_location("whistle_server", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
-    def test_start_raises_unavailable_with_a_hint_on_an_image_without_the_model(self, monkeypatch, whistle_model, tmp_path):
-        monkeypatch.setattr(whistle, "_LIB_PATH", tmp_path / "libcactus.so")
-        monkeypatch.setattr(WhistleEngine, "_shared", None)
-        asr = WAVAutomaticSpeechRecognition(np.zeros(10, dtype=np.int16))
-        with pytest.raises(ASRUnavailableError, match="not installed") as exc_info:
-            asr.start()
-        assert exc_info.value.hint
 
-    def test_start_loads_the_model(self, fake_engine):
-        asr = WAVAutomaticSpeechRecognition(np.zeros(10, dtype=np.int16))
-        asr.start()
-        assert asr._engine is fake_engine
+class _FakeRuntime:
+    """Stands in for the Cactus runtime inside the real server: records what reaches it."""
+
+    def __init__(self):
+        self.calls: list[tuple[bytes, str | None, list[str] | None]] = []
+        self.error: str | None = None
+
+    def transcribe(self, pcm, language=None, keywords=None):
+        self.calls.append((pcm, language, keywords))
+        if self.error:
+            raise RuntimeError(self.error)
+        return {"text": "Accendi la luce.", "language": language or "it"}
+
+
+@pytest.fixture
+def server(monkeypatch: pytest.MonkeyPatch):
+    module = _load_server_module()
+    runtime = _FakeRuntime()
+    monkeypatch.setattr(module.Handler, "engine", runtime, raising=False)
+    httpd = HTTPServer(("127.0.0.1", 0), module.Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    yield WhistleClient(f"http://127.0.0.1:{httpd.server_address[1]}"), runtime
+    httpd.shutdown()
+    httpd.server_close()
+
+
+class TestClientAndServer:
+    def test_samples_language_and_keywords_reach_the_runtime(self, server):
+        client, runtime = server
+        pcm = np.array([0.25, -0.5], dtype=np.float32)
+        assert client.transcribe(pcm, "it", ["UNO Q"]) == {"text": "Accendi la luce.", "language": "it"}
+        assert runtime.calls == [(pcm.astype("<f4").tobytes(), "it", ["UNO Q"])]
+
+    def test_language_and_keywords_default_to_none(self, server):
+        client, runtime = server
+        client.transcribe(np.zeros(4, dtype=np.float32))
+        assert runtime.calls[0][1:] == (None, None)
+
+    def test_audio_past_30_s_is_not_sent(self, server):
+        client, runtime = server
+        client.transcribe(np.zeros(31 * RATE, dtype=np.float32))
+        assert len(runtime.calls[0][0]) == 4 * 30 * RATE
+
+    def test_a_runtime_failure_raises_runtime_error_with_its_message(self, server):
+        client, runtime = server
+        runtime.error = "Whistle transcription failed: boom"
+        with pytest.raises(RuntimeError, match="boom"):
+            client.transcribe(np.zeros(4, dtype=np.float32))
+
+    def test_wait_ready_returns_once_the_server_answers(self, server):
+        client, _ = server
+        client.wait_ready()
+
+
+class TestService:
+    def test_start_waits_for_the_service(self, whistle_model, monkeypatch):
+        calls = []
+        monkeypatch.setattr(WhistleClient, "wait_ready", lambda self: calls.append(self))
+        WAVAutomaticSpeechRecognition(np.zeros(10, dtype=np.int16)).start()
+        assert len(calls) == 1
+
+    def test_a_service_not_ready_at_start_is_only_logged(self, whistle_model, monkeypatch):
+        def not_ready(self):
+            raise http.ConnectionFailed("refused")
+
+        monkeypatch.setattr(WhistleClient, "wait_ready", not_ready)
+        WAVAutomaticSpeechRecognition(np.zeros(10, dtype=np.int16)).start()
+
+    def test_an_unreachable_service_raises_unavailable(self, fake_engine, worker_loop):
+        def refused(pcm, language=None, keywords=None):
+            raise http.ConnectionFailed("POST http://whistle-runner:8087/transcribe: refused")
+
+        fake_engine.transcribe = refused
+        asr = WAVAutomaticSpeechRecognition(TestTranscription._two_sentences())
+        asr._worker_loop.set_result(worker_loop)
+        with pytest.raises(ASRUnavailableError, match="unreachable"):
+            asr.transcribe()
 
 
 class TestTranscription:

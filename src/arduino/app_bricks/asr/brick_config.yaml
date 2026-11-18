@@ -6,6 +6,9 @@ requires_services:
   - id: arduino:genie_audio
     when:
       model: "whisper-*"
+  - id: arduino:whistle
+    when:
+      model: "whistle"
 model_by_boards:
     - platform: ventunoq
       model: whisper-small-quantized

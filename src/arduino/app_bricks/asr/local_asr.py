@@ -26,7 +26,7 @@ from arduino.app_peripherals.microphone import BaseMicrophone, Microphone, Speec
 from arduino.app_utils import AppError, Logger, brick
 
 from .whistle import LANGUAGES as WHISTLE_LANGUAGES
-from .whistle import WHISTLE_MODEL, UtteranceCollector, WhistleEngine
+from .whistle import WHISTLE_MODEL, UtteranceCollector, WhistleClient
 
 logger = Logger("ASR")
 
@@ -185,9 +185,11 @@ class BaseASR:
     # for that rather than failing, up to the close timeout plus the WebSocket teardown.
     _CLOSING_WAIT_SECONDS = 30.0
 
-    # Live microphone audio waiting while an utterance is transcribed in process: up to a
+    # The whistle model is served by the arduino:whistle service, reachable on the network of the app only
+    _WHISTLE_URL = "http://whistle-runner:8087"
+    # Live microphone audio waiting while an utterance is transcribed by whistle: up to a
     # minute at the Microphone() default chunk, so the speaker is never cut while it runs
-    _IN_PROCESS_QUEUE_CHUNKS = 1000
+    _WHISTLE_QUEUE_CHUNKS = 1000
 
     def __init__(self, source: object, language: str | None = None, translate: bool = False, keywords: list[str] | None = None) -> None:
         # Load the model configured at bricks level: app.yaml override first, then the board default
@@ -196,10 +198,9 @@ class BaseASR:
         if not self.model:
             raise ValueError("Model name must be provided via the brick configuration.")
 
-        # Whistle runs in this process; every other model in the audio-analytics service
-        self._in_process = self.model == WHISTLE_MODEL
-        self._engine: WhistleEngine | None = None
-        if not self._in_process:
+        # Whistle runs in its own service; every other model in the audio-analytics service
+        self._whistle = WhistleClient(self._WHISTLE_URL) if self.model == WHISTLE_MODEL else None
+        if self._whistle is None:
             self.api_host = resolve_address(self._APP_SERVICE_NAME)
             if not self.api_host:
                 raise RuntimeError("Host address could not be resolved. Please check your configuration.")
@@ -233,11 +234,7 @@ class BaseASR:
         self._pending_starts: set[threading.Event] = set()
 
     def start(self) -> None:
-        """Prepare the ASR for transcription. Starts the owned mic if applicable and loads the model.
-
-        Raises:
-            ASRUnavailableError: If the ``whistle`` model cannot be loaded.
-        """
+        """Prepare the ASR for transcription. Starts the owned mic if applicable."""
         logger.debug("Starting ASR and preparing resources...")
         self._stop_worker.clear()
         if self._worker_loop.done():
@@ -292,7 +289,7 @@ class BaseASR:
 
     def _check_options(self, language: str | None, translate: bool, keywords: list[str] | None) -> None:
         """Raise ASRError for options the configured model does not support."""
-        if self._in_process:
+        if self._whistle is not None:
             if translate:
                 raise ASRError(
                     "The whistle model does not translate speech.",
@@ -308,20 +305,6 @@ class BaseASR:
                 f"The {self.model} model does not take keywords.",
                 hint="Set keywords=None, or use the whistle model to favour words in the transcription.",
             )
-
-    def _whistle_engine(self) -> WhistleEngine:
-        """The in-process engine, loaded on the first call."""
-        if self._engine is None:
-            try:
-                self._engine = WhistleEngine.shared()
-            except FileNotFoundError as e:
-                raise ASRUnavailableError(
-                    f"The whistle model is not installed: {e}",
-                    hint="Update Arduino App Lab: the app runs on an image that does not ship the whistle model.",
-                ) from None
-            except (OSError, RuntimeError) as e:
-                raise ASRUnavailableError(f"The whistle model could not be loaded: {e}") from None
-        return self._engine
 
     def _ensure_source_started(self) -> None:
         if not self._source.is_started():
@@ -381,17 +364,20 @@ class BaseASR:
             logger.debug("Asyncio event loop stopped")
 
     def _warmup(self) -> None:
-        """Load the model before the first transcription.
+        """Best-effort warmup before the first transcription.
 
-        The in-process model is loaded here, and an error loading it is raised: it would fail
-        every transcription. For the service, best effort: create and immediately close a
-        transcription session so the inference container loads the ASR model."""
+        For ``whistle``, wait until its service answers. For the audio-analytics service, create
+        and immediately close a transcription session so the inference container loads the ASR model."""
         if self._stop_worker.is_set():
             return
         started_at = time.perf_counter()
-        if self._in_process:
-            self._whistle_engine()
-            logger.debug(f"Whistle model loaded in {(time.perf_counter() - started_at) * 1000:.0f} ms")
+        if self._whistle is not None:
+            try:
+                self._whistle.wait_ready()
+            except (http.ConnectionFailed, http.HTTPStatusError) as e:
+                logger.warning(f"ASR warmup failed, the whistle service is not ready: {e}")
+                return
+            logger.debug(f"Whistle service ready in {(time.perf_counter() - started_at) * 1000:.0f} ms")
             return
         try:
             session_id = self._create_transcription_session(language=self.language, translate=self.translate)
@@ -439,7 +425,7 @@ class BaseASR:
             session_translate = self.translate
             session_keywords = list(self.keywords) if self.keywords else None
             self._check_options(session_language, session_translate, session_keywords)
-            if self._in_process:
+            if self._whistle is not None:
                 session_id = f"whistle-{time.monotonic_ns()}"
             else:
                 session_id = self._create_transcription_session(vad_ms=vad_ms, language=session_language, translate=session_translate)
@@ -448,7 +434,7 @@ class BaseASR:
                 duration=duration,
                 start_time=time.time(),
                 result_queue=queue.Queue(),
-                chunk_queue=queue.Queue(maxsize=self._IN_PROCESS_QUEUE_CHUNKS if self._in_process else 100),
+                chunk_queue=queue.Queue(maxsize=self._WHISTLE_QUEUE_CHUNKS if self._whistle is not None else 100),
                 language=session_language,
                 keywords=session_keywords,
                 vad_ms=vad_ms,
@@ -458,7 +444,7 @@ class BaseASR:
                 self._active_session = session_info
                 self._pending_starts.discard(cancelled)
 
-            handler = self._in_process_session_handler if self._in_process else self._transcription_session_handler
+            handler = self._whistle_session_handler if self._whistle is not None else self._transcription_session_handler
             future = asyncio.run_coroutine_threadsafe(handler(session_info), worker_loop)
 
             while not future.done():
@@ -687,7 +673,7 @@ class BaseASR:
             if reader.is_alive():
                 logger.warning(f"Reader thread for session {session_id} did not exit within {join_timeout}s; leaking as daemon")
 
-    async def _in_process_session_handler(self, session_info: SessionInfo) -> None:
+    async def _whistle_session_handler(self, session_info: SessionInfo) -> None:
         reader = threading.Thread(
             target=self._reader_thread_body,
             args=(session_info,),
@@ -697,7 +683,7 @@ class BaseASR:
         session_info.reader_thread = reader
         reader.start()
         try:
-            await asyncio.to_thread(self._run_in_process_session, session_info)
+            await asyncio.to_thread(self._run_whistle_session, session_info)
         finally:
             session_info.cancelled.set()
             join_timeout = 2.0
@@ -705,15 +691,16 @@ class BaseASR:
             if reader.is_alive():
                 logger.warning(f"Reader thread for session {session_info.session_id} did not exit within {join_timeout}s; leaking as daemon")
 
-    def _run_in_process_session(self, session_info: SessionInfo) -> None:
+    def _run_whistle_session(self, session_info: SessionInfo) -> None:
         """
-        Transcribe the session audio in this process, one utterance at a time.
+        Transcribe the session audio with the whistle service, one utterance at a time.
 
         Each utterance, cut at a pause of the speaker, becomes one ``full_text`` event; there
         are no ``partial_text`` events. A running transcription is not interrupted by a
         cancel, its text is dropped.
         """
-        engine = self._whistle_engine()
+        whistle = self._whistle
+        assert whistle is not None
         vad_ms = session_info.vad_ms if session_info.vad_ms is not None else self._DEFAULT_VAD_MS
         collector = UtteranceCollector(
             self._source.sample_rate,
@@ -727,7 +714,9 @@ class BaseASR:
         def transcribe(pcm: np.ndarray) -> None:
             nonlocal first
             try:
-                result = engine.transcribe(pcm, session_info.language, session_info.keywords)
+                result = whistle.transcribe(pcm, session_info.language, session_info.keywords)
+            except http.ConnectionFailed as e:
+                raise ASRUnavailableError(f"Whistle service unreachable: {e}") from None
             except RuntimeError as e:
                 raise ASRError(str(e)) from None
             text = str(result.get("text") or "").strip()
@@ -1018,9 +1007,6 @@ class AutomaticSpeechRecognition(BaseASR):
     ) -> None:
         """
         ASR brick that transcribes a live audio stream from a microphone.
-
-        The model is the board default (``whistle`` on UNO Q, ``whisper-small-quantized``
-        on VENTUNO Q) unless app.yaml sets another one for the brick.
 
         Args:
             mic: Microphone to be captured for transcription. One of:
