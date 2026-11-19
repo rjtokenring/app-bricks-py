@@ -1,0 +1,6 @@
+id: arduino:apriltag_detection
+name: AprilTag Detection
+description: Finds AprilTag fiducial markers in a camera video stream
+category: video
+required_devices:
+  - camera
