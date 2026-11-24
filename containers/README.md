@@ -43,6 +43,7 @@ container by globbing `containers/*/<name>/Dockerfile`, so names must be unique 
 | `ei-qnn-models-runner` | ai | Edge Impulse QNN inference image | Same, on the NPU-accelerated (QNN) models |
 | `llamacpp-runner` | ai | `python-slim` | llama.cpp model router, CPU build |
 | `llamacpp-npu-runner` | ai | `qairt-common-base` | llama.cpp model router, Hexagon NPU build |
+| `geniex-runner` | ai | `qairt-common-base` | GenieX OpenAI-compatible server with only its QAIRT backend: AI Hub `geniex_qairt` bundles on the Hexagon NPU (PoC) |
 
 ```mermaid
 graph LR
@@ -52,6 +53,7 @@ graph LR
   qairt[qairt-common-base] --> aihub[aihub-litert-models-runner] --> gesture[gesture-recognition-runner]
   aihub --> pose[pose-estimation-runner]
   qairt --> lcppnpu[llamacpp-npu-runner]
+  qairt --> geniex[geniex-runner]
   ei[ei-models-runner]
   eiqnn[ei-qnn-models-runner]
   slim --> tps[tps]

@@ -72,7 +72,8 @@ class VisionLanguageModel(LargeLanguageModel):
 
         Args:
             model (str | None): The specific model name or identifier to use, served by the genie runner
-                (e.g., "genie:qwen3_vl_4b_instruct") or by the llama.cpp runner (e.g.,
+                (e.g., "genie:qwen3_vl_4b_instruct"), by the GenieX QAIRT runner (e.g.,
+                "geniex:qwen3_vl_4b_instruct") or by the llama.cpp runner (e.g.,
                 "llamacpp:gemma-4-E2B_q4_0-it-multimodal"). If not provided, model will be determined
                 from app configuration or default brick configuration.
             system_prompt (str): A system-level instruction that defines the AI's persona

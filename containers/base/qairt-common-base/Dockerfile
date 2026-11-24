@@ -69,14 +69,15 @@ RUN set -eu && \
     echo "==> Verify SDK checksum"; \
     echo "${QNP_SDK_SHA256}  ${DOWNLOAD_DIR}/${QNP_SDK}" | sha256sum -c -; \
     \
-    # The images use QNN only through the TFLite delegate on the HTP (v73: QCS9075,
-    # v75: QCS8275): these are the libraries it loads (dlopen) on the host and the
-    # skel it loads on the DSP for each version. SNPE, Genie, the Qairt* API and the
-    # CPU/GPU/DSP backends are never loaded.
+    # The images use QNN on the HTP (v73: QCS9075, v75: QCS8275) through the TFLite
+    # delegate and through the QNN C API of the GenieX QAIRT backend (geniex-runner,
+    # which also needs QnnSystem and the HTP NetRun extensions): these are the
+    # libraries they load (dlopen) on the host and the skel loaded on the DSP for each
+    # version. SNPE, Genie, the Qairt* API and the CPU/GPU/DSP backends are never loaded.
     HTP_VERSIONS="73 75"; \
-    HOST_LIBS="libQnnTFLiteDelegate.so libQnnHtp.so libQnnHtpPrepare.so $(for v in ${HTP_VERSIONS}; do echo "libQnnHtpV${v}Stub.so"; done)"; \
+    HOST_LIBS="libQnnTFLiteDelegate.so libQnnHtp.so libQnnHtpPrepare.so libQnnSystem.so libQnnHtpNetRunExtensions.so $(for v in ${HTP_VERSIONS}; do echo "libQnnHtpV${v}Stub.so"; done)"; \
     \
-    echo "==> Unzip the QNN HTP libs of the TFLite delegate, the rest of the SDK is never used"; \
+    echo "==> Unzip the QNN HTP libs the images load, the rest of the SDK is never used"; \
     cd "${DOWNLOAD_DIR}" && unzip -q "${QNP_SDK}" \
       $(for lib in ${HOST_LIBS}; do echo "qairt/${QNP_VER}/lib/aarch64-oe-linux-gcc11.2/${lib}"; done) \
       $(for v in ${HTP_VERSIONS}; do echo "qairt/${QNP_VER}/lib/hexagon-v${v}/unsigned/libQnnHtpV${v}Skel.so"; done) && \

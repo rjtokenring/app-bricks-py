@@ -5,6 +5,9 @@ requires_services:
   - id: arduino:genie
     when:
       model: "genie:*"
+  - id: arduino:geniex
+    when:
+      model: "geniex:*"
   - id: arduino:llamacpp
     when:
       model: "llamacpp:*"
@@ -16,6 +19,7 @@ model_by_boards:
 supported_boards: ["unoq", "ventunoq"]
 ai_frameworks_compatibility:
   - genie
+  - geniex
   - llamacpp
 variables:
 - name: LLAMA_ARG_CTX_SIZE

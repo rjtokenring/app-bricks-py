@@ -109,6 +109,7 @@ def test_list_models_disables_the_client_builtin_retries(llm):
     [
         ("llamacpp:gemma-4-E4B_q4_0-it", "http://llamacpp-models-runner:9999/v1"),
         ("genie:qwen3_4b_instruct_2507", "http://genie-models-runner:9001/v1"),
+        ("geniex:qwen3_4b_instruct_2507", "http://geniex-models-runner:18181/v1"),
     ],
 )
 def test_list_models_queries_the_runner_of_the_configured_model(fake_runner, model, base_url):
@@ -117,3 +118,21 @@ def test_list_models_queries_the_runner_of_the_configured_model(fake_runner, mod
     LargeLanguageModel(model=model)
 
     assert FakeOpenAI.constructor_kwargs[0]["base_url"] == base_url
+
+
+@pytest.mark.parametrize(
+    ("served", "reported"),
+    [
+        (["qualcomm/qwen3_4b_instruct_2507:W4A16"], False),  # GenieX lists org/name:precision
+        (["qwen3_4b_instruct_2507"], False),
+        (["qualcomm/qwen3_vl_4b_instruct:W4A16"], True),
+    ],
+)
+def test_missing_model_is_reported_whatever_the_runner_id_format(fake_runner, monkeypatch, served, reported):
+    errors: list[str] = []
+    monkeypatch.setattr(local_llm_module.logger, "error", lambda message, *args, **kwargs: errors.append(message))
+    FakeOpenAI.outcomes = [served]
+
+    LargeLanguageModel(model="geniex:qwen3_4b_instruct_2507")
+
+    assert bool(errors) is reported

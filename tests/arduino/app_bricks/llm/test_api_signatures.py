@@ -117,6 +117,7 @@ def test_llm_public_methods_are_present():
 def test_llm_provider_prefix_constants_are_stable():
     """Local provider prefixes drive base_url/host routing in __init__."""
     assert LargeLanguageModel.GENIE_MODEL == "genie"
+    assert LargeLanguageModel.GENIEX_MODEL == "geniex"
     assert LargeLanguageModel.LLAMACPP_MODEL == "llamacpp"
 
 

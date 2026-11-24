@@ -1,0 +1,8 @@
+service_id: arduino:geniex
+name: GenieX QAIRT LLM/VLM service
+description: |
+  GenieX QAIRT LLM/VLM service runs Qualcomm AI Hub large language models (LLMs) and vision language models (VLMs)
+  on the Hexagon NPU through an OpenAI-compatible API, as a proof of concept next to the Genie service.
+category: ai
+supported_boards: ["ventunoq"]
+supported_model_types: ["geniex:*"]

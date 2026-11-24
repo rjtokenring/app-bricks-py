@@ -158,6 +158,7 @@ group "default" {
     "gesture-recognition-runner",
     "pose-estimation-runner",
     "llamacpp-npu-runner",
+    "geniex-runner",
     "edge-impulse-npu-runner",
     "ei-models-runner",
     "ei-qnn-models-runner",
@@ -323,6 +324,15 @@ target "llamacpp-npu-runner" {
   tags       = image_tags("llamacpp-npu-runner")
   cache-from = cache_from("llamacpp-npu-runner")
   cache-to   = cache_to("llamacpp-npu-runner")
+  contexts   = parent_context("qairt-common-base")
+}
+
+target "geniex-runner" {
+  inherits   = ["_downstream"]
+  context    = "containers/ai/geniex-runner"
+  tags       = image_tags("geniex-runner")
+  cache-from = cache_from("geniex-runner")
+  cache-to   = cache_to("geniex-runner")
   contexts   = parent_context("qairt-common-base")
 }
 

@@ -60,6 +60,7 @@ class LargeLanguageModel(CloudLLM):
     _logger = logger
 
     GENIE_MODEL = "genie"
+    GENIEX_MODEL = "geniex"
     LLAMACPP_MODEL = "llamacpp"
 
     def __init__(
@@ -75,7 +76,8 @@ class LargeLanguageModel(CloudLLM):
         """Initializes the LargeLanguageModel brick with the specified provider and configuration.
 
         Args:
-            model (str): The specific model name or identifier to use (e.g., "genie:qwen3_4b_instruct_2507").
+            model (str): The specific model name or identifier to use, prefixed by its runner: "genie:", "geniex:"
+                (GenieX QAIRT runner) or "llamacpp:" (e.g., "genie:qwen3_4b_instruct_2507").
                 If not provided, model will be determined from app configuration or default brick configuration.
             system_prompt (str): A system-level instruction that defines the AI's persona
                 and constraints (e.g., "You are a helpful assistant"). Defaults to empty.
@@ -120,10 +122,15 @@ class LargeLanguageModel(CloudLLM):
             raise ValueError("Model name must be provided either via constructor or configuration.")
 
         else:
-            if model.startswith(self.GENIE_MODEL):
+            # The provider is the prefix before ':' ("geniex:" also starts with "genie")
+            provider = model.split(":", 1)[0]
+            if provider == self.GENIE_MODEL:
                 port = 9001
                 host = "genie-models-runner"
-            elif model.startswith(self.LLAMACPP_MODEL):
+            elif provider == self.GENIEX_MODEL:
+                port = 18181
+                host = "geniex-models-runner"
+            elif provider == self.LLAMACPP_MODEL:
                 port = 9999
                 host = "llamacpp-models-runner"
             else:
@@ -132,8 +139,7 @@ class LargeLanguageModel(CloudLLM):
             base_url = f"http://{host}:{port}/v1"
 
         local_model_name = model
-        if model.startswith(self.GENIE_MODEL) or model.startswith(self.LLAMACPP_MODEL):
-            model = model.split(":")[-1]  # Extract model name without provider prefix
+        model = model.split(":")[-1]  # Extract model name without provider prefix
 
         logger.info(f"Initializing brick with model '{model}' at {base_url}")
 
@@ -157,7 +163,9 @@ class LargeLanguageModel(CloudLLM):
         self._runner_base_url = base_url
 
         available_models = self.list_models()
-        if plain_model_name not in available_models:
+        # The GenieX runner lists "<org>/<name>:<precision>" and serves the bare name
+        served_names = set(available_models) | {m.rsplit("/", 1)[-1].split(":", 1)[0] for m in available_models}
+        if plain_model_name not in served_names:
             logger.error(
                 f"Model '{plain_model_name}' not found among locally available models: {available_models}."
                 + " Please download the model or configure it correctly."

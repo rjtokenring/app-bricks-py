@@ -8,9 +8,10 @@ The VLM Brick is designed for applications that need visual understanding withou
 
 Use this Brick when your application needs to describe a camera frame, inspect a scene, extract visual details, or combine an image with a natural-language instruction. For example, the Smart Mirror example captures a USB camera frame, sends it to `VisionLanguageModel`, and displays a short styling response in a web UI.
 
-The Brick uses the model configured for `arduino:vlm` in Arduino App Lab. The model runs on one of two local runners, chosen by the prefix of its identifier:
+The Brick uses the model configured for `arduino:vlm` in Arduino App Lab. The model runs on one of the local runners, chosen by the prefix of its identifier:
 
 - `genie:` models, such as the default `genie:qwen3_vl_4b_instruct`, run on the Genie runner.
+- `geniex:` models, such as `geniex:qwen3_vl_4b_instruct`, run on the GenieX QAIRT runner, a proof of concept on the VENTUNO Q. It keeps one model loaded at a time.
 - `llamacpp:` models, such as `llamacpp:gemma-4-E2B_q4_0-it-multimodal`, run on the llama.cpp runner. The model must include its vision encoder: in the model catalog these are the models whose identifier ends in `-multimodal`.
 
 ## Features
@@ -132,6 +133,9 @@ requires_services:
   - id: arduino:genie
     when:
       model: "genie:*"
+  - id: arduino:geniex
+    when:
+      model: "geniex:*"
   - id: arduino:llamacpp
     when:
       model: "llamacpp:*"
@@ -181,7 +185,7 @@ In that example, the application continuously captures camera frames, keeps the 
 
 ### Model not found
 
-**Fix:** Verify that the selected VLM model is downloaded and available in App Lab. If you override the model, make sure the model identifier matches a model exposed by the local service its prefix names: `genie` for `genie:` models, `llamacpp` for `llamacpp:` models.
+**Fix:** Verify that the selected VLM model is downloaded and available in App Lab. If you override the model, make sure the model identifier matches a model exposed by the local service its prefix names: `genie` for `genie:` models, `geniex` for `geniex:` models, `llamacpp` for `llamacpp:` models.
 
 ### The model does not accept images
 

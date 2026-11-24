@@ -1,0 +1,46 @@
+services:
+  geniex-models-runner:
+    image: ${DOCKER_REGISTRY_BASE:-ghcr.io/arduino/}app-bricks/geniex-runner:__BRICKS_RELEASE_VERSION__
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+    environment:
+      - GENIEX_HOST=0.0.0.0:18181
+      - GENIEX_LOG=${GENIEX_LOG:-warn}
+      # One model stays loaded at a time; reloading a VLM takes tens of seconds, so keep it for a day when idle
+      - GENIEX_KEEPALIVE=${GENIEX_KEEPALIVE:-86400}
+      - GENIEX_POWER_MODE=${GENIEX_POWER_MODE:-burst}
+    ports:
+      - ${BIND_ADDRESS:-127.0.0.1}:18181:18181
+      - ${BIND_ADDRESS_IPV6:-[::1]}:18181:18181
+    # Add capability to allow process to modify resource limits
+    cap_add:
+      - SYS_RESOURCE
+    # Memory and resource limits for VLM/LLM model loading
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    oom_score_adj: -500
+    mem_limit: 12g
+    memswap_limit: 12g
+    shm_size: 2g
+    devices:
+      - /dev/dma_heap/system
+      - /dev/fastrpc-cdsp
+    volumes:
+      # Mount hexagon firmware
+      - /sys/firmware/devicetree/base/model:/run/device-model
+      # Read-only: /qairt-entrypoint.sh merges it into /usr/share/qcom in the container layer
+      - ${HOST_DSP_INSTALLATION_PATH:-/usr/share/qcom}:/run/host-qcom:ro
+      # Read-only: the runner serves the geniex_qairt bundles through links, it never writes there
+      - /var/lib/arduino-app-cli/models/genai/:/models/:ro
+    # geniex is PID 1 and handles SIGTERM by releasing the model; a SIGKILL with a model loaded leaves its NPU
+    # memory mapped until the board reboots, so give it time to exit
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
